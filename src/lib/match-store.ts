@@ -1,4 +1,11 @@
 import { useState, useEffect, useCallback } from "react";
+import {
+  dbGetMatches,
+  dbSaveMatch,
+  dbDeleteMatch,
+  dbClearAllMatches,
+  dbSubscribeToLive,
+} from "./supabase-service";
 
 /* ─────────────────────────────────────────────
    Types
@@ -38,6 +45,7 @@ export type LiveMatch = {
   startedAt: number | undefined;
   endedAt: number | undefined;
   officiatedBy: string | undefined;
+  tournamentSlug?: string | undefined;
 };
 
 /* ─────────────────────────────────────────────
@@ -126,58 +134,159 @@ export function getMatches(): LiveMatch[] {
   }
 }
 
-export function saveMatches(matches: LiveMatch[]): void {
+export function saveMatches(matches: LiveMatch[], syncToCloud = true): void {
   const { sanitized } = enforceFourCourtCapacity(matches);
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitized));
+  if (typeof window !== "undefined") {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitized));
+      window.dispatchEvent(new Event("dv_matches_updated"));
+    } catch {
+      // localStorage may be unavailable in SSR
+    }
+  }
+  if (syncToCloud) {
+    for (const m of sanitized) {
+      dbSaveMatch(m).catch((err) =>
+        console.warn("[Supabase] Match background sync failed:", err)
+      );
+    }
+  }
 }
 
 export function updateMatch(matchId: string, updater: (m: LiveMatch) => LiveMatch): LiveMatch[] {
   const all = getMatches();
-  const updated = all.map((m) => (m.id === matchId ? updater(m) : m));
-  saveMatches(updated);
+  let targetMatch: LiveMatch | undefined;
+  const updated = all.map((m) => {
+    if (m.id === matchId) {
+      targetMatch = updater(m);
+      return targetMatch;
+    }
+    return m;
+  });
+  saveMatches(updated, false);
+  if (targetMatch) {
+    dbSaveMatch(targetMatch).catch((err) =>
+      console.warn("[Supabase] Match update failed:", err)
+    );
+  }
   return updated;
 }
 
+export function deleteMatch(matchId: string): LiveMatch[] {
+  const all = getMatches();
+  const filtered = all.filter((m) => m.id !== matchId);
+  saveMatches(filtered, false);
+  dbDeleteMatch(matchId).catch((err) =>
+    console.warn("[Supabase] Match delete failed:", err)
+  );
+  return filtered;
+}
+
 /* ─────────────────────────────────────────────
-   React hook -- polls localStorage every 2s
+   React hook -- Cloud synced + Realtime live updates
 ───────────────────────────────────────────── */
 
-export function useMatchStore() {
+export function useMatchStore(tournamentSlug?: string) {
   const [matches, setMatches] = useState<LiveMatch[]>(() => getMatches());
+  const [isCloudSynced, setIsCloudSynced] = useState(false);
 
   const refresh = useCallback(() => {
     setMatches(getMatches());
   }, []);
 
   useEffect(() => {
-    // Poll every 2 seconds for same-tab updates
-    const interval = setInterval(refresh, 2000);
+    let mounted = true;
+    refresh();
 
-    // Listen for cross-tab updates via storage event
+    // 1. Initial Cloud Hydration from Supabase
+    dbGetMatches(tournamentSlug)
+      .then((cloudMatches) => {
+        if (mounted && cloudMatches.length > 0) {
+          saveMatches(cloudMatches, false);
+          setMatches(cloudMatches);
+          setIsCloudSynced(true);
+        }
+      })
+      .catch((err) => {
+        console.warn("[MatchStore] Initial cloud fetch failed, falling back to local:", err);
+      });
+
+    // 2. Realtime listener for cross-device updates (umpires, admin, spectators)
+    let unsubRealtime: (() => void) | null = null;
+    try {
+      unsubRealtime = dbSubscribeToLive(
+        () => {
+          // On any match change in database
+          dbGetMatches(tournamentSlug)
+            .then((cloudMatches) => {
+              if (mounted && cloudMatches.length > 0) {
+                saveMatches(cloudMatches, false);
+                setMatches(cloudMatches);
+                setIsCloudSynced(true);
+              }
+            })
+            .catch(() => {});
+        },
+        () => {
+          // Court changes trigger match refresh
+          dbGetMatches(tournamentSlug)
+            .then((cloudMatches) => {
+              if (mounted && cloudMatches.length > 0) {
+                saveMatches(cloudMatches, false);
+                setMatches(cloudMatches);
+              }
+            })
+            .catch(() => {});
+        }
+      );
+    } catch (err) {
+      console.warn("[MatchStore] Realtime subscription error:", err);
+    }
+
+    // 3. Cross-tab storage listeners
     const handleStorage = (e: StorageEvent) => {
       if (e.key === STORAGE_KEY) {
         refresh();
       }
     };
+    const handleCustom = () => {
+      refresh();
+    };
+
     window.addEventListener("storage", handleStorage);
+    window.addEventListener("dv_matches_updated", handleCustom);
 
     return () => {
-      clearInterval(interval);
+      mounted = false;
+      if (unsubRealtime) {
+        try {
+          unsubRealtime();
+        } catch {}
+      }
       window.removeEventListener("storage", handleStorage);
+      window.removeEventListener("dv_matches_updated", handleCustom);
     };
-  }, [refresh]);
+  }, [refresh, tournamentSlug]);
 
   const update = useCallback((matchId: string, updater: (m: LiveMatch) => LiveMatch) => {
     const updated = updateMatch(matchId, updater);
     setMatches(updated);
   }, []);
 
-  const resetAll = useCallback(() => {
-    saveMatches([]);
-    setMatches([]);
+  const removeMatch = useCallback((matchId: string) => {
+    const remaining = deleteMatch(matchId);
+    setMatches(remaining);
   }, []);
 
-  return { matches, refresh, update, resetAll };
+  const resetAll = useCallback(() => {
+    saveMatches([], false);
+    setMatches([]);
+    dbClearAllMatches().catch((err) =>
+      console.warn("[Supabase] Clear all matches failed:", err)
+    );
+  }, []);
+
+  return { matches, refresh, update, deleteMatch: removeMatch, resetAll, isCloudSynced };
 }
 
 /* ─────────────────────────────────────────────

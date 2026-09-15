@@ -187,23 +187,29 @@ export async function dbDeleteTournament(slug: string): Promise<boolean> {
 }
 
 /**
- * Fetch matches for a tournament from Supabase.
+/**
+ * Fetch matches from Supabase.
+ * If tournamentSlug is provided, filters by tournament; otherwise returns all active matches.
  */
-export async function dbGetMatches(tournamentSlug: string): Promise<LiveMatch[]> {
+export async function dbGetMatches(tournamentSlug?: string): Promise<LiveMatch[]> {
   try {
-    const { data: tourney } = await supabase
-      .from("tournaments")
-      .select("id")
-      .eq("slug", tournamentSlug)
-      .single();
+    let query = supabase.from("matches").select("*");
 
-    if (!tourney) return [];
+    if (tournamentSlug) {
+      const { data: tourney } = await supabase
+        .from("tournaments")
+        .select("id")
+        .eq("slug", tournamentSlug)
+        .maybeSingle();
 
-    const { data: dbMatches, error } = await supabase
-      .from("matches")
-      .select("*")
-      .eq("tournament_id", tourney.id)
-      .order("created_at", { ascending: true });
+      if (tourney?.id) {
+        query = query.or(`tournament_id.eq.${tourney.id},tournament_slug.eq.${tournamentSlug}`);
+      } else {
+        query = query.eq("tournament_slug", tournamentSlug);
+      }
+    }
+
+    const { data: dbMatches, error } = await query.order("created_at", { ascending: true });
 
     if (error || !dbMatches) return [];
 
@@ -211,7 +217,7 @@ export async function dbGetMatches(tournamentSlug: string): Promise<LiveMatch[]>
       const score: LiveScore = {
         teamAScore: m.team_a_score,
         teamBScore: m.team_b_score,
-        servingTeam: m.serving_team as "A" | "B",
+        servingTeam: (m.serving_team as "A" | "B") || "A",
         serverNumber: (m.server_number as 1 | 2) || 1,
         rallies: Array.isArray(m.rallies) ? (m.rallies as any) : [],
       };
@@ -229,6 +235,7 @@ export async function dbGetMatches(tournamentSlug: string): Promise<LiveMatch[]>
         startedAt: m.started_at ? new Date(m.started_at).getTime() : undefined,
         endedAt: m.ended_at ? new Date(m.ended_at).getTime() : undefined,
         officiatedBy: m.officiated_by || undefined,
+        tournamentSlug: m.tournament_slug || tournamentSlug || undefined,
       };
     });
   } catch (err) {
@@ -238,36 +245,31 @@ export async function dbGetMatches(tournamentSlug: string): Promise<LiveMatch[]>
 }
 
 /**
- * Save or update match state (live score, rallies, status, court).
+ * Save or update match state in Supabase.
  */
 export async function dbSaveMatch(
-  tournamentSlug: string,
-  match: LiveMatch
+  match: LiveMatch,
+  tournamentSlug?: string
 ): Promise<boolean> {
   try {
-    const { data: tourney } = await supabase
-      .from("tournaments")
-      .select("id")
-      .eq("slug", tournamentSlug)
-      .single();
+    const slug = match.tournamentSlug || tournamentSlug;
+    let tourneyId: string | null = null;
 
-    if (!tourney) return false;
-
-    // Get primary category for the tournament
-    const { data: cat } = await supabase
-      .from("categories")
-      .select("id")
-      .eq("tournament_id", tourney.id)
-      .limit(1)
-      .single();
-
-    const categoryId = cat?.id;
-    if (!categoryId) return false;
+    if (slug) {
+      const { data: tourney } = await supabase
+        .from("tournaments")
+        .select("id")
+        .eq("slug", slug)
+        .maybeSingle();
+      if (tourney) {
+        tourneyId = tourney.id;
+      }
+    }
 
     const { error } = await supabase.from("matches").upsert({
       id: match.id,
-      tournament_id: tourney.id,
-      category_id: categoryId,
+      tournament_id: tourneyId,
+      tournament_slug: slug || null,
       court: match.court,
       team_a_name: match.teamAName,
       team_a_players: match.teamAPlayers,
@@ -278,7 +280,7 @@ export async function dbSaveMatch(
       team_b_score: match.score.teamBScore,
       serving_team: match.score.servingTeam,
       server_number: match.score.serverNumber,
-      rallies: match.score.rallies,
+      rallies: match.score.rallies as any,
       winner_team: match.winnerTeam || null,
       started_at: match.startedAt ? new Date(match.startedAt).toISOString() : null,
       ended_at: match.endedAt ? new Date(match.endedAt).toISOString() : null,
@@ -299,6 +301,30 @@ export async function dbSaveMatch(
 }
 
 /**
+ * Delete a single match from Supabase.
+ */
+export async function dbDeleteMatch(matchId: string): Promise<boolean> {
+  try {
+    const { error } = await supabase.from("matches").delete().eq("id", matchId);
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Delete all matches from Supabase.
+ */
+export async function dbClearAllMatches(): Promise<boolean> {
+  try {
+    const { error } = await supabase.from("matches").delete().neq("id", "");
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Fetch court station statuses (Courts 1–4).
  */
 export async function dbGetCourtStations(): Promise<Record<string, any>> {
@@ -312,6 +338,9 @@ export async function dbGetCourtStations(): Promise<Record<string, any>> {
         court: station.court_name,
         currentMatchId: station.current_match_id,
         onDeckMatchId: station.on_deck_match_id,
+        assignedUmpire: station.assigned_umpire,
+        dispatchedAt: station.dispatched_at ? new Date(station.dispatched_at).getTime() : null,
+        maintenanceNote: station.maintenance_note,
         status: station.status,
       };
     }
@@ -327,15 +356,27 @@ export async function dbGetCourtStations(): Promise<Record<string, any>> {
  */
 export async function dbUpdateCourtStation(
   courtName: string,
-  updates: { status?: string; currentMatchId?: string | null; onDeckMatchId?: string | null }
+  updates: {
+    status?: string;
+    currentMatchId?: string | null;
+    onDeckMatchId?: string | null;
+    assignedUmpire?: string | null;
+    dispatchedAt?: number | null;
+    maintenanceNote?: string | null;
+  }
 ): Promise<void> {
   try {
     await supabase
       .from("court_stations")
       .update({
-        ...(updates.status ? { status: updates.status } : {}),
+        ...(updates.status !== undefined ? { status: updates.status } : {}),
         ...(updates.currentMatchId !== undefined ? { current_match_id: updates.currentMatchId } : {}),
         ...(updates.onDeckMatchId !== undefined ? { on_deck_match_id: updates.onDeckMatchId } : {}),
+        ...(updates.assignedUmpire !== undefined ? { assigned_umpire: updates.assignedUmpire } : {}),
+        ...(updates.dispatchedAt !== undefined
+          ? { dispatched_at: updates.dispatchedAt ? new Date(updates.dispatchedAt).toISOString() : null }
+          : {}),
+        ...(updates.maintenanceNote !== undefined ? { maintenance_note: updates.maintenanceNote } : {}),
         updated_at: new Date().toISOString(),
       })
       .eq("court_name", courtName);

@@ -82,24 +82,33 @@ export type Database = {
       }
       court_stations: {
         Row: {
+          assigned_umpire: string | null
           court_name: string
           current_match_id: string | null
+          dispatched_at: string | null
+          maintenance_note: string | null
           on_deck_match_id: string | null
           status: string
           tournament_id: string | null
           updated_at: string | null
         }
         Insert: {
+          assigned_umpire?: string | null
           court_name: string
           current_match_id?: string | null
+          dispatched_at?: string | null
+          maintenance_note?: string | null
           on_deck_match_id?: string | null
           status?: string
           tournament_id?: string | null
           updated_at?: string | null
         }
         Update: {
+          assigned_umpire?: string | null
           court_name?: string
           current_match_id?: string | null
+          dispatched_at?: string | null
+          maintenance_note?: string | null
           on_deck_match_id?: string | null
           status?: string
           tournament_id?: string | null
@@ -117,7 +126,7 @@ export type Database = {
       }
       matches: {
         Row: {
-          category_id: string
+          category_id: string | null
           court: string
           created_at: string | null
           ended_at: string | null
@@ -138,12 +147,13 @@ export type Database = {
           team_b_name: string
           team_b_players: string[] | null
           team_b_score: number
-          tournament_id: string
+          tournament_id: string | null
+          tournament_slug: string | null
           updated_at: string | null
           winner_team: string | null
         }
         Insert: {
-          category_id: string
+          category_id?: string | null
           court?: string
           created_at?: string | null
           ended_at?: string | null
@@ -164,12 +174,13 @@ export type Database = {
           team_b_name: string
           team_b_players?: string[] | null
           team_b_score?: number
-          tournament_id: string
+          tournament_id?: string | null
+          tournament_slug?: string | null
           updated_at?: string | null
           winner_team?: string | null
         }
         Update: {
-          category_id?: string
+          category_id?: string | null
           court?: string
           created_at?: string | null
           ended_at?: string | null
@@ -190,7 +201,8 @@ export type Database = {
           team_b_name?: string
           team_b_players?: string[] | null
           team_b_score?: number
-          tournament_id?: string
+          tournament_id?: string | null
+          tournament_slug?: string | null
           updated_at?: string | null
           winner_team?: string | null
         }

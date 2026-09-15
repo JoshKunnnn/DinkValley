@@ -3,6 +3,10 @@ import {
   saveMatches,
   type LiveMatch,
 } from "./match-store";
+import {
+  dbUpdateCourtStation,
+  dbGetCourtStations,
+} from "./supabase-service";
 
 /* ─────────────────────────────────────────────
    Facility 4 Courts Definition
@@ -127,12 +131,27 @@ export function getCourtStations(): Record<FacilityCourt, CourtStation> {
   }
 }
 
-export function saveCourtStations(stations: Record<FacilityCourt, CourtStation>): void {
+export function saveCourtStations(stations: Record<FacilityCourt, CourtStation>, syncToCloud = true): void {
   try {
     localStorage.setItem(STATIONS_KEY, JSON.stringify(stations));
     window.dispatchEvent(new Event("storage"));
   } catch {
     // ignore
+  }
+  if (syncToCloud) {
+    for (const court of FACILITY_COURTS) {
+      const st = stations[court];
+      if (st) {
+        dbUpdateCourtStation(court, {
+          status: st.status,
+          currentMatchId: st.currentMatchId,
+          onDeckMatchId: st.onDeckMatchId,
+          assignedUmpire: st.assignedUmpire,
+          dispatchedAt: st.dispatchedAt,
+          maintenanceNote: st.maintenanceNote,
+        }).catch(() => {});
+      }
+    }
   }
 }
 
@@ -241,6 +260,7 @@ export function dispatchMatchToCourt(
   court: FacilityCourt,
   match: {
     id: string;
+    tournamentSlug?: string | undefined;
     teamAName: string;
     teamAPlayers?: string[] | undefined;
     teamBName: string;
@@ -259,6 +279,7 @@ export function dispatchMatchToCourt(
       matchFound = true;
       return {
         ...m,
+        tournamentSlug: match.tournamentSlug ?? m.tournamentSlug,
         court,
         status: startImmediately ? ("live" as const) : ("scheduled" as const),
         startedAt: startImmediately ? (m.startedAt ?? now) : m.startedAt,
@@ -271,6 +292,7 @@ export function dispatchMatchToCourt(
   if (!matchFound) {
     updatedMatches.push({
       id: match.id,
+      tournamentSlug: match.tournamentSlug,
       court,
       teamAName: match.teamAName,
       teamAPlayers: match.teamAPlayers ?? [],
@@ -400,6 +422,55 @@ export function setCourtOnDeck(court: FacilityCourt, matchId: string | null): vo
     const updated = queue.map((q) => (q.matchId === matchId ? { ...q, status: "on_deck" as const, assignedCourt: court } : q));
     saveDispatchQueue(updated);
   }
+}
+
+/**
+ * Assigns or claims an umpire for a specific court station.
+ */
+export function claimCourtStation(court: FacilityCourt, umpire: string): void {
+  const stations = getCourtStations();
+  stations[court] = {
+    ...stations[court],
+    assignedUmpire: umpire,
+  };
+  saveCourtStations(stations);
+}
+
+/**
+ * Releases umpire assignment from a court station.
+ */
+export function releaseCourtStation(court: FacilityCourt): void {
+  const stations = getCourtStations();
+  stations[court] = {
+    ...stations[court],
+    assignedUmpire: null,
+  };
+  saveCourtStations(stations);
+}
+
+/**
+ * Hydrates court stations from Supabase cloud database into local storage.
+ */
+export async function hydrateCourtStationsFromCloud(): Promise<Record<FacilityCourt, CourtStation>> {
+  try {
+    const cloudStations = await dbGetCourtStations();
+    if (cloudStations && Object.keys(cloudStations).length > 0) {
+      const local = getCourtStations();
+      for (const court of FACILITY_COURTS) {
+        if (cloudStations[court]) {
+          local[court] = {
+            ...local[court],
+            ...cloudStations[court],
+          };
+        }
+      }
+      saveCourtStations(local, false);
+      return local;
+    }
+  } catch (err) {
+    console.warn("[CourtDispatch] Could not hydrate stations from cloud:", err);
+  }
+  return getCourtStations();
 }
 
 /**
