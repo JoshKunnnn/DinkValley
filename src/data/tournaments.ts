@@ -48,6 +48,7 @@ export type Category = {
   label: string;
   level: "Beginners" | "Novice" | "Intermediate" | "Advance" | "Open";
   division: "Men's" | "Women's" | "Mixed" | "Open";
+  fee?: string | undefined;
   teams: Team[];
   pools: PoolMatch[];
   standings: Standing[];
@@ -62,7 +63,7 @@ export type Tournament = {
   date: string;
   venue: string;
   city: string;
-  entryFee: string;
+  entryFee?: string | undefined;
   format: string;
   teamsCount: number;
   categories: Category[];

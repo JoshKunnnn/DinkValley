@@ -16,15 +16,16 @@ type PresetCategory = {
   label: string;
   level: Category["level"];
   division: Category["division"];
+  defaultFee: string;
 };
 
 const PRESET_CATEGORIES: PresetCategory[] = [
-  { label: "Open Championship", level: "Open", division: "Open" },
-  { label: "Open Mixed Doubles", level: "Open", division: "Mixed" },
-  { label: "Advance Men's Doubles", level: "Advance", division: "Men's" },
-  { label: "Intermediate Women's Doubles", level: "Intermediate", division: "Women's" },
-  { label: "Novice Mixed Doubles", level: "Novice", division: "Mixed" },
-  { label: "Beginners Men's Doubles", level: "Beginners", division: "Men's" },
+  { label: "Open Championship", level: "Open", division: "Open", defaultFee: "PHP 1,500 per team" },
+  { label: "Open Mixed Doubles", level: "Open", division: "Mixed", defaultFee: "PHP 1,200 per team" },
+  { label: "Advance Men's Doubles", level: "Advance", division: "Men's", defaultFee: "PHP 1,000 per team" },
+  { label: "Intermediate Women's Doubles", level: "Intermediate", division: "Women's", defaultFee: "PHP 900 per team" },
+  { label: "Novice Mixed Doubles", level: "Novice", division: "Mixed", defaultFee: "PHP 800 per team" },
+  { label: "Beginners Men's Doubles", level: "Beginners", division: "Men's", defaultFee: "PHP 700 per team" },
 ];
 
 export function TournamentsManager({
@@ -46,7 +47,6 @@ export function TournamentsManager({
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [customDate, setCustomDate] = useState("");
-  const [entryFee, setEntryFee] = useState("PHP 900 per player");
   const [format, setFormat] = useState("Round robin pools, top 4 advance to playoffs");
   const [status, setStatus] = useState<Tournament["status"]>("Registration open");
 
@@ -65,6 +65,7 @@ export function TournamentsManager({
       label: "Open Championship",
       level: "Open",
       division: "Open",
+      fee: "PHP 1,500 per team",
       teams: [],
       pools: [],
       standings: [],
@@ -75,6 +76,7 @@ export function TournamentsManager({
       label: "Novice Mixed Doubles",
       level: "Novice",
       division: "Mixed",
+      fee: "PHP 800 per team",
       teams: [],
       pools: [],
       standings: [],
@@ -86,6 +88,7 @@ export function TournamentsManager({
   const [customCategoryLabel, setCustomCategoryLabel] = useState("");
   const [customLevel, setCustomLevel] = useState<Category["level"]>("Intermediate");
   const [customDivision, setCustomDivision] = useState<Category["division"]>("Men's");
+  const [customFee, setCustomFee] = useState("PHP 1,000 per team");
 
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -108,6 +111,7 @@ export function TournamentsManager({
           label: preset.label,
           level: preset.level,
           division: preset.division,
+          fee: preset.defaultFee,
           teams: [],
           pools: [],
           standings: [],
@@ -128,6 +132,7 @@ export function TournamentsManager({
         label,
         level: customLevel,
         division: customDivision,
+        fee: customFee.trim() || undefined,
         teams: [],
         pools: [],
         standings: [],
@@ -135,6 +140,13 @@ export function TournamentsManager({
       },
     ]);
     setCustomCategoryLabel("");
+    setCustomFee("PHP 1,000 per team");
+  };
+
+  const handleUpdateCategoryFee = (id: CategoryId, fee: string) => {
+    setSelectedCategories((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, fee } : c))
+    );
   };
 
   const handleRemoveCategory = (id: CategoryId) => {
@@ -181,7 +193,6 @@ export function TournamentsManager({
       date: dateString,
       venue: venue.trim() || "Santiago City",
       city: city.trim() || "Santiago City",
-      entryFee: entryFee.trim(),
       format: format.trim(),
       categories: selectedCategories,
       rules,
@@ -407,20 +418,8 @@ export function TournamentsManager({
               </div>
             </div>
 
-            {/* Fee, Format, Status */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              <div>
-                <label className="block text-xs font-bold uppercase tracking-wider text-foreground mb-1.5">
-                  Entry Fee
-                </label>
-                <input
-                  type="text"
-                  value={entryFee}
-                  onChange={(e) => setEntryFee(e.target.value)}
-                  placeholder="PHP 900 per player"
-                  className="w-full rounded-md border border-input bg-background/60 px-3.5 py-2.5 text-sm text-foreground placeholder:text-muted-foreground/60 focus:border-pickle focus:ring-2 focus:ring-pickle/20 focus:bg-background focus:outline-none transition-all shadow-xs"
-                />
-              </div>
+            {/* Format & Status */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
                 <label className="block text-xs font-bold uppercase tracking-wider text-foreground mb-1.5">
                   Format
@@ -459,7 +458,7 @@ export function TournamentsManager({
                   Tournament Categories ({selectedCategories.length})
                 </h4>
                 <p className="text-xs text-muted-foreground">
-                  Select standard preset categories or add custom division brackets.
+                  Each category has its own pricing, kept private for administrative operations.
                 </p>
               </div>
 
@@ -490,7 +489,7 @@ export function TournamentsManager({
                         <div className="min-w-0">
                           <span className="block font-bold text-foreground truncate">{preset.label}</span>
                           <span className="block text-[0.7rem] text-muted-foreground mt-0.5">
-                            {preset.level} · {preset.division}
+                            {preset.level} · {preset.division} · {preset.defaultFee}
                           </span>
                         </div>
                       </label>
@@ -502,9 +501,9 @@ export function TournamentsManager({
               {/* Add Custom Category */}
               <div className="p-4 rounded-lg border border-border bg-muted/40 space-y-3">
                 <span className="block text-xs uppercase tracking-wider text-foreground font-bold">
-                  + Add Custom Division
+                  + Add Custom Division &amp; Pricing
                 </span>
-                <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end">
+                <div className="grid grid-cols-1 sm:grid-cols-5 gap-3 items-end">
                   <div className="sm:col-span-2">
                     <label className="block text-[0.65rem] uppercase tracking-wider text-muted-foreground mb-1 font-semibold">
                       Division Label
@@ -548,6 +547,18 @@ export function TournamentsManager({
                       <option value="Open">Open</option>
                     </select>
                   </div>
+                  <div>
+                    <label className="block text-[0.65rem] uppercase tracking-wider text-muted-foreground mb-1 font-semibold">
+                      Category Fee
+                    </label>
+                    <input
+                      type="text"
+                      value={customFee}
+                      onChange={(e) => setCustomFee(e.target.value)}
+                      placeholder="PHP 1,000 per team"
+                      className="w-full rounded border border-input bg-background px-3 py-2 text-xs text-foreground placeholder:text-muted-foreground/60 focus:border-pickle focus:ring-1 focus:ring-pickle focus:outline-none shadow-xs font-medium"
+                    />
+                  </div>
                 </div>
                 <button
                   type="button"
@@ -558,33 +569,54 @@ export function TournamentsManager({
                 </button>
               </div>
 
-              {/* Selected Categories List */}
+              {/* Selected Categories List with Per-Category Pricing */}
               <div>
-                <span className="block text-xs uppercase tracking-wider text-foreground/80 mb-2 font-bold">
-                  Categories to be Created ({selectedCategories.length}):
-                </span>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="block text-xs uppercase tracking-wider text-foreground/80 font-bold">
+                    Categories &amp; Division Fees ({selectedCategories.length}):
+                  </span>
+                  <span className="text-[0.65rem] text-muted-foreground">
+                    Fees are stored privately for administration
+                  </span>
+                </div>
                 {selectedCategories.length === 0 ? (
                   <p className="text-xs text-brick font-semibold">
                     No categories selected. Please choose or add at least one category.
                   </p>
                 ) : (
-                  <div className="flex flex-wrap gap-2">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                     {selectedCategories.map((c) => (
-                      <span
+                      <div
                         key={c.id}
-                        className="inline-flex items-center gap-2 border border-border bg-background px-3 py-1.5 rounded-full text-xs text-foreground shadow-xs"
+                        className="flex items-center justify-between gap-3 border border-border bg-background p-2.5 rounded-lg text-xs text-foreground shadow-xs"
                       >
-                        <span className="font-semibold text-foreground">{c.label}</span>
-                        <span className="text-[0.65rem] font-bold text-pickle uppercase">({c.level} / {c.division})</span>
-                        <button
-                          type="button"
-                          onClick={() => handleRemoveCategory(c.id)}
-                          className="text-muted-foreground hover:text-brick text-sm cursor-pointer ml-0.5 font-bold"
-                          title="Remove category"
-                        >
-                          x
-                        </button>
-                      </span>
+                        <div className="min-w-0 flex-1">
+                          <span className="font-bold text-foreground block truncate">{c.label}</span>
+                          <span className="text-[0.65rem] font-bold text-pickle uppercase">
+                            {c.level} · {c.division}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2 flex-shrink-0">
+                          <label className="text-[0.65rem] uppercase tracking-wider text-muted-foreground font-semibold">
+                            Fee:
+                          </label>
+                          <input
+                            type="text"
+                            value={c.fee || ""}
+                            onChange={(e) => handleUpdateCategoryFee(c.id, e.target.value)}
+                            placeholder="No fee set"
+                            className="w-28 sm:w-32 rounded border border-input bg-card px-2 py-1 text-xs text-foreground focus:border-pickle focus:outline-none font-medium"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveCategory(c.id)}
+                            className="text-muted-foreground hover:text-brick text-sm cursor-pointer ml-1 font-bold p-1"
+                            title="Remove category"
+                          >
+                            x
+                          </button>
+                        </div>
+                      </div>
                     ))}
                   </div>
                 )}
@@ -723,7 +755,7 @@ export function TournamentsManager({
                             <strong className="text-foreground font-semibold">Venue:</strong> {t.venue}
                           </span>
                           <span>
-                            <strong className="text-foreground font-semibold">Fee:</strong> {t.entryFee}
+                            <strong className="text-foreground font-semibold">Pricing:</strong> Category-based (Internal)
                           </span>
                         </div>
                       </div>
@@ -758,7 +790,7 @@ export function TournamentsManager({
                             key={c.id}
                             className="bg-muted/50 border border-border px-2.5 py-1 rounded text-[0.7rem] text-foreground/80 font-medium"
                           >
-                            {c.label} ({c.teams?.length || 0} teams)
+                            {c.label} {c.fee ? `· ${c.fee}` : ""} ({c.teams?.length || 0} teams)
                           </span>
                         ))}
                       </div>

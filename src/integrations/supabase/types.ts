@@ -1,4 +1,4 @@
-﻿export type Json =
+export type Json =
   | string
   | number
   | boolean
@@ -44,6 +44,7 @@ export type Database = {
           category_slug: string
           created_at: string | null
           division: string
+          entry_fee: string | null
           id: string
           label: string
           level: string
@@ -53,6 +54,7 @@ export type Database = {
           category_slug: string
           created_at?: string | null
           division: string
+          entry_fee?: string | null
           id?: string
           label: string
           level: string
@@ -62,6 +64,7 @@ export type Database = {
           category_slug?: string
           created_at?: string | null
           division?: string
+          entry_fee?: string | null
           id?: string
           label?: string
           level?: string
@@ -233,7 +236,7 @@ export type Database = {
         Insert: {
           created_at?: string | null
           email?: string | null
-          id: string
+          id?: string
           name?: string | null
           role?: string
         }

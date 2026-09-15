@@ -122,7 +122,7 @@ function TournamentPage() {
             {[
               ["Dates", t.date],
               ["Venue", `${t.venue}, ${t.city}`],
-              ["Entry", t.entryFee],
+              ["Divisions", `${t.categories?.length || 0} Categories`],
               ["Format", t.format],
             ].map(([label, value]) => (
               <div key={label} className="border-l-2 border-pickle pl-3">

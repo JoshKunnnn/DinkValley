@@ -69,7 +69,7 @@ export type NewTournamentInput = {
   date: string;
   venue: string;
   city: string;
-  entryFee: string;
+  entryFee?: string;
   format: string;
   categories: Category[];
   schedule?: { time: string; title: string; detail: string }[];
@@ -99,7 +99,7 @@ export function addTournament(input: NewTournamentInput): Tournament {
     date: input.date.trim(),
     venue: input.venue.trim(),
     city: input.city.trim(),
-    entryFee: input.entryFee.trim(),
+    entryFee: input.entryFee?.trim() || undefined,
     format: input.format.trim(),
     teamsCount: input.categories.reduce((acc, c) => acc + (c.teams?.length || 0), 0),
     categories: input.categories,

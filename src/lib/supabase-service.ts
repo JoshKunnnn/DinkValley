@@ -45,6 +45,7 @@ export async function dbGetTournaments(): Promise<Tournament[]> {
           label: c.label,
           level: c.level as Category["level"],
           division: c.division as Category["division"],
+          fee: c.entry_fee || undefined,
           teams,
           pools: [],
           standings: [],
@@ -65,7 +66,7 @@ export async function dbGetTournaments(): Promise<Tournament[]> {
         date: t.date || "TBD",
         venue: t.venue || "Santiago City",
         city: t.city || "Santiago City",
-        entryFee: t.entry_fee || "PHP 900 per player",
+        entryFee: t.entry_fee || undefined,
         format: t.format || "Round robin pools, top 4 advance to playoffs",
         teamsCount: categories.reduce((acc, c) => acc + c.teams.length, 0),
         categories,
@@ -96,7 +97,7 @@ export async function dbSaveTournament(t: Tournament): Promise<boolean> {
           date: t.date,
           venue: t.venue,
           city: t.city,
-          entry_fee: t.entryFee,
+          entry_fee: t.entryFee || null,
           format: t.format,
           rules: t.rules,
           schedule: t.schedule,
@@ -125,6 +126,7 @@ export async function dbSaveTournament(t: Tournament): Promise<boolean> {
             label: cat.label,
             level: cat.level,
             division: cat.division,
+            entry_fee: cat.fee || null,
           },
           { onConflict: "tournament_id,category_slug" }
         )
