@@ -85,14 +85,7 @@ function Index() {
             <p className="mt-2 text-sm text-muted-foreground max-w-md mx-auto">
               There are currently no tournaments scheduled. Check back soon for announcements, or visit the tournament desk for upcoming schedules.
             </p>
-            <div className="mt-6">
-              <Link
-                to="/admin"
-                className="inline-block border border-pickle px-5 py-2 text-xs font-bold uppercase tracking-widest text-pickle hover:bg-pickle/10 transition-colors"
-              >
-                Go to Admin Console
-              </Link>
-            </div>
+
           </div>
         ) : (
           /* Responsive grid: 1 col mobile → 2 col sm → 3 col lg */

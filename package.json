@@ -9,7 +9,9 @@
     "build:dev": "vite build --mode development",
     "preview": "vite preview",
     "lint": "eslint .",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "seed:teams": "tsx scripts/seed-32-teams.ts",
+    "clear:teams": "tsx scripts/clear-teams.ts"
   },
   "overrides": {
     "rolldown": "1.2.1"

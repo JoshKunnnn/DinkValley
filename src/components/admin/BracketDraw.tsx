@@ -1,6 +1,9 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import type { Team, Tournament, Category } from "@/data/tournaments";
-import { syncDrawnBracketsToLiveMatches } from "@/lib/match-store";
+import { syncDrawnBracketsToLiveMatches, purgeMatchesForCategory } from "@/lib/match-store";
+import { bulkSetTeamsInCategory, deleteAllTeamsInCategory } from "@/lib/tournament-store";
+import { generate32Teams } from "@/lib/team-generator";
+import { addMatchesToQueue, purgeQueueForCategory } from "@/lib/court-dispatch";
 
 export type BracketSlot = {
   team: Team | null;
@@ -19,6 +22,52 @@ export function saveDrawnGroups(tournamentSlug: string, categoryId: string, grou
   try {
     localStorage.setItem(`dv_drawn_groups_${tournamentSlug}_${categoryId}`, JSON.stringify(groups));
     syncDrawnBracketsToLiveMatches(tournamentSlug, categoryId, groups);
+
+    // Auto-enqueue newly drawn matches into dispatch queue
+    const drawnMatches: {
+      matchId: string;
+      tournamentSlug: string;
+      categoryId: string;
+      stage: string;
+      teamAName: string;
+      teamAPlayers: string[];
+      teamBName: string;
+      teamBPlayers: string[];
+    }[] = [];
+
+    for (const group of groups) {
+      if (!group.isDrawn && !group.slots.some((s) => s.team !== null)) continue;
+      const teams = group.slots
+        .map((s) => s.team)
+        .filter((t): t is Team => t !== null);
+
+      for (let i = 0; i < teams.length; i++) {
+        for (let j = i + 1; j < teams.length; j++) {
+          const teamA = teams[i]!;
+          const teamB = teams[j]!;
+          const matchId = `live-${tournamentSlug}-${categoryId}-${group.letter}-${i + 1}v${j + 1}`;
+          drawnMatches.push({
+            matchId,
+            tournamentSlug,
+            categoryId,
+            stage: `Bracket ${group.letter} (Pool Play)`,
+            teamAName: teamA.name,
+            teamAPlayers: teamA.players || [],
+            teamBName: teamB.name,
+            teamBPlayers: teamB.players || [],
+          });
+        }
+      }
+    }
+
+    if (drawnMatches.length > 0) {
+      addMatchesToQueue(drawnMatches);
+    }
+
+    window.dispatchEvent(new Event("dv_drawn_groups_updated"));
+    window.dispatchEvent(new Event("dv_dispatch_queue_updated"));
+    window.dispatchEvent(new Event("dv_live_matches_updated"));
+    window.dispatchEvent(new Event("storage"));
   } catch {
     // ignore
   }
@@ -32,6 +81,28 @@ export function getDrawnGroups(tournamentSlug: string, categoryId: string): Brac
   } catch {
     return null;
   }
+}
+
+export function resetDrawnGroups(tournamentSlug: string, categoryId: string): void {
+  try {
+    localStorage.removeItem(`dv_drawn_groups_${tournamentSlug}_${categoryId}`);
+    localStorage.removeItem(`dv_main_draw_${tournamentSlug}_${categoryId}`);
+  } catch {
+    // ignore
+  }
+
+  // Purge matches from live match store & database
+  purgeMatchesForCategory(tournamentSlug, categoryId);
+
+  // Purge matches from court dispatch queue & reset court stations
+  purgeQueueForCategory(tournamentSlug, categoryId);
+
+  // Broadcast real-time update events across all tabs, components, and spectator views
+  window.dispatchEvent(new Event("dv_drawn_groups_updated"));
+  window.dispatchEvent(new Event("dv_main_draw_updated"));
+  window.dispatchEvent(new Event("dv_dispatch_queue_updated"));
+  window.dispatchEvent(new Event("dv_live_matches_updated"));
+  window.dispatchEvent(new Event("storage"));
 }
 
 interface BracketDrawProps {
@@ -82,13 +153,33 @@ export function BracketDraw({
   const [isAutoPlaying, setIsAutoPlaying] = useState(false);
   const animCancelRef = useRef(false);
 
-  // Re-seed and prepare empty groups whenever tournament, category, or bracket count changes
+  // Restore previously drawn groups or prepare initial empty standby groups
   useEffect(() => {
     animCancelRef.current = true;
     setDrawingBracketIdx(-1);
     setIsAutoPlaying(false);
-    setDrawnCount(0);
 
+    // Check if brackets were already drawn for this tournament & category
+    const existingDrawn = getDrawnGroups(tournamentSlug, categoryId);
+    if (existingDrawn && existingDrawn.length > 0) {
+      const drawnNum = existingDrawn.filter((g) => g.isDrawn).length;
+      if (drawnNum > 0) {
+        setGroups(existingDrawn);
+        setDrawnCount(drawnNum);
+        const buckets: Team[][] = existingDrawn.map((g) =>
+          g.slots.map((s) => s.team).filter((t): t is Team => t !== null)
+        );
+        setTeamsByGroup(buckets);
+        if (existingDrawn.length !== numBrackets) {
+          setNumBrackets(existingDrawn.length);
+        }
+        // Ensure live matches are synced into match store
+        syncDrawnBracketsToLiveMatches(tournamentSlug, categoryId, existingDrawn);
+        return;
+      }
+    }
+
+    setDrawnCount(0);
     const safeTeams = category?.teams || [];
     const n = Math.max(1, Math.min(numBrackets, Math.ceil(safeTeams.length / 2) || 1));
     const shuffledTeams = shuffle(safeTeams);
@@ -108,7 +199,7 @@ export function BracketDraw({
     }));
 
     setGroups(initial);
-  }, [category, numBrackets]);
+  }, [category, numBrackets, tournamentSlug, categoryId]);
 
   // Total teams and stats
   const totalTeams = teams.length;
@@ -196,6 +287,9 @@ export function BracketDraw({
     setDrawingBracketIdx(-1);
     setDrawnCount(0);
 
+    // Completely clear drawn groups, main draw, live matches, and queue across system
+    resetDrawnGroups(tournamentSlug, categoryId);
+
     const n = Math.max(1, Math.min(numBrackets, Math.ceil(category.teams.length / 2) || 1));
     const shuffledTeams = shuffle(category.teams);
 
@@ -214,6 +308,54 @@ export function BracketDraw({
     setGroups(initial);
   };
 
+  const [undoRoster, setUndoRoster] = useState<{
+    action: "populate" | "delete";
+    teams: Team[];
+    label: string;
+  } | null>(null);
+
+  const handleQuickPopulate32 = () => {
+    const confirmMsg =
+      teams.length > 0
+        ? `Replace current roster (${teams.length} teams) with 32 verified teams for an 8-bracket draw?`
+        : "Generate and populate 32 verified teams for an 8-bracket draw?";
+    if (!window.confirm(confirmMsg)) return;
+
+    setUndoRoster({
+      action: "populate",
+      teams: [...teams],
+      label: `Previous roster (${teams.length} teams)`,
+    });
+
+    resetDrawnGroups(tournamentSlug, categoryId);
+
+    const generated = generate32Teams({ verifiedOnly: true });
+    bulkSetTeamsInCategory(tournamentSlug, categoryId, generated);
+    setNumBrackets(8);
+  };
+
+  const handleDeleteAllTeams = () => {
+    if (teams.length === 0) return;
+    if (!window.confirm(`Delete all ${teams.length} teams and players from ${category.label}? This will reset the bracket draw.`)) return;
+
+    setUndoRoster({
+      action: "delete",
+      teams: [...teams],
+      label: `Deleted roster (${teams.length} teams)`,
+    });
+
+    resetDrawnGroups(tournamentSlug, categoryId);
+    deleteAllTeamsInCategory(tournamentSlug, categoryId);
+    setGroups([]);
+    setDrawnCount(0);
+  };
+
+  const handleUndoRoster = () => {
+    if (!undoRoster) return;
+    bulkSetTeamsInCategory(tournamentSlug, categoryId, undoRoster.teams);
+    setUndoRoster(null);
+  };
+
   return (
     <div className="space-y-6 max-w-7xl pb-20 sm:space-y-8">
       {/* ── Header ──────────────────────────────────────────── */}
@@ -226,6 +368,9 @@ export function BracketDraw({
               </span>
               <span className="inline-flex items-center px-2 py-0.5 rounded text-[0.65rem] font-semibold bg-pickle/15 text-pickle border border-pickle/30">
                 1 Bracket at a Time
+              </span>
+              <span className="inline-flex items-center px-2 py-0.5 rounded text-[0.65rem] font-semibold bg-pickle/15 text-pickle border border-pickle/30">
+                Auto-Synced to Umpire
               </span>
             </div>
             <h2 className="font-display text-3xl text-foreground mt-1 leading-none sm:text-4xl md:text-5xl">
@@ -316,8 +461,48 @@ export function BracketDraw({
               <option value={6}>6 Brackets (A to F)</option>
               <option value={8}>8 Brackets (A to H - 32 Teams)</option>
             </select>
+            {teams.length < 32 && (
+              <button
+                type="button"
+                onClick={handleQuickPopulate32}
+                disabled={isAnimating}
+                className="self-start text-[0.65rem] text-pickle hover:text-foreground font-semibold uppercase tracking-wider underline cursor-pointer mt-1"
+              >
+                + Auto-Populate 32 Teams (8 Brackets)
+              </button>
+            )}
           </div>
         </div>
+
+        {/* Undo Banner if an action just occurred */}
+        {undoRoster && (
+          <div className="surface-card flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 bg-pickle/15 border border-pickle/40 rounded text-xs animate-in fade-in duration-300">
+            <div className="flex items-center gap-2">
+              <span className="h-2 w-2 rounded-full bg-pickle animate-pulse" />
+              <span className="text-foreground font-medium">
+                {undoRoster.action === "populate"
+                  ? `Populated 32 teams into ${category.label}.`
+                  : `Deleted all teams from ${category.label}.`}
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleUndoRoster}
+                className="px-3 py-1.5 bg-pickle text-sand font-bold uppercase tracking-wider text-[0.7rem] rounded hover:opacity-90 transition-opacity cursor-pointer shadow-sm"
+              >
+                Undo ({undoRoster.label})
+              </button>
+              <button
+                type="button"
+                onClick={() => setUndoRoster(null)}
+                className="text-[0.7rem] text-muted-foreground hover:text-foreground uppercase tracking-wider font-semibold cursor-pointer px-1.5 py-1"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* ── Interactive Bracket Step Navigator ───────────────── */}
@@ -414,6 +599,30 @@ export function BracketDraw({
               <span>Reset Draw</span>
             </button>
           )}
+
+          {/* Delete All Players */}
+          <button
+            onClick={handleDeleteAllTeams}
+            disabled={isAnimating || teams.length === 0}
+            className={`flex items-center gap-1.5 border px-4 py-3.5 text-xs font-bold uppercase tracking-widest transition-all ${
+              teams.length > 0
+                ? "border-brick/40 bg-brick/10 text-brick hover:bg-brick hover:text-sand cursor-pointer"
+                : "border-border/60 bg-muted/30 text-muted-foreground/40 cursor-not-allowed"
+            }`}
+          >
+            <span>Delete All Players {teams.length > 0 ? `(${teams.length})` : "(0)"}</span>
+          </button>
+
+          {/* Undo Action Button */}
+          {undoRoster && (
+            <button
+              onClick={handleUndoRoster}
+              disabled={isAnimating}
+              className="flex items-center gap-1.5 border border-pickle bg-pickle/20 px-4 py-3.5 text-xs font-bold uppercase tracking-widest text-pickle hover:bg-pickle hover:text-sand transition-all cursor-pointer shadow-sm"
+            >
+              <span>Undo ({undoRoster.label})</span>
+            </button>
+          )}
         </div>
 
         {/* Info hint */}
@@ -425,11 +634,21 @@ export function BracketDraw({
 
       {/* ── Empty State ──────────────────────────────────────── */}
       {!hasTeams && (
-        <div className="surface-card flex flex-col items-center justify-center gap-4 p-16 text-center">
-          <h3 className="font-display text-3xl text-foreground">No Teams Registered</h3>
-          <p className="max-w-sm text-sm text-muted-foreground">
-            Add teams in the <strong>Teams</strong> tab first, then come back to generate the draw.
+        <div className="surface-card flex flex-col items-center justify-center gap-4 p-12 text-center border border-border">
+          <span className="text-xs uppercase tracking-[0.28em] font-bold text-pickle">
+            Bracket Draw Standby
+          </span>
+          <h3 className="font-display text-3xl text-foreground">No Teams in Category</h3>
+          <p className="max-w-md text-sm text-muted-foreground">
+            Add teams in the <strong>Teams</strong> tab first, or auto-populate 32 verified doubles teams to run an 8-bracket ceremony right now.
           </p>
+          <button
+            type="button"
+            onClick={handleQuickPopulate32}
+            className="px-5 py-2.5 bg-pickle text-sand hover:opacity-90 font-semibold text-xs tracking-wider uppercase rounded transition-all cursor-pointer shadow"
+          >
+            Auto-Populate 32 Teams for Draw
+          </button>
         </div>
       )}
 

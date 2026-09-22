@@ -11,13 +11,22 @@ import {
   addTeamToCategory,
   removeTeamFromCategory,
   updateTeamInTournament,
+  bulkSetTeamsInCategory,
+  deleteAllTeamsInCategory,
 } from "@/lib/tournament-store";
+import { generate32Teams } from "@/lib/team-generator";
 import {
   type AccessCode,
   getAccessCodes,
   generateNewCode,
   revokeCode,
 } from "@/lib/access-codes";
+import {
+  loginWithAccessCode,
+  loginWithCredentials,
+  getAuthenticatedStaff,
+  logoutStaff,
+} from "@/lib/auth-store";
 
 export const Route = createFileRoute("/admin")({
   head: () => ({
@@ -105,15 +114,14 @@ function AdminErrorComponent({ error, reset }: { error: Error; reset: () => void
 const levels = ["Beginners", "Novice", "Intermediate", "Advance", "Open"];
 const divisions = ["Men's", "Women's", "Mixed"];
 
-type TabKey = "bracket-draw" | "brackets" | "court-dispatch" | "teams" | "access-codes" | "tournaments";
+type TabKey = "draw" | "dispatch" | "setup";
+type DrawSubTab = "bracket-draw" | "brackets";
+type SetupSection = "tournaments" | "teams" | "access-codes";
 
 const tabs: { key: TabKey; label: string }[] = [
-  { key: "bracket-draw", label: "Bracket Draw (MAIN)" },
-  { key: "brackets", label: "Brackets" },
-  { key: "court-dispatch", label: "Court Dispatch (4 Courts)" },
-  { key: "teams", label: "Teams & Payments" },
-  { key: "access-codes", label: "Access Codes" },
-  { key: "tournaments", label: "Tournaments" },
+  { key: "draw", label: "Draw" },
+  { key: "dispatch", label: "Dispatch" },
+  { key: "setup", label: "Setup" },
 ];
 
 function Admin() {
@@ -122,15 +130,37 @@ function Admin() {
 
   const [isMounted, setIsMounted] = useState(false);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [activeTab, setActiveTab] = useState<TabKey>("tournaments");
+  const [activeTab, setActiveTab] = useState<TabKey>("setup");
+  const [drawSubTab, setDrawSubTab] = useState<DrawSubTab>("bracket-draw");
+  const [openSetupSections, setOpenSetupSections] = useState<Set<SetupSection>>(
+    new Set(["tournaments"])
+  );
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [tournamentSlug, setTournamentSlug] = useState<string>("");
   const [categoryId, setCategoryId] = useState<string>("");
 
+  const toggleSetupSection = (section: SetupSection) => {
+    setOpenSetupSections((prev) => {
+      const next = new Set(prev);
+      if (next.has(section)) {
+        next.delete(section);
+      } else {
+        next.add(section);
+      }
+      return next;
+    });
+  };
+
+  const [authCodeInput, setAuthCodeInput] = useState("");
+  const [authPasswordInput, setAuthPasswordInput] = useState("");
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [isAuthenticating, setIsAuthenticating] = useState(false);
+
   useEffect(() => {
     setIsMounted(true);
     if (typeof localStorage !== "undefined") {
-      const auth = localStorage.getItem("mock_auth") === "true";
+      const staff = getAuthenticatedStaff();
+      const auth = staff?.role === "admin";
       setIsAuthenticated(auth);
       const list = getTournaments();
       if (list.length > 0) {
@@ -138,7 +168,7 @@ function Admin() {
         if (list[0]!.categories && list[0]!.categories.length > 0) {
           setCategoryId(list[0]!.categories[0]!.id);
         }
-        setActiveTab("bracket-draw");
+        setActiveTab("draw");
       }
     }
   }, []);
@@ -170,9 +200,48 @@ function Admin() {
   }, [tournament, categoryId]);
 
   const handleLogout = () => {
-    localStorage.removeItem("mock_auth");
-    localStorage.removeItem("mock_admin_name");
+    logoutStaff();
     setIsAuthenticated(false);
+  };
+
+  const handleAdminGateSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError(null);
+    setIsAuthenticating(true);
+
+    const cleanInput = authCodeInput.trim();
+    if (!cleanInput) {
+      setAuthError("Please enter an Admin Access Code or email address.");
+      setIsAuthenticating(false);
+      return;
+    }
+
+    if (cleanInput.includes("@")) {
+      const res = loginWithCredentials(cleanInput, authPasswordInput);
+      setIsAuthenticating(false);
+      if (!res.success) {
+        setAuthError(res.error || "Invalid credentials.");
+        return;
+      }
+      if (res.role !== "admin") {
+        setAuthError("This account is designated for Match Officials. Please access the Umpire Console.");
+        return;
+      }
+      setIsAuthenticated(true);
+      return;
+    }
+
+    const res = loginWithAccessCode(cleanInput);
+    setIsAuthenticating(false);
+    if (!res.success) {
+      setAuthError(res.error || "Invalid access code.");
+      return;
+    }
+    if (res.role !== "admin") {
+      setAuthError("This access code is designated for Match Officials. Please access the Umpire Console.");
+      return;
+    }
+    setIsAuthenticated(true);
   };
 
   if (!isMounted) {
@@ -199,31 +268,76 @@ function Admin() {
     return (
       <div className="court-lines flex min-h-[calc(100vh-4rem)] items-center justify-center p-4 sm:p-6">
         <div className="surface-card bg-card max-w-md w-full p-8 sm:p-10 text-center space-y-5 border border-border rounded-xl shadow-lg">
-          <span className="text-[0.65rem] uppercase tracking-[0.28em] text-pickle font-bold">
-            Tournament Desk
-          </span>
-          <h2 className="font-display text-3xl sm:text-4xl text-foreground mt-1">
-            Organizer Console
-          </h2>
-          <p className="text-sm text-muted-foreground">
-            Sign in as an organizer to create events, manage rosters, configure divisions, and dispatch matches across Courts 1 to 4.
-          </p>
-          <div className="pt-2 flex flex-col gap-3">
+          <img
+            src="/DinkValley.jpg"
+            alt="Dink Valley"
+            className="h-16 w-16 mx-auto rounded-full object-cover ring-2 ring-brick"
+          />
+          <div>
+            <span className="text-[0.65rem] uppercase tracking-[0.28em] text-pickle font-bold block">
+              Restricted Area
+            </span>
+            <h2 className="font-display text-3xl sm:text-4xl text-foreground mt-1">
+              Organizer Gate
+            </h2>
+            <p className="text-xs text-muted-foreground mt-1.5">
+              Authorized Tournament Directors only. Enter your Admin Access Code or administrator credentials to proceed.
+            </p>
+          </div>
+
+          {authError && (
+            <div className="p-3 bg-brick/15 border border-brick/60 text-brick text-xs font-semibold rounded text-left">
+              {authError}
+            </div>
+          )}
+
+          <form onSubmit={handleAdminGateSubmit} className="space-y-3 pt-2 text-left">
+            <div>
+              <label className="block text-[0.65rem] uppercase tracking-wider text-muted-foreground font-bold mb-1">
+                Admin Access Code or Email
+              </label>
+              <input
+                type="text"
+                value={authCodeInput}
+                onChange={(e) => setAuthCodeInput(e.target.value)}
+                placeholder="e.g. DV-ADMIN or admin@dinkvalley.com"
+                autoFocus
+                required
+                className="w-full bg-charcoal border border-border px-3.5 py-2.5 text-sand text-sm font-mono uppercase tracking-wider rounded focus:outline-none focus:border-pickle"
+              />
+            </div>
+
+            {authCodeInput.includes("@") && (
+              <div>
+                <label className="block text-[0.65rem] uppercase tracking-wider text-muted-foreground font-bold mb-1">
+                  Password
+                </label>
+                <input
+                  type="password"
+                  value={authPasswordInput}
+                  onChange={(e) => setAuthPasswordInput(e.target.value)}
+                  placeholder="••••••••"
+                  required
+                  className="w-full bg-charcoal border border-border px-3.5 py-2 text-sand text-sm rounded focus:outline-none focus:border-pickle"
+                />
+              </div>
+            )}
+
             <button
-              onClick={() => {
-                localStorage.setItem("mock_auth", "true");
-                localStorage.setItem("mock_admin_name", "Tournament Director");
-                setIsAuthenticated(true);
-              }}
-              className="w-full bg-brick py-3.5 px-6 font-display text-2xl tracking-widest text-sand hover:bg-brick-deep transition-all cursor-pointer shadow-md rounded"
+              type="submit"
+              disabled={isAuthenticating || !authCodeInput.trim()}
+              className="w-full bg-brick py-3 px-6 font-display text-xl tracking-wider text-sand hover:bg-brick-deep transition-all cursor-pointer shadow-md rounded disabled:opacity-50 mt-1"
             >
-              Unlock Organizer Console
+              {isAuthenticating ? "Verifying Authorization..." : "Authenticate & Enter"}
             </button>
+          </form>
+
+          <div className="pt-2 border-t border-border/60 flex flex-col gap-2">
             <Link
-              to="/login"
-              className="text-xs uppercase tracking-wider text-muted-foreground hover:text-foreground font-semibold pt-1 transition-colors"
+              to="/"
+              className="text-xs uppercase tracking-wider text-muted-foreground hover:text-foreground font-semibold transition-colors"
             >
-              Sign In with Custom Account &rarr;
+              &larr; Return to Tournaments
             </Link>
           </div>
         </div>
@@ -377,7 +491,9 @@ function Admin() {
             </button>
             <div className="min-w-0">
               <h1 className="font-display text-xl leading-tight text-foreground sm:text-3xl md:text-4xl truncate">
-                {tabs.find((t) => t.key === activeTab)?.label}
+                {activeTab === "draw"
+                  ? drawSubTab === "bracket-draw" ? "Bracket Draw" : "Brackets"
+                  : tabs.find((t) => t.key === activeTab)?.label}
               </h1>
               <p className="text-[0.6rem] uppercase tracking-widest text-muted-foreground sm:text-xs">
                 Organizer Console
@@ -391,136 +507,239 @@ function Admin() {
 
         {/* Content */}
         <main className="flex-1 overflow-y-auto p-4 sm:p-6 md:p-8">
-          {activeTab === "tournaments" && (
-            <TournamentsManager
-              activeTournamentSlug={tournamentSlug}
-              onSelectTournament={(slug) => {
-                setTournamentSlug(slug);
-                const found = tournaments.find((t) => t.slug === slug);
-                if (found && found.categories && found.categories[0]) {
-                  setCategoryId(found.categories[0].id);
-                }
-              }}
-            />
-          )}
 
-          {activeTab !== "tournaments" && activeTab !== "access-codes" && tournaments.length === 0 && (
-            <div className="surface-card p-10 sm:p-14 text-center max-w-xl mx-auto border border-border mt-8">
-              <span className="text-xs uppercase tracking-[0.28em] text-pickle font-bold">
-                Setup Required
-              </span>
-              <h3 className="font-display text-3xl text-foreground mt-2">No Tournaments Created Yet</h3>
-              <p className="mt-2 text-sm text-muted-foreground">
-                Please create your first tournament before managing brackets, teams, and court dispatch.
-              </p>
-              <button
-                onClick={() => setActiveTab("tournaments")}
-                className="mt-6 bg-brick px-6 py-2.5 font-display text-xl tracking-wider text-sand hover:bg-brick-deep transition-colors cursor-pointer"
-              >
-                Go to Tournament Creator
-              </button>
+          {/* ── DRAW TAB ── */}
+          {activeTab === "draw" && (
+            <div className="space-y-6">
+              {/* Sub-tab toggle */}
+              <div className="flex gap-1 border-b border-border">
+                <button
+                  onClick={() => setDrawSubTab("bracket-draw")}
+                  className={`px-5 py-2.5 text-xs font-bold uppercase tracking-widest border-b-2 transition-all cursor-pointer ${
+                    drawSubTab === "bracket-draw"
+                      ? "border-brick text-foreground"
+                      : "border-transparent text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  Bracket Draw
+                </button>
+                <button
+                  onClick={() => setDrawSubTab("brackets")}
+                  className={`px-5 py-2.5 text-xs font-bold uppercase tracking-widest border-b-2 transition-all cursor-pointer ${
+                    drawSubTab === "brackets"
+                      ? "border-brick text-foreground"
+                      : "border-transparent text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  Brackets
+                </button>
+              </div>
+
+              {/* No tournament guard */}
+              {tournaments.length === 0 && (
+                <div className="surface-card p-10 sm:p-14 text-center max-w-xl mx-auto border border-border mt-8">
+                  <span className="text-xs uppercase tracking-[0.28em] text-pickle font-bold">Setup Required</span>
+                  <h3 className="font-display text-3xl text-foreground mt-2">No Tournaments Created Yet</h3>
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    Create your first tournament in the Setup tab before managing brackets.
+                  </p>
+                  <button
+                    onClick={() => { setActiveTab("setup"); setOpenSetupSections(new Set(["tournaments"])); }}
+                    className="mt-6 bg-brick px-6 py-2.5 font-display text-xl tracking-wider text-sand hover:bg-brick-deep transition-colors cursor-pointer"
+                  >
+                    Go to Setup
+                  </button>
+                </div>
+              )}
+
+              {tournaments.length > 0 && (!tournament || !category) && (
+                <div className="surface-card p-10 sm:p-14 text-center max-w-xl mx-auto border border-border mt-8">
+                  <span className="text-xs uppercase tracking-[0.28em] text-pickle font-bold">Divisions Required</span>
+                  <h3 className="font-display text-3xl text-foreground mt-2">No Divisions Configured</h3>
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    The selected tournament has no categories or divisions configured yet.
+                  </p>
+                  <button
+                    onClick={() => { setActiveTab("setup"); setOpenSetupSections(new Set(["tournaments"])); }}
+                    className="mt-6 bg-brick px-6 py-2.5 font-display text-xl tracking-wider text-sand hover:bg-brick-deep transition-colors cursor-pointer"
+                  >
+                    Configure Divisions
+                  </button>
+                </div>
+              )}
+
+              {tournament && category && drawSubTab === "bracket-draw" && (
+                <BracketDraw
+                  tournament={tournament}
+                  category={category}
+                  tournaments={tournaments}
+                  tournamentSlug={tournamentSlug}
+                  setTournamentSlug={(slug) => {
+                    setTournamentSlug(slug);
+                    const next = tournaments.find((t) => t.slug === slug);
+                    if (next?.categories?.[0]) setCategoryId(next.categories[0].id);
+                  }}
+                  categoryId={categoryId}
+                  setCategoryId={setCategoryId}
+                />
+              )}
+              {tournament && category && drawSubTab === "brackets" && (
+                <DrawsManager
+                  tournament={tournament}
+                  category={category}
+                  tournaments={tournaments}
+                  tournamentSlug={tournamentSlug}
+                  setTournamentSlug={(slug) => {
+                    setTournamentSlug(slug);
+                    const next = tournaments.find((t) => t.slug === slug);
+                    if (next?.categories?.[0]) setCategoryId(next.categories[0].id);
+                  }}
+                  categoryId={categoryId}
+                  setCategoryId={setCategoryId}
+                  onSwitchToBracketDraw={() => setDrawSubTab("bracket-draw")}
+                />
+              )}
             </div>
           )}
 
-          {activeTab !== "tournaments" &&
-            activeTab !== "access-codes" &&
-            tournaments.length > 0 &&
-            (!tournament || !category || !tournament.categories || tournament.categories.length === 0) && (
-              <div className="surface-card p-10 sm:p-14 text-center max-w-xl mx-auto border border-border mt-8">
-                <span className="text-xs uppercase tracking-[0.28em] text-pickle font-bold">
-                  Divisions Required
-                </span>
-                <h3 className="font-display text-3xl text-foreground mt-2">No Divisions Configured</h3>
-                <p className="mt-2 text-sm text-muted-foreground">
-                  The selected tournament has no categories or divisions configured yet.
-                </p>
-                <button
-                  onClick={() => setActiveTab("tournaments")}
-                  className="mt-6 bg-brick px-6 py-2.5 font-display text-xl tracking-wider text-sand hover:bg-brick-deep transition-colors cursor-pointer"
-                >
-                  Configure Divisions
-                </button>
-              </div>
-            )}
+          {/* ── DISPATCH TAB ── */}
+          {activeTab === "dispatch" && (
+            <>
+              {tournaments.length === 0 && (
+                <div className="surface-card p-10 sm:p-14 text-center max-w-xl mx-auto border border-border mt-8">
+                  <span className="text-xs uppercase tracking-[0.28em] text-pickle font-bold">Setup Required</span>
+                  <h3 className="font-display text-3xl text-foreground mt-2">No Tournaments Created Yet</h3>
+                  <button
+                    onClick={() => { setActiveTab("setup"); setOpenSetupSections(new Set(["tournaments"])); }}
+                    className="mt-6 bg-brick px-6 py-2.5 font-display text-xl tracking-wider text-sand hover:bg-brick-deep transition-colors cursor-pointer"
+                  >
+                    Go to Setup
+                  </button>
+                </div>
+              )}
+              {tournament && category && (
+                <CourtDispatch
+                  tournament={tournament}
+                  category={category}
+                  tournaments={tournaments}
+                  tournamentSlug={tournamentSlug}
+                  setTournamentSlug={(slug) => {
+                    setTournamentSlug(slug);
+                    const next = tournaments.find((t) => t.slug === slug);
+                    if (next?.categories?.[0]) setCategoryId(next.categories[0].id);
+                  }}
+                  categoryId={categoryId}
+                  setCategoryId={setCategoryId}
+                />
+              )}
+            </>
+          )}
 
-          {tournament && category && activeTab === "teams" && (
-            <TeamsTab
-              tournament={tournament}
-              category={category}
-              tournaments={tournaments}
-              tournamentSlug={tournamentSlug}
-              setTournamentSlug={(slug) => {
-                setTournamentSlug(slug);
-                const next = tournaments.find((t) => t.slug === slug);
-                if (next?.categories?.[0]) {
-                  setCategoryId(next.categories[0].id);
-                }
-              }}
-              categoryId={categoryId}
-              setCategoryId={(id) => {
-                setCategoryId(id);
-              }}
-            />
+          {/* ── SETUP TAB (accordion) ── */}
+          {activeTab === "setup" && (
+            <div className="max-w-4xl space-y-3">
+              <div className="mb-2">
+                <span className="text-xs uppercase tracking-[0.28em] text-pickle font-bold">Organizer Setup</span>
+                <h2 className="font-display text-3xl text-foreground mt-1">Configuration</h2>
+              </div>
+
+              {/* Tournaments Section */}
+              <div className="border border-border overflow-hidden">
+                <button
+                  onClick={() => toggleSetupSection("tournaments")}
+                  className="w-full flex items-center justify-between px-5 py-4 bg-charcoal hover:bg-charcoal/80 transition-colors cursor-pointer"
+                >
+                  <span className="text-sm font-bold uppercase tracking-widest text-sand">Tournaments</span>
+                  <svg
+                    className={`w-4 h-4 text-sand/70 transition-transform duration-200 ${openSetupSections.has("tournaments") ? "rotate-180" : ""}`}
+                    fill="none" stroke="currentColor" viewBox="0 0 24 24"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+                {openSetupSections.has("tournaments") && (
+                  <div className="p-4 sm:p-6 border-t border-border bg-background">
+                    <TournamentsManager
+                      activeTournamentSlug={tournamentSlug}
+                      onSelectTournament={(slug) => {
+                        setTournamentSlug(slug);
+                        const found = tournaments.find((t) => t.slug === slug);
+                        if (found?.categories?.[0]) setCategoryId(found.categories[0].id);
+                      }}
+                    />
+                  </div>
+                )}
+              </div>
+
+              {/* Teams & Payments Section */}
+              <div className="border border-border overflow-hidden">
+                <button
+                  onClick={() => toggleSetupSection("teams")}
+                  className="w-full flex items-center justify-between px-5 py-4 bg-charcoal hover:bg-charcoal/80 transition-colors cursor-pointer"
+                >
+                  <div className="flex items-center gap-3">
+                    <span className="text-sm font-bold uppercase tracking-widest text-sand">Teams & Payments</span>
+                    {tournament && category && (
+                      <span className="text-[0.65rem] font-mono text-sand/60 border border-border px-2 py-0.5">
+                        {category.teams?.length ?? 0} teams
+                      </span>
+                    )}
+                  </div>
+                  <svg
+                    className={`w-4 h-4 text-sand/70 transition-transform duration-200 ${openSetupSections.has("teams") ? "rotate-180" : ""}`}
+                    fill="none" stroke="currentColor" viewBox="0 0 24 24"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+                {openSetupSections.has("teams") && (
+                  <div className="p-4 sm:p-6 border-t border-border bg-background">
+                    {tournament && category ? (
+                      <TeamsTab
+                        tournament={tournament}
+                        category={category}
+                        tournaments={tournaments}
+                        tournamentSlug={tournamentSlug}
+                        setTournamentSlug={(slug) => {
+                          setTournamentSlug(slug);
+                          const next = tournaments.find((t) => t.slug === slug);
+                          if (next?.categories?.[0]) setCategoryId(next.categories[0].id);
+                        }}
+                        categoryId={categoryId}
+                        setCategoryId={setCategoryId}
+                      />
+                    ) : (
+                      <p className="text-sm text-muted-foreground py-4">
+                        Create a tournament with categories first to manage teams.
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Access Codes Section */}
+              <div className="border border-border overflow-hidden">
+                <button
+                  onClick={() => toggleSetupSection("access-codes")}
+                  className="w-full flex items-center justify-between px-5 py-4 bg-charcoal hover:bg-charcoal/80 transition-colors cursor-pointer"
+                >
+                  <span className="text-sm font-bold uppercase tracking-widest text-sand">Access Codes</span>
+                  <svg
+                    className={`w-4 h-4 text-sand/70 transition-transform duration-200 ${openSetupSections.has("access-codes") ? "rotate-180" : ""}`}
+                    fill="none" stroke="currentColor" viewBox="0 0 24 24"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+                {openSetupSections.has("access-codes") && (
+                  <div className="p-4 sm:p-6 border-t border-border bg-background">
+                    <AccessCodesTab />
+                  </div>
+                )}
+              </div>
+            </div>
           )}
-          {tournament && category && activeTab === "brackets" && (
-            <DrawsManager
-              tournament={tournament}
-              category={category}
-              tournaments={tournaments}
-              tournamentSlug={tournamentSlug}
-              setTournamentSlug={(slug) => {
-                setTournamentSlug(slug);
-                const next = tournaments.find((t) => t.slug === slug);
-                if (next?.categories?.[0]) {
-                  setCategoryId(next.categories[0].id);
-                }
-              }}
-              categoryId={categoryId}
-              setCategoryId={(id) => {
-                setCategoryId(id);
-              }}
-              onSwitchToBracketDraw={() => setActiveTab("bracket-draw")}
-            />
-          )}
-          {tournament && category && activeTab === "bracket-draw" && (
-            <BracketDraw
-              tournament={tournament}
-              category={category}
-              tournaments={tournaments}
-              tournamentSlug={tournamentSlug}
-              setTournamentSlug={(slug) => {
-                setTournamentSlug(slug);
-                const next = tournaments.find((t) => t.slug === slug);
-                if (next?.categories?.[0]) {
-                  setCategoryId(next.categories[0].id);
-                }
-              }}
-              categoryId={categoryId}
-              setCategoryId={(id) => {
-                setCategoryId(id);
-              }}
-            />
-          )}
-          {tournament && category && activeTab === "court-dispatch" && (
-            <CourtDispatch
-              tournament={tournament}
-              category={category}
-              tournaments={tournaments}
-              tournamentSlug={tournamentSlug}
-              setTournamentSlug={(slug) => {
-                setTournamentSlug(slug);
-                const next = tournaments.find((t) => t.slug === slug);
-                if (next?.categories?.[0]) {
-                  setCategoryId(next.categories[0].id);
-                }
-              }}
-              categoryId={categoryId}
-              setCategoryId={(id) => {
-                setCategoryId(id);
-              }}
-            />
-          )}
-          {activeTab === "access-codes" && <AccessCodesTab />}
+
         </main>
       </div>
     </div>
@@ -710,7 +929,10 @@ function TeamsTab({
     const playersList = newPlayers.trim()
       ? newPlayers.split("/").map((p) => p.trim()).filter(Boolean)
       : ["Player 1", "Player 2"];
-    const id = `team-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    const id =
+      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `team-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
     const newTeam: Team = {
       id,
       name: newTeamName.trim(),
@@ -729,6 +951,68 @@ function TeamsTab({
     if (window.confirm(`Remove team "${name}" from this category?`)) {
       removeTeamFromCategory(tournament.slug, category.id, teamId);
     }
+  };
+
+  const [undoRoster, setUndoRoster] = useState<{
+    action: "populate" | "delete";
+    teams: Team[];
+    label: string;
+  } | null>(null);
+
+  const handleAutoPopulate32Teams = () => {
+    const confirmMsg =
+      category.teams.length > 0
+        ? `Replace current roster (${category.teams.length} teams) with 32 verified teams?`
+        : "Generate and populate 32 verified teams for this category?";
+    if (!window.confirm(confirmMsg)) return;
+
+    setUndoRoster({
+      action: "populate",
+      teams: [...category.teams],
+      label: `Previous roster (${category.teams.length} teams)`,
+    });
+
+    const generated = generate32Teams({ verifiedOnly: true });
+    bulkSetTeamsInCategory(tournament.slug, category.id, generated);
+
+    const nextPay: Record<string, boolean> = {};
+    const nextProof: Record<string, string> = {};
+    generated.forEach((t) => {
+      nextPay[t.id] = t.paid ?? true;
+      if (t.paymentProofUrl) nextProof[t.id] = t.paymentProofUrl;
+    });
+    setPaymentMap(nextPay);
+    setProofMap(nextProof);
+  };
+
+  const handleDeleteAllPlayers = () => {
+    if (category.teams.length === 0) return;
+    if (!window.confirm(`Delete all ${category.teams.length} players and teams from ${category.label}? This will clear the category roster and any bracket draws.`)) return;
+
+    setUndoRoster({
+      action: "delete",
+      teams: [...category.teams],
+      label: `Deleted roster (${category.teams.length} teams)`,
+    });
+
+    deleteAllTeamsInCategory(tournament.slug, category.id);
+    setPaymentMap({});
+    setProofMap({});
+  };
+
+  const handleUndoRoster = () => {
+    if (!undoRoster) return;
+    bulkSetTeamsInCategory(tournament.slug, category.id, undoRoster.teams);
+
+    const nextPay: Record<string, boolean> = {};
+    const nextProof: Record<string, string> = {};
+    undoRoster.teams.forEach((t) => {
+      nextPay[t.id] = t.paid ?? true;
+      if (t.paymentProofUrl) nextProof[t.id] = t.paymentProofUrl;
+    });
+    setPaymentMap(nextPay);
+    setProofMap(nextProof);
+    setUndoRoster(null);
   };
 
   const currentTeams = category.teams || [];
@@ -769,6 +1053,7 @@ function TeamsTab({
             setPaymentMap({});
             setProofMap({});
             setFilter("all");
+            setUndoRoster(null);
           }}
           className="border border-input bg-background px-3 py-2 text-sm focus:border-pickle focus:outline-none font-medium"
         >
@@ -783,6 +1068,7 @@ function TeamsTab({
             setPaymentMap({});
             setProofMap({});
             setFilter("all");
+            setUndoRoster(null);
           }}
           className="border border-input bg-background px-3 py-2 text-sm focus:border-pickle focus:outline-none font-medium"
         >
@@ -790,6 +1076,78 @@ function TeamsTab({
             <option key={c.id} value={c.id}>{c.label}</option>
           ))}
         </select>
+      </div>
+
+      {/* Undo Banner if an action just occurred */}
+      {undoRoster && (
+        <div className="surface-card flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 bg-pickle/15 border border-pickle/40 rounded text-xs animate-in fade-in duration-300">
+          <div className="flex items-center gap-2">
+            <span className="h-2 w-2 rounded-full bg-pickle animate-pulse" />
+            <span className="text-foreground font-medium">
+              {undoRoster.action === "populate"
+                ? `Populated 32 teams into ${category.label}.`
+                : `Deleted all teams from ${category.label}.`}
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleUndoRoster}
+              className="px-3 py-1.5 bg-pickle text-sand font-bold uppercase tracking-wider text-[0.7rem] rounded hover:opacity-90 transition-opacity cursor-pointer shadow-sm"
+            >
+              Undo Action ({undoRoster.label})
+            </button>
+            <button
+              type="button"
+              onClick={() => setUndoRoster(null)}
+              className="text-[0.7rem] text-muted-foreground hover:text-foreground uppercase tracking-wider font-semibold cursor-pointer px-1.5 py-1"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Quick Staging Actions Bar */}
+      <div className="surface-card flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 border border-border">
+        <div>
+          <span className="text-xs font-bold uppercase tracking-widest text-foreground block">
+            Roster Actions
+          </span>
+          <span className="text-[0.7rem] text-muted-foreground">
+            Auto-populate 32 verified doubles teams or delete all players to start fresh.
+          </span>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {undoRoster && (
+            <button
+              type="button"
+              onClick={handleUndoRoster}
+              className="px-3.5 py-2 border border-pickle bg-pickle/20 text-pickle hover:bg-pickle hover:text-sand font-bold text-xs tracking-wider uppercase rounded transition-all cursor-pointer"
+            >
+              Undo ({undoRoster.action === "populate" ? "Revert Roster" : "Restore Players"})
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={handleAutoPopulate32Teams}
+            className="px-3.5 py-2 bg-pickle text-sand hover:opacity-90 font-semibold text-xs tracking-wider uppercase rounded transition-all cursor-pointer shadow-sm"
+          >
+            Auto-Populate 32 Teams
+          </button>
+          <button
+            type="button"
+            onClick={handleDeleteAllPlayers}
+            disabled={category.teams.length === 0}
+            className={`px-3.5 py-2 border font-semibold text-xs tracking-wider uppercase rounded transition-all ${
+              category.teams.length > 0
+                ? "border-brick bg-brick/15 text-brick hover:bg-brick hover:text-sand cursor-pointer"
+                : "border-border/60 bg-muted/40 text-muted-foreground/40 cursor-not-allowed"
+            }`}
+          >
+            Delete All Players {category.teams.length > 0 ? `(${category.teams.length})` : "(0)"}
+          </button>
+        </div>
       </div>
 
       {/* Payment Summary Bar */}
@@ -921,9 +1279,9 @@ function TeamsTab({
 
                     <button
                       onClick={() => handleRemoveTeam(t.id, t.name)}
-                      className="text-xs font-bold uppercase tracking-widest text-muted-foreground transition-colors hover:text-destructive p-1 cursor-pointer"
+                      className="px-2.5 py-1.5 border border-brick/40 bg-brick/10 text-brick hover:bg-brick hover:text-sand text-[0.65rem] font-bold uppercase tracking-widest transition-colors rounded cursor-pointer"
                     >
-                      Remove
+                      Delete Team
                     </button>
                   </div>
                 </li>

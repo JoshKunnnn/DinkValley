@@ -1,8 +1,9 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import {
   dbGetMatches,
   dbSaveMatch,
   dbDeleteMatch,
+  dbDeleteMatchesForCategory,
   dbClearAllMatches,
   dbSubscribeToLive,
 } from "./supabase-service";
@@ -46,6 +47,12 @@ export type LiveMatch = {
   endedAt: number | undefined;
   officiatedBy: string | undefined;
   tournamentSlug?: string | undefined;
+  categoryId?: string | undefined;
+  stage?: string | undefined;
+  bracketLetter?: string | undefined;
+  tossDone?: boolean | undefined;
+  tossWinner?: string | undefined;
+  resetAt?: number | undefined;
 };
 
 /* ─────────────────────────────────────────────
@@ -74,11 +81,33 @@ export function enforceFourCourtCapacity(matches: LiveMatch[]): { sanitized: Liv
   let modified = false;
   const occupiedCourts = new Set<string>();
 
-  // Prioritize live matches, then scheduled
+  // Determine which matches are officially assigned to active court stations
+  const stationMatchIds = new Set<string>();
+  if (typeof localStorage !== "undefined") {
+    try {
+      const raw = localStorage.getItem("dv_court_stations");
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        for (const c of FACILITY_COURT_NAMES) {
+          if (parsed[c]?.currentMatchId) {
+            stationMatchIds.add(parsed[c].currentMatchId);
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  // Prioritize active station-assigned matches, then live matches, then scheduled
   const sorted = [...matches].sort((a, b) => {
+    const aStation = stationMatchIds.has(a.id) ? 1 : 0;
+    const bStation = stationMatchIds.has(b.id) ? 1 : 0;
+    if (aStation !== bStation) return bStation - aStation;
+
     if (a.status === "live" && b.status !== "live") return -1;
     if (b.status === "live" && a.status !== "live") return 1;
-    return 0;
+    return (b.startedAt ?? 0) - (a.startedAt ?? 0);
   });
 
   const resultMap = new Map<string, LiveMatch>();
@@ -140,6 +169,7 @@ export function saveMatches(matches: LiveMatch[], syncToCloud = true): void {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitized));
       window.dispatchEvent(new Event("dv_matches_updated"));
+      window.dispatchEvent(new Event("dv_live_matches_updated"));
     } catch {
       // localStorage may be unavailable in SSR
     }
@@ -182,28 +212,98 @@ export function deleteMatch(matchId: string): LiveMatch[] {
   return filtered;
 }
 
+/**
+ * Safely merges cloud matches with local matches.
+ * Protects local live match status and in-progress scoring from being overwritten by stale cloud state.
+ */
+function mergeMatchesSafely(cloudMatches: LiveMatch[], localMatches: LiveMatch[]): LiveMatch[] {
+  const localMap = new Map(localMatches.map((l) => [l.id, l]));
+
+  const mergedCloud = cloudMatches.map((cm) => {
+    const lm = localMap.get(cm.id);
+    if (!lm) return cm;
+
+    // 0. If local match was recently reset, do not overwrite with stale cloud score
+    if (lm.resetAt && (!cm.resetAt || lm.resetAt > cm.resetAt)) {
+      return {
+        ...cm,
+        score: lm.score,
+        status: lm.status,
+        court: lm.court,
+        tossDone: lm.tossDone,
+        tossWinner: lm.tossWinner,
+        resetAt: lm.resetAt,
+        winnerTeam: lm.winnerTeam,
+        startedAt: lm.startedAt,
+        endedAt: lm.endedAt,
+      };
+    }
+
+    // 1. If local match transitioned to "live", preserve local live status and court
+    if (lm.status === "live" && cm.status === "scheduled") {
+      return {
+        ...cm,
+        status: "live" as const,
+        court: lm.court,
+        score: lm.score,
+        startedAt: lm.startedAt ?? cm.startedAt,
+      };
+    }
+
+    // 2. If local match has higher score/rallies than cloud, preserve local score
+    const localScoreTotal = (lm.score?.teamAScore ?? 0) + (lm.score?.teamBScore ?? 0);
+    const cloudScoreTotal = (cm.score?.teamAScore ?? 0) + (cm.score?.teamBScore ?? 0);
+    if (localScoreTotal > cloudScoreTotal) {
+      return {
+        ...cm,
+        score: lm.score,
+        status: lm.status,
+        court: lm.court,
+      };
+    }
+
+    return cm;
+  });
+
+  const cloudIds = new Set(cloudMatches.map((c) => c.id));
+  return [...mergedCloud, ...localMatches.filter((l) => !cloudIds.has(l.id))];
+}
+
 /* ─────────────────────────────────────────────
    React hook -- Cloud synced + Realtime live updates
 ───────────────────────────────────────────── */
 
 export function useMatchStore(tournamentSlug?: string) {
-  const [matches, setMatches] = useState<LiveMatch[]>(() => getMatches());
+  const [allMatches, setAllMatches] = useState<LiveMatch[]>(() => getMatches());
   const [isCloudSynced, setIsCloudSynced] = useState(false);
 
   const refresh = useCallback(() => {
-    setMatches(getMatches());
+    setAllMatches(getMatches());
   }, []);
+
+  const effectiveSlug = tournamentSlug === "all" ? undefined : tournamentSlug;
+
+  const matches = useMemo(() => {
+    if (!effectiveSlug) return allMatches;
+    return allMatches.filter(
+      (m) =>
+        m.tournamentSlug === effectiveSlug ||
+        (!m.tournamentSlug && m.id.includes(effectiveSlug))
+    );
+  }, [allMatches, effectiveSlug]);
 
   useEffect(() => {
     let mounted = true;
     refresh();
 
     // 1. Initial Cloud Hydration from Supabase
-    dbGetMatches(tournamentSlug)
+    dbGetMatches(effectiveSlug)
       .then((cloudMatches) => {
         if (mounted && cloudMatches.length > 0) {
-          saveMatches(cloudMatches, false);
-          setMatches(cloudMatches);
+          const local = getMatches();
+          const merged = mergeMatchesSafely(cloudMatches, local);
+          saveMatches(merged, false);
+          setAllMatches(merged);
           setIsCloudSynced(true);
         }
       })
@@ -217,11 +317,13 @@ export function useMatchStore(tournamentSlug?: string) {
       unsubRealtime = dbSubscribeToLive(
         () => {
           // On any match change in database
-          dbGetMatches(tournamentSlug)
+          dbGetMatches(effectiveSlug)
             .then((cloudMatches) => {
               if (mounted && cloudMatches.length > 0) {
-                saveMatches(cloudMatches, false);
-                setMatches(cloudMatches);
+                const local = getMatches();
+                const merged = mergeMatchesSafely(cloudMatches, local);
+                saveMatches(merged, false);
+                setAllMatches(merged);
                 setIsCloudSynced(true);
               }
             })
@@ -229,11 +331,13 @@ export function useMatchStore(tournamentSlug?: string) {
         },
         () => {
           // Court changes trigger match refresh
-          dbGetMatches(tournamentSlug)
+          dbGetMatches(effectiveSlug)
             .then((cloudMatches) => {
               if (mounted && cloudMatches.length > 0) {
-                saveMatches(cloudMatches, false);
-                setMatches(cloudMatches);
+                const local = getMatches();
+                const merged = mergeMatchesSafely(cloudMatches, local);
+                saveMatches(merged, false);
+                setAllMatches(merged);
               }
             })
             .catch(() => {});
@@ -266,27 +370,27 @@ export function useMatchStore(tournamentSlug?: string) {
       window.removeEventListener("storage", handleStorage);
       window.removeEventListener("dv_matches_updated", handleCustom);
     };
-  }, [refresh, tournamentSlug]);
+  }, [refresh, effectiveSlug]);
 
   const update = useCallback((matchId: string, updater: (m: LiveMatch) => LiveMatch) => {
     const updated = updateMatch(matchId, updater);
-    setMatches(updated);
+    setAllMatches(updated);
   }, []);
 
   const removeMatch = useCallback((matchId: string) => {
     const remaining = deleteMatch(matchId);
-    setMatches(remaining);
+    setAllMatches(remaining);
   }, []);
 
   const resetAll = useCallback(() => {
     saveMatches([], false);
-    setMatches([]);
+    setAllMatches([]);
     dbClearAllMatches().catch((err) =>
       console.warn("[Supabase] Clear all matches failed:", err)
     );
   }, []);
 
-  return { matches, refresh, update, deleteMatch: removeMatch, resetAll, isCloudSynced };
+  return { matches, allMatches, refresh, update, deleteMatch: removeMatch, resetAll, isCloudSynced };
 }
 
 /* ─────────────────────────────────────────────
@@ -460,6 +564,38 @@ export function undoLastRally(match: LiveMatch): LiveMatch {
   return replayMatch;
 }
 
+/**
+ * Resets a match back to 0-0, Server 2, empty rallies, and clears coin toss status
+ * so a fresh pre-match coin toss and scoring can be conducted.
+ */
+export function resetMatch(match: LiveMatch): LiveMatch {
+  if (typeof localStorage !== "undefined") {
+    try {
+      localStorage.removeItem(`dv_toss_done_${match.id}`);
+    } catch {
+      // ignore
+    }
+  }
+
+  return {
+    ...match,
+    status: match.court && match.court !== "Queue" ? "live" : "scheduled",
+    score: {
+      teamAScore: 0,
+      teamBScore: 0,
+      servingTeam: "A",
+      serverNumber: 2,
+      rallies: [],
+    },
+    winnerTeam: undefined,
+    startedAt: undefined,
+    endedAt: undefined,
+    tossDone: false,
+    tossWinner: undefined,
+    resetAt: Date.now(),
+  };
+}
+
 /* ─────────────────────────────────────────────
    Cross-referencing & synchronization helpers
 ───────────────────────────────────────────── */
@@ -516,7 +652,13 @@ export function syncDrawnBracketsToLiveMatches(
         // Check if a match for these two teams already exists in the store
         const existing = findLiveMatchForTeams(currentMatches, teamA.name, teamB.name);
         if (existing) {
-          newMatches.push(existing);
+          newMatches.push({
+            ...existing,
+            tournamentSlug: tournamentSlug || existing.tournamentSlug,
+            categoryId: categoryId || existing.categoryId,
+            stage: existing.stage || `Bracket ${group.letter} (Pool Play)`,
+            bracketLetter: existing.bracketLetter || group.letter,
+          });
         } else {
           newMatches.push({
             id: matchId,
@@ -531,18 +673,139 @@ export function syncDrawnBracketsToLiveMatches(
             startedAt: undefined,
             endedAt: undefined,
             officiatedBy: undefined,
+            tournamentSlug,
+            categoryId,
+            stage: `Bracket ${group.letter} (Pool Play)`,
+            bracketLetter: group.letter,
           });
         }
       }
     }
   }
 
-  // Retain any existing matches that belong to other tournaments
-  const updatedIds = new Set(newMatches.map((m) => m.id));
-  const retained = currentMatches.filter((m) => !updatedIds.has(m.id));
+  // Intelligently merge with existing matches:
+  // 1. Keep matches from other tournaments or categories.
+  // 2. In this tournament/category, preserve matches that are already in progress (live) or completed (final).
+  // 3. Keep any knockout matches (live-ko-).
+  // 4. Overwrite/replace old unplayed scheduled pool matches with the new bracket draw.
+  const newIds = new Set(newMatches.map((m) => m.id));
+  const retained = currentMatches.filter((m) => {
+    if (newIds.has(m.id)) return false;
+
+    const isThisTourneyAndCat =
+      (m.tournamentSlug === tournamentSlug || (!m.tournamentSlug && m.id.includes(tournamentSlug))) &&
+      (m.categoryId === categoryId || (!m.categoryId && m.id.includes(categoryId)));
+
+    if (isThisTourneyAndCat) {
+      if (m.status === "live" || m.status === "final" || m.id.startsWith("live-ko-")) {
+        return true;
+      }
+      return false;
+    }
+
+    return true;
+  });
+
   const merged = [...newMatches, ...retained];
   const { sanitized } = enforceFourCourtCapacity(merged);
   saveMatches(sanitized);
   return sanitized;
+}
+
+/**
+ * Removes all non-final matches belonging to a category.
+ * Used when all players/teams in a category are deleted.
+ */
+export function purgeMatchesForCategory(tournamentSlug: string, categoryId: string): void {
+  const current = getMatches();
+  const deletedMatchIds: string[] = [];
+
+  const retained = current.filter((m) => {
+    const isThisTourneyAndCat =
+      (m.tournamentSlug === tournamentSlug || (!m.tournamentSlug && m.id.includes(tournamentSlug))) &&
+      (m.categoryId === categoryId || (!m.categoryId && m.id.includes(categoryId)));
+
+    if (isThisTourneyAndCat && m.status !== "final") {
+      deletedMatchIds.push(m.id);
+      return false;
+    }
+    return true;
+  });
+
+  saveMatches(retained, false);
+
+  // Clean up from database
+  dbDeleteMatchesForCategory(tournamentSlug, categoryId).catch(() => {});
+  for (const id of deletedMatchIds) {
+    dbDeleteMatch(id).catch(() => {});
+  }
+}
+
+/**
+ * Removes non-final matches involving a specific deleted team.
+ */
+export function purgeMatchesForTeam(tournamentSlug: string, categoryId: string, teamName: string): void {
+  const cleanTeam = teamName.trim().toLowerCase();
+  const current = getMatches();
+  const deletedMatchIds: string[] = [];
+
+  const retained = current.filter((m) => {
+    const isThisTourneyAndCat =
+      (m.tournamentSlug === tournamentSlug || (!m.tournamentSlug && m.id.includes(tournamentSlug))) &&
+      (m.categoryId === categoryId || (!m.categoryId && m.id.includes(categoryId)));
+
+    if (isThisTourneyAndCat && m.status !== "final") {
+      const isTeamA = m.teamAName.trim().toLowerCase() === cleanTeam;
+      const isTeamB = m.teamBName.trim().toLowerCase() === cleanTeam;
+      if (isTeamA || isTeamB) {
+        deletedMatchIds.push(m.id);
+        return false;
+      }
+    }
+    return true;
+  });
+
+  if (deletedMatchIds.length > 0) {
+    saveMatches(retained, false);
+    for (const id of deletedMatchIds) {
+      dbDeleteMatch(id).catch(() => {});
+    }
+  }
+}
+
+/**
+ * Removes non-final matches in a category where either team is no longer in validTeamNames.
+ */
+export function purgeMatchesNotInTeams(
+  tournamentSlug: string,
+  categoryId: string,
+  validTeamNames: string[]
+): void {
+  const validSet = new Set(validTeamNames.map((t) => t.trim().toLowerCase()));
+  const current = getMatches();
+  const deletedMatchIds: string[] = [];
+
+  const retained = current.filter((m) => {
+    const isThisTourneyAndCat =
+      (m.tournamentSlug === tournamentSlug || (!m.tournamentSlug && m.id.includes(tournamentSlug))) &&
+      (m.categoryId === categoryId || (!m.categoryId && m.id.includes(categoryId)));
+
+    if (isThisTourneyAndCat && m.status !== "final") {
+      const teamAValid = validSet.has(m.teamAName.trim().toLowerCase());
+      const teamBValid = validSet.has(m.teamBName.trim().toLowerCase());
+      if (!teamAValid || !teamBValid) {
+        deletedMatchIds.push(m.id);
+        return false;
+      }
+    }
+    return true;
+  });
+
+  if (deletedMatchIds.length > 0) {
+    saveMatches(retained, false);
+    for (const id of deletedMatchIds) {
+      dbDeleteMatch(id).catch(() => {});
+    }
+  }
 }
 

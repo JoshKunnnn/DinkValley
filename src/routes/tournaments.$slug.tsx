@@ -1,5 +1,5 @@
 import { createFileRoute, notFound, Link } from "@tanstack/react-router";
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import {
   getTournament,
   teamName,
@@ -7,6 +7,7 @@ import {
   type Tournament,
   type Team,
 } from "@/data/tournaments";
+import { useTournamentStore } from "@/lib/tournament-store";
 import {
   useMatchStore,
   findLiveMatchForTeams,
@@ -17,6 +18,7 @@ import {
   type FacilityCourt,
   getCourtStations,
   getDispatchQueue,
+  isConfirmedDispatchedMatch,
 } from "@/lib/court-dispatch";
 import { getDrawnGroups, type BracketGroup } from "@/components/admin/BracketDraw";
 import { getMainDrawMatches, type KnockoutMatch } from "@/components/admin/DrawsManager";
@@ -57,31 +59,53 @@ export const Route = createFileRoute("/tournaments/$slug")({
 type TabKey = "live" | "bracket" | "pools" | "teams";
 
 function TournamentPage() {
-  const t = Route.useLoaderData();
+  const loaderTournament = Route.useLoaderData();
+  const { tournaments } = useTournamentStore();
+  const t = tournaments.find((x) => x.slug === loaderTournament.slug) ?? loaderTournament;
   const [activeId, setActiveId] = useState(() => t.categories?.[0]?.id ?? "");
   const { matches } = useMatchStore();
 
   const category = t.categories?.find((c) => c.id === activeId) ?? t.categories?.[0];
 
-  // Check how many live matches exist across the tournament
-  const liveMatches = useMemo(() => matches.filter((m) => m.status === "live"), [matches]);
-  const finalMatches = useMemo(() => matches.filter((m) => m.status === "final"), [matches]);
-  const scheduledMatches = useMemo(() => matches.filter((m) => m.status === "scheduled"), [matches]);
+  // Check how many confirmed/dispatched matches exist across the tournament
+  const confirmedMatches = useMemo(() => matches.filter((m) => isConfirmedDispatchedMatch(m)), [matches]);
+  const liveMatches = useMemo(() => confirmedMatches.filter((m) => m.status === "live"), [confirmedMatches]);
+  const finalMatches = useMemo(() => confirmedMatches.filter((m) => m.status === "final"), [confirmedMatches]);
+  const scheduledMatches = useMemo(() => confirmedMatches.filter((m) => m.status === "scheduled"), [confirmedMatches]);
 
   // Default to live tab if there are active live matches, otherwise bracket
   const [tab, setTab] = useState<TabKey>("bracket");
+  const [drawRevision, setDrawRevision] = useState(0);
+
+  useEffect(() => {
+    const handleDrawChange = () => {
+      setDrawRevision((v) => v + 1);
+    };
+
+    window.addEventListener("dv_drawn_groups_updated", handleDrawChange);
+    window.addEventListener("dv_main_draw_updated", handleDrawChange);
+    window.addEventListener("dv_live_matches_updated", handleDrawChange);
+    window.addEventListener("storage", handleDrawChange);
+
+    return () => {
+      window.removeEventListener("dv_drawn_groups_updated", handleDrawChange);
+      window.removeEventListener("dv_main_draw_updated", handleDrawChange);
+      window.removeEventListener("dv_live_matches_updated", handleDrawChange);
+      window.removeEventListener("storage", handleDrawChange);
+    };
+  }, []);
 
   // Check if drawn brackets exist from Bracket Draw (MAIN)
   const drawnGroups = useMemo(() => {
     if (!category) return null;
     return getDrawnGroups(t.slug, category.id);
-  }, [t.slug, category]);
+  }, [t.slug, category, drawRevision]);
 
   // Check if Point Differential seeded Main Draw exists from DrawsManager
   const mainDrawMatches = useMemo(() => {
     if (!category) return [];
     return getMainDrawMatches(t.slug, category.id);
-  }, [t.slug, category]);
+  }, [t.slug, category, drawRevision]);
 
   if (!category) {
     return (
@@ -404,20 +428,24 @@ function LiveCourtsTab({
 }) {
   const [filter, setFilter] = useState<"all" | "live" | "final" | "scheduled">("all");
 
-  const liveMatches = matches.filter((m) => m.status === "live");
-  const finalMatches = matches.filter((m) => m.status === "final");
-  const scheduledMatches = matches.filter((m) => m.status === "scheduled");
+  const stations = useMemo(() => getCourtStations(), [matches]);
+  const queue = useMemo(() => getDispatchQueue(), [matches]);
+  const queuedUpcoming = useMemo(() => queue.filter((q) => q.status === "queued" || q.status === "on_deck"), [queue]);
+
+  const confirmedMatches = useMemo(() => {
+    return matches.filter((m) => isConfirmedDispatchedMatch(m, stations));
+  }, [matches, stations]);
+
+  const liveMatches = confirmedMatches.filter((m) => m.status === "live");
+  const finalMatches = confirmedMatches.filter((m) => m.status === "final");
+  const scheduledMatches = confirmedMatches.filter((m) => m.status === "scheduled");
 
   const filteredMatches = useMemo(() => {
     if (filter === "live") return liveMatches;
     if (filter === "final") return finalMatches;
     if (filter === "scheduled") return scheduledMatches;
-    return matches;
-  }, [filter, matches, liveMatches, finalMatches, scheduledMatches]);
-
-  const stations = useMemo(() => getCourtStations(), [matches]);
-  const queue = useMemo(() => getDispatchQueue(), [matches]);
-  const queuedUpcoming = useMemo(() => queue.filter((q) => q.status === "queued" || q.status === "on_deck"), [queue]);
+    return confirmedMatches;
+  }, [filter, confirmedMatches, liveMatches, finalMatches, scheduledMatches]);
 
   const [scheduledMinimized, setScheduledMinimized] = useState(false);
   const queueScheduledMatches = useMemo(() => {
@@ -445,7 +473,7 @@ function LiveCourtsTab({
         {/* Filter pills */}
         <div className="flex flex-wrap gap-2">
           {[
-            { key: "all", label: "All Courts", count: matches.length },
+            { key: "all", label: "All Courts", count: confirmedMatches.length },
             { key: "live", label: "Live Now", count: liveMatches.length, isLive: true },
             { key: "final", label: "Final Results", count: finalMatches.length },
             { key: "scheduled", label: "Upcoming", count: scheduledMatches.length },
@@ -1780,39 +1808,73 @@ function Pools({
 ═══════════════════════════════════════════════ */
 
 function Teams({ category }: { category: Category }) {
-  return (
-    <ul className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-      {category.teams.map((t) => {
-        const isPaid = t.paid ?? false;
-        return (
-          <li key={t.id} className="surface-card p-4 flex flex-col justify-between gap-3 border border-border">
-            <div>
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-display text-xl sm:text-2xl text-foreground truncate">{t.name}</span>
-                <span
-                  className={`flex-shrink-0 px-2 py-0.5 text-[0.6rem] font-bold uppercase tracking-widest rounded ${
-                    isPaid
-                      ? "bg-pickle/20 text-pickle border border-pickle/40"
-                      : "bg-brick/20 text-brick border border-brick/40"
-                  }`}
-                >
-                  {isPaid ? "Verified Paid" : "Pending"}
-                </span>
-              </div>
-              <p className="mt-1 text-xs text-muted-foreground">{t.players.join(" & ")}</p>
-            </div>
+  if (!category.teams || category.teams.length === 0) {
+    return (
+      <div className="surface-card p-10 text-center border border-border space-y-3">
+        <span className="text-xs uppercase tracking-[0.28em] font-bold text-pickle block">
+          Roster Standby
+        </span>
+        <h3 className="font-display text-2xl text-foreground">No Teams Registered Yet</h3>
+        <p className="text-sm text-muted-foreground max-w-md mx-auto">
+          Teams and player rosters will appear here once registered. Organizers can add, auto-populate, or delete teams in the Admin Console.
+        </p>
+        <Link
+          to="/admin"
+          className="inline-block mt-2 px-4 py-2 bg-pickle text-sand text-xs font-bold uppercase tracking-widest hover:opacity-90 transition-opacity"
+        >
+          Open Organizer Console &rarr;
+        </Link>
+      </div>
+    );
+  }
 
-            <div className="pt-2 border-t border-border/50 flex items-center justify-between text-[0.65rem] text-muted-foreground uppercase tracking-widest font-mono">
-              <span>Ref: {t.paymentRef ?? "GC-98214309"}</span>
-              {t.paymentProofUrl && (
-                <span className="text-pickle font-bold flex items-center gap-1">
-                  <span className="h-1.5 w-1.5 rounded-full bg-pickle" /> Photo Attached
-                </span>
-              )}
-            </div>
-          </li>
-        );
-      })}
-    </ul>
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-b border-border pb-3">
+        <span className="text-xs uppercase tracking-widest text-muted-foreground font-bold">
+          {category.teams.length} Registered Teams
+        </span>
+        <Link
+          to="/admin"
+          className="text-xs text-pickle font-bold uppercase tracking-wider hover:underline"
+        >
+          Organizer Console: Manage &amp; Delete Players &rarr;
+        </Link>
+      </div>
+
+      <ul className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        {category.teams.map((t) => {
+          const isPaid = t.paid ?? false;
+          return (
+            <li key={t.id} className="surface-card p-4 flex flex-col justify-between gap-3 border border-border">
+              <div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-display text-xl sm:text-2xl text-foreground truncate">{t.name}</span>
+                  <span
+                    className={`flex-shrink-0 px-2 py-0.5 text-[0.6rem] font-bold uppercase tracking-widest rounded ${
+                      isPaid
+                        ? "bg-pickle/20 text-pickle border border-pickle/40"
+                        : "bg-brick/20 text-brick border border-brick/40"
+                    }`}
+                  >
+                    {isPaid ? "Verified Paid" : "Pending"}
+                  </span>
+                </div>
+                <p className="mt-1 text-xs text-muted-foreground">{t.players.join(" & ")}</p>
+              </div>
+
+              <div className="pt-2 border-t border-border/50 flex items-center justify-between text-[0.65rem] text-muted-foreground uppercase tracking-widest font-mono">
+                <span>Ref: {t.paymentRef ?? "GC-98214309"}</span>
+                {t.paymentProofUrl && (
+                  <span className="text-pickle font-bold flex items-center gap-1">
+                    <span className="h-1.5 w-1.5 rounded-full bg-pickle" /> Photo Attached
+                  </span>
+                )}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
   );
 }

@@ -138,13 +138,19 @@ export async function dbSaveTournament(t: Tournament): Promise<boolean> {
         continue;
       }
 
-      // 3. Upsert teams for this category
+      // 3. Sync teams: remove previous teams for this category and insert current roster
+      await supabase.from("teams").delete().eq("category_id", catRow.id);
+
       if (cat.teams && cat.teams.length > 0) {
-        const teamsToUpsert = cat.teams.map((tm) => ({
+        const isUuid = (id?: string) =>
+          id ? /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) : false;
+
+        const teamsToInsert = cat.teams.map((tm) => ({
+          ...(isUuid(tm.id) ? { id: tm.id } : {}),
           tournament_id: tournamentId,
           category_id: catRow.id,
           name: tm.name,
-          players: tm.players || [],
+          players: Array.isArray(tm.players) ? tm.players : [],
           club: tm.club || null,
           paid: Boolean(tm.paid),
           payment_proof_url: tm.paymentProofUrl || null,
@@ -152,9 +158,7 @@ export async function dbSaveTournament(t: Tournament): Promise<boolean> {
           payment_status: tm.paymentStatus || "Pending",
         }));
 
-        const { error: teamErr } = await supabase
-          .from("teams")
-          .upsert(teamsToUpsert, { onConflict: "id" });
+        const { error: teamErr } = await supabase.from("teams").insert(teamsToInsert);
 
         if (teamErr) {
           console.error("[Supabase] Error saving teams:", teamErr);
@@ -187,6 +191,84 @@ export async function dbDeleteTournament(slug: string): Promise<boolean> {
 }
 
 /**
+ * Delete all teams belonging to a specific category from Supabase.
+ */
+export async function dbDeleteAllTeamsInCategory(
+  tournamentSlug: string,
+  categorySlug: string
+): Promise<boolean> {
+  try {
+    const { data: tourney } = await supabase
+      .from("tournaments")
+      .select("id")
+      .eq("slug", tournamentSlug)
+      .maybeSingle();
+
+    if (!tourney) return false;
+
+    const { data: cat } = await supabase
+      .from("categories")
+      .select("id")
+      .eq("tournament_id", tourney.id)
+      .eq("category_slug", categorySlug)
+      .maybeSingle();
+
+    if (!cat) return false;
+
+    const { error } = await supabase.from("teams").delete().eq("category_id", cat.id);
+    if (error) {
+      console.error("[Supabase] Error deleting teams from category:", error.message);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error("[Supabase] Unexpected error deleting category teams:", err);
+    return false;
+  }
+}
+
+/**
+ * Delete an individual team from Supabase by its ID.
+ */
+export async function dbDeleteTeam(teamId: string): Promise<boolean> {
+  try {
+    const { error } = await supabase.from("teams").delete().eq("id", teamId);
+    if (error) {
+      console.warn("[Supabase] Error deleting team:", error.message);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn("[Supabase] Unexpected error deleting team:", err);
+    return false;
+  }
+}
+
+/**
+ * Delete all non-final matches for a specific category from Supabase.
+ */
+export async function dbDeleteMatchesForCategory(
+  tournamentSlug: string,
+  categoryId: string
+): Promise<boolean> {
+  try {
+    const { error } = await supabase
+      .from("matches")
+      .delete()
+      .eq("tournament_slug", tournamentSlug)
+      .eq("category_id", categoryId)
+      .neq("status", "final");
+    if (error) {
+      console.warn("[Supabase] Error deleting category matches:", error.message);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn("[Supabase] Unexpected error deleting category matches:", err);
+    return false;
+  }
+}
+
 /**
  * Fetch matches from Supabase.
  * If tournamentSlug is provided, filters by tournament; otherwise returns all active matches.
@@ -236,6 +318,8 @@ export async function dbGetMatches(tournamentSlug?: string): Promise<LiveMatch[]
         endedAt: m.ended_at ? new Date(m.ended_at).getTime() : undefined,
         officiatedBy: m.officiated_by || undefined,
         tournamentSlug: m.tournament_slug || tournamentSlug || undefined,
+        categoryId: m.category_id || undefined,
+        stage: m.stage || undefined,
       };
     });
   } catch (err) {
@@ -266,10 +350,15 @@ export async function dbSaveMatch(
       }
     }
 
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const catId = match.categoryId && isUuid.test(match.categoryId) ? match.categoryId : null;
+
     const { error } = await supabase.from("matches").upsert({
       id: match.id,
       tournament_id: tourneyId,
       tournament_slug: slug || null,
+      category_id: catId,
+      stage: match.stage || "Pool Play",
       court: match.court,
       team_a_name: match.teamAName,
       team_a_players: match.teamAPlayers,
@@ -334,6 +423,18 @@ export async function dbGetCourtStations(): Promise<Record<string, any>> {
 
     const map: Record<string, any> = {};
     for (const station of data) {
+      // Map DB status to UI status: 'in-match' -> 'live', 'idle' -> 'available'
+      let uiStatus: "available" | "warmup" | "live" | "maintenance" = "available";
+      if (station.status === "in-match" || station.status === "live") {
+        uiStatus = "live";
+      } else if (station.status === "warmup") {
+        uiStatus = "warmup";
+      } else if (station.status === "maintenance") {
+        uiStatus = "maintenance";
+      } else {
+        uiStatus = "available";
+      }
+
       map[station.court_name] = {
         court: station.court_name,
         currentMatchId: station.current_match_id,
@@ -341,7 +442,7 @@ export async function dbGetCourtStations(): Promise<Record<string, any>> {
         assignedUmpire: station.assigned_umpire,
         dispatchedAt: station.dispatched_at ? new Date(station.dispatched_at).getTime() : null,
         maintenanceNote: station.maintenance_note,
-        status: station.status,
+        status: uiStatus,
       };
     }
     return map;
@@ -366,10 +467,22 @@ export async function dbUpdateCourtStation(
   }
 ): Promise<void> {
   try {
+    // Map UI status to DB status to satisfy database constraint CHECK (status IN ('idle', 'in-match', 'warmup', 'maintenance'))
+    let dbStatus: string | undefined = undefined;
+    if (updates.status !== undefined) {
+      if (updates.status === "live") {
+        dbStatus = "in-match";
+      } else if (updates.status === "available") {
+        dbStatus = "idle";
+      } else {
+        dbStatus = updates.status;
+      }
+    }
+
     await supabase
       .from("court_stations")
       .update({
-        ...(updates.status !== undefined ? { status: updates.status } : {}),
+        ...(dbStatus !== undefined ? { status: dbStatus } : {}),
         ...(updates.currentMatchId !== undefined ? { current_match_id: updates.currentMatchId } : {}),
         ...(updates.onDeckMatchId !== undefined ? { on_deck_match_id: updates.onDeckMatchId } : {}),
         ...(updates.assignedUmpire !== undefined ? { assigned_umpire: updates.assignedUmpire } : {}),

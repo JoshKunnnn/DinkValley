@@ -4,8 +4,18 @@ import {
   dbGetTournaments,
   dbSaveTournament,
   dbDeleteTournament,
+  dbDeleteTeam,
+  dbDeleteAllTeamsInCategory,
   dbSubscribeToLive,
 } from "@/lib/supabase-service";
+import {
+  purgeQueueForCategory,
+  purgeQueueForTeam,
+} from "@/lib/court-dispatch";
+import {
+  purgeMatchesForCategory,
+  purgeMatchesForTeam,
+} from "@/lib/match-store";
 
 const STORAGE_KEY = "dv_tournaments";
 
@@ -202,12 +212,29 @@ export function removeTeamFromCategory(tournamentSlug: string, categoryId: strin
   const tournament = current.find((t) => t.slug === tournamentSlug);
   if (!tournament) return undefined;
 
+  let removedTeamName: string | undefined;
+
   const categories = tournament.categories.map((c) => {
     if (c.id === categoryId) {
+      const targetTeam = c.teams.find((t) => t.id === teamId);
+      if (targetTeam) {
+        removedTeamName = targetTeam.name;
+      }
       const teams = c.teams.filter((t) => t.id !== teamId);
       return { ...c, teams };
     }
     return c;
+  });
+
+  if (removedTeamName) {
+    // Auto delete matches in queue and active matches involving this deleted team
+    purgeQueueForTeam(tournamentSlug, categoryId, removedTeamName);
+    purgeMatchesForTeam(tournamentSlug, categoryId, removedTeamName);
+  }
+
+  // Delete from Supabase in background
+  dbDeleteTeam(teamId).catch((err) => {
+    console.warn("[Supabase] Failed to delete team:", err);
   });
 
   return updateTournament(tournamentSlug, { categories });
@@ -238,6 +265,55 @@ export function updateTeamInTournament(
 }
 
 /**
+ * Bulk set or replace teams in a specific category within a tournament.
+ */
+export function bulkSetTeamsInCategory(
+  tournamentSlug: string,
+  categoryId: string,
+  teams: Team[]
+): Tournament | undefined {
+  const current = getTournaments();
+  const tournament = current.find((t) => t.slug === tournamentSlug);
+  if (!tournament) return undefined;
+
+  const categories = tournament.categories.map((c) => {
+    if (c.id === categoryId) {
+      return { ...c, teams };
+    }
+    return c;
+  });
+
+  return updateTournament(tournamentSlug, { categories });
+}
+
+/**
+ * Delete all teams from a specific category within a tournament.
+ * Also cleans up any drawn bracket cache for this category and
+ * automatically purges all corresponding matches in the dispatch queue.
+ */
+export function deleteAllTeamsInCategory(
+  tournamentSlug: string,
+  categoryId: string
+): Tournament | undefined {
+  try {
+    localStorage.removeItem(`dv_drawn_groups_${tournamentSlug}_${categoryId}`);
+  } catch {
+    // ignore
+  }
+
+  // Auto delete matches in queue and active matches for this category
+  purgeQueueForCategory(tournamentSlug, categoryId);
+  purgeMatchesForCategory(tournamentSlug, categoryId);
+
+  // Delete from Supabase in background
+  dbDeleteAllTeamsInCategory(tournamentSlug, categoryId).catch((err) => {
+    console.warn("[Supabase] Failed to delete category teams:", err);
+  });
+
+  return bulkSetTeamsInCategory(tournamentSlug, categoryId, []);
+}
+
+/**
  * React hook to access and synchronize tournament state.
  */
 export function useTournamentStore() {
@@ -250,13 +326,61 @@ export function useTournamentStore() {
   useEffect(() => {
     refresh();
 
+    const mergeWithLocal = (cloudTournaments: Tournament[]) => {
+      const local = getTournaments();
+      if (!cloudTournaments || cloudTournaments.length === 0) return local;
+      if (!local || local.length === 0) return cloudTournaments;
+
+      return cloudTournaments.map((cloudT) => {
+        const localT = local.find((l) => l.slug === cloudT.slug);
+        if (!localT) return cloudT;
+
+        const categories = cloudT.categories.map((cloudC) => {
+          const localC = localT.categories.find((lc) => lc.id === cloudC.id);
+          if (!localC) return cloudC;
+
+          // If database returned teams array, database is the source of truth
+          const teams = Array.isArray(cloudC.teams) ? cloudC.teams : localC.teams || [];
+
+          // If teams were deleted from database, auto purge corresponding matches
+          if (localC.teams && localC.teams.length > teams.length) {
+            if (teams.length === 0) {
+              purgeQueueForCategory(cloudT.slug, cloudC.id);
+              purgeMatchesForCategory(cloudT.slug, cloudC.id);
+            } else {
+              const currentNames = new Set(teams.map((t) => t.name.trim().toLowerCase()));
+              const removedTeams = localC.teams.filter(
+                (lt) => !currentNames.has(lt.name.trim().toLowerCase())
+              );
+              for (const rt of removedTeams) {
+                purgeQueueForTeam(cloudT.slug, cloudC.id, rt.name);
+                purgeMatchesForTeam(cloudT.slug, cloudC.id, rt.name);
+              }
+            }
+          }
+
+          return {
+            ...cloudC,
+            teams,
+          };
+        });
+
+        return {
+          ...cloudT,
+          categories,
+          teamsCount: categories.reduce((sum, c) => sum + (c.teams?.length || 0), 0),
+        };
+      });
+    };
+
     // Fetch from Supabase and hydrate local store
     let mounted = true;
     dbGetTournaments()
       .then((cloudTournaments) => {
         if (mounted && cloudTournaments.length > 0) {
-          saveTournaments(cloudTournaments);
-          setTournaments(cloudTournaments);
+          const merged = mergeWithLocal(cloudTournaments);
+          saveTournaments(merged);
+          setTournaments(merged);
         }
       })
       .catch((err) => {
@@ -271,8 +395,9 @@ export function useTournamentStore() {
           dbGetTournaments()
             .then((cloudTournaments) => {
               if (mounted && cloudTournaments.length > 0) {
-                saveTournaments(cloudTournaments);
-                setTournaments(cloudTournaments);
+                const merged = mergeWithLocal(cloudTournaments);
+                saveTournaments(merged);
+                setTournaments(merged);
               }
             })
             .catch(() => {});

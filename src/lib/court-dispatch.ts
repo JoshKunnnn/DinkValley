@@ -149,7 +149,7 @@ export function saveCourtStations(stations: Record<FacilityCourt, CourtStation>,
           assignedUmpire: st.assignedUmpire,
           dispatchedAt: st.dispatchedAt,
           maintenanceNote: st.maintenanceNote,
-        }).catch(() => {});
+        }).catch(() => { });
       }
     }
   }
@@ -173,6 +173,7 @@ export function saveDispatchQueue(queue: QueueItem[]): void {
   try {
     localStorage.setItem(QUEUE_KEY, JSON.stringify(queue));
     window.dispatchEvent(new Event("storage"));
+    window.dispatchEvent(new Event("dv_dispatch_queue_updated"));
   } catch {
     // ignore
   }
@@ -286,6 +287,13 @@ export function dispatchMatchToCourt(
         officiatedBy: umpire ?? m.officiatedBy,
       };
     }
+    // Route any other non-final match previously assigned to this court back to Queue
+    if (m.court === court && m.status !== "final") {
+      return {
+        ...m,
+        court: "Queue",
+      };
+    }
     return m;
   });
 
@@ -375,6 +383,19 @@ export function autoDispatchNext(court: FacilityCourt, umpire?: string): QueueIt
   }, umpire);
 
   return nextMatch;
+}
+
+/**
+ * Sets a court station to live status.
+ */
+export function setCourtLive(court: FacilityCourt, matchId?: string): void {
+  const stations = getCourtStations();
+  stations[court] = {
+    ...stations[court],
+    status: "live",
+    currentMatchId: matchId ?? stations[court].currentMatchId,
+  };
+  saveCourtStations(stations);
 }
 
 /**
@@ -514,6 +535,104 @@ export function removeQueueItem(matchId: string): void {
 }
 
 /**
+ * Removes all matches from the dispatch queue belonging to a specific category.
+ * Also clears any court stations that were assigned to matches from this category.
+ */
+export function purgeQueueForCategory(tournamentSlug: string, categoryId: string): void {
+  const queue = getDispatchQueue();
+  const filtered = queue
+    .filter((q) => {
+      const matchInCat =
+        (q.categoryId && q.categoryId === categoryId) ||
+        (q.matchId && q.matchId.includes(categoryId));
+      const matchInTourney =
+        !q.tournamentSlug ||
+        q.tournamentSlug === tournamentSlug ||
+        (q.matchId && q.matchId.includes(tournamentSlug));
+      // Remove item if it belongs to this category and tournament
+      return !(matchInCat && matchInTourney);
+    })
+    .map((q, i) => ({ ...q, priority: i + 1 }));
+  saveDispatchQueue(filtered);
+
+  // Release any active court stations holding matches from this category
+  const stations = getCourtStations();
+  let stationModified = false;
+  for (const c of FACILITY_COURTS) {
+    const st = stations[c];
+    if (st.currentMatchId && st.currentMatchId.includes(categoryId)) {
+      st.currentMatchId = null;
+      st.status = "available";
+      st.dispatchedAt = null;
+      stationModified = true;
+    }
+    if (st.onDeckMatchId && st.onDeckMatchId.includes(categoryId)) {
+      st.onDeckMatchId = null;
+      stationModified = true;
+    }
+  }
+  if (stationModified) {
+    saveCourtStations(stations);
+  }
+}
+
+/**
+ * Removes all matches from the dispatch queue involving a specific team that was deleted.
+ */
+export function purgeQueueForTeam(tournamentSlug: string, categoryId: string, teamName: string): void {
+  const cleanTeam = teamName.trim().toLowerCase();
+  const queue = getDispatchQueue();
+  const filtered = queue
+    .filter((q) => {
+      const isMatchCategory =
+        (!q.categoryId || q.categoryId === categoryId || (q.matchId && q.matchId.includes(categoryId))) &&
+        (!q.tournamentSlug || q.tournamentSlug === tournamentSlug || (q.matchId && q.matchId.includes(tournamentSlug)));
+      if (!isMatchCategory) return true;
+      const isTeamA = q.teamAName.trim().toLowerCase() === cleanTeam;
+      const isTeamB = q.teamBName.trim().toLowerCase() === cleanTeam;
+      return !isTeamA && !isTeamB;
+    })
+    .map((q, i) => ({ ...q, priority: i + 1 }));
+  saveDispatchQueue(filtered);
+}
+
+/**
+ * Removes all matches from the dispatch queue where either team is not in the valid teams list.
+ */
+export function purgeQueueNotInTeams(
+  tournamentSlug: string,
+  categoryId: string,
+  validTeamNames: string[]
+): void {
+  const validSet = new Set(validTeamNames.map((t) => t.trim().toLowerCase()));
+  const queue = getDispatchQueue();
+  let modified = false;
+
+  const filtered = queue
+    .filter((q) => {
+      const isMatchCategory =
+        (!q.categoryId || q.categoryId === categoryId || (q.matchId && q.matchId.includes(categoryId))) &&
+        (!q.tournamentSlug || q.tournamentSlug === tournamentSlug || (q.matchId && q.matchId.includes(tournamentSlug)));
+      if (!isMatchCategory) return true;
+      if (q.id.startsWith("custom-")) return true;
+
+      const teamAValid = validSet.has(q.teamAName.trim().toLowerCase());
+      const teamBValid = validSet.has(q.teamBName.trim().toLowerCase());
+
+      if (!teamAValid || !teamBValid) {
+        modified = true;
+        return false;
+      }
+      return true;
+    })
+    .map((q, i) => ({ ...q, priority: i + 1 }));
+
+  if (modified) {
+    saveDispatchQueue(filtered);
+  }
+}
+
+/**
  * Adds multiple matches to the queue.
  */
 export function addMatchesToQueue(
@@ -610,6 +729,8 @@ export function checkSimultaneousPlayConflict(teamName: string): LiveConflict | 
 
   const live = matches.find((m) => {
     if (m.status !== "live" && m.status !== "scheduled") return false;
+    // Only actual operating facility courts constitute a physical simultaneous play conflict (not "Queue")
+    if (!m.court || !FACILITY_COURTS.includes(m.court as FacilityCourt)) return false;
     const a = m.teamAName.trim().toLowerCase();
     const b = m.teamBName.trim().toLowerCase();
     return a === clean || b === clean;
@@ -625,3 +746,136 @@ export function checkSimultaneousPlayConflict(teamName: string): LiveConflict | 
 
   return null;
 }
+
+/* ─────────────────────────────────────────────
+   Category Sequence & Wave Arrangement
+───────────────────────────────────────────── */
+
+export function getCategorySequence(
+  tournamentSlug: string,
+  categories: { id: string }[],
+): string[] {
+  const allIds = categories.map((c) => c.id);
+  const allIdSet = new Set(allIds);
+
+  try {
+    const raw = localStorage.getItem(`dv_category_sequence_${tournamentSlug}`);
+    if (!raw) return allIds;
+    const parsed = JSON.parse(raw) as string[];
+    if (!Array.isArray(parsed)) return allIds;
+
+    // Filter out categories that no longer exist
+    const valid = parsed.filter((id) => allIdSet.has(id));
+
+    // Append any newly added categories that were not yet in the saved sequence
+    const validSet = new Set(valid);
+    for (const id of allIds) {
+      if (!validSet.has(id)) {
+        valid.push(id);
+      }
+    }
+
+    return valid;
+  } catch {
+    return allIds;
+  }
+}
+
+export function saveCategorySequence(
+  tournamentSlug: string,
+  sequence: string[],
+): void {
+  try {
+    localStorage.setItem(
+      `dv_category_sequence_${tournamentSlug}`,
+      JSON.stringify(sequence),
+    );
+    window.dispatchEvent(new Event("storage"));
+    window.dispatchEvent(new Event("dv_category_sequence_updated"));
+  } catch {
+    // ignore
+  }
+}
+
+export function getActiveWaveId(
+  tournamentSlug: string,
+  fallbackId: string,
+): string {
+  try {
+    const stored = localStorage.getItem(`dv_active_wave_${tournamentSlug}`);
+    return stored && stored.trim().length > 0 ? stored : fallbackId;
+  } catch {
+    return fallbackId;
+  }
+}
+
+export function setActiveWaveId(
+  tournamentSlug: string,
+  categoryId: string,
+): void {
+  try {
+    localStorage.setItem(`dv_active_wave_${tournamentSlug}`, categoryId);
+    window.dispatchEvent(new Event("storage"));
+    window.dispatchEvent(new Event("dv_category_sequence_updated"));
+  } catch {
+    // ignore
+  }
+}
+
+export function reorderCategorySequence(
+  tournamentSlug: string,
+  categories: { id: string }[],
+  categoryId: string,
+  direction: "prev" | "next",
+): string[] {
+  const current = getCategorySequence(tournamentSlug, categories);
+  const index = current.indexOf(categoryId);
+  if (index === -1) return current;
+
+  const nextOrder = [...current];
+  if (direction === "prev" && index > 0) {
+    const temp = nextOrder[index - 1]!;
+    nextOrder[index - 1] = categoryId;
+    nextOrder[index] = temp;
+  } else if (direction === "next" && index < nextOrder.length - 1) {
+    const temp = nextOrder[index + 1]!;
+    nextOrder[index + 1] = categoryId;
+    nextOrder[index] = temp;
+  }
+
+  saveCategorySequence(tournamentSlug, nextOrder);
+  return nextOrder;
+}
+
+/**
+ * Checks whether a match has been officially confirmed or dispatched by an admin in Court Dispatch:
+ * 1. Final/completed matches that were previously scored and concluded
+ * 2. Matches actively occupying a facility court station (Courts 1–4, in warmup or live)
+ * 3. Matches designated as on-deck on a facility court station
+ * 4. Matches marked live on a facility court
+ */
+export function isConfirmedDispatchedMatch(
+  m: LiveMatch,
+  stations?: Record<FacilityCourt, CourtStation> | null,
+): boolean {
+  if (m.status === "final") return true;
+
+  const currentStations = stations ?? getCourtStations();
+  for (const c of FACILITY_COURTS) {
+    const st = currentStations[c];
+    if (st?.currentMatchId === m.id) return true;
+    if (st?.onDeckMatchId === m.id) return true;
+  }
+
+  if (
+    m.status === "live" &&
+    m.court &&
+    m.court !== "Queue" &&
+    (FACILITY_COURTS as readonly string[]).includes(m.court as FacilityCourt)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+

@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useCallback } from "react";
 import type { Team, Tournament, Category } from "@/data/tournaments";
 import { getDrawnGroups } from "./BracketDraw";
 import { getMatches, saveMatches, sanitizeCourtName, type LiveMatch } from "@/lib/match-store";
@@ -70,6 +70,8 @@ const MAIN_DRAW_KEY = (slug: string, catId: string) => `dv_main_draw_${slug}_${c
 export function saveMainDrawMatches(slug: string, catId: string, matches: KnockoutMatch[]) {
   try {
     localStorage.setItem(MAIN_DRAW_KEY(slug, catId), JSON.stringify(matches));
+    window.dispatchEvent(new Event("dv_main_draw_updated"));
+    window.dispatchEvent(new Event("storage"));
   } catch {
     // ignore
   }
@@ -120,7 +122,13 @@ export function syncKnockoutToLiveMatches(
     const existing = current.find((m) => m.id === matchId);
 
     if (existing) {
-      newMatches.push({ ...existing, court: sanitizeCourtName(existing.court) });
+      newMatches.push({
+        ...existing,
+        court: sanitizeCourtName(existing.court),
+        tournamentSlug: tournamentSlug || existing.tournamentSlug,
+        categoryId: categoryId || existing.categoryId,
+        stage: existing.stage || `${km.round} - ${km.label}`,
+      });
     } else {
       newMatches.push({
         id: matchId,
@@ -141,6 +149,9 @@ export function syncKnockoutToLiveMatches(
         startedAt: undefined,
         endedAt: undefined,
         officiatedBy: undefined,
+        tournamentSlug,
+        categoryId,
+        stage: `${km.round} - ${km.label}`,
       });
     }
   }
@@ -178,12 +189,14 @@ export function DrawsManager({
   const [stageView, setStageView] = useState<"round_robin" | "main_draw">("round_robin");
   const [syncNotice, setSyncNotice] = useState<string | null>(null);
 
-  // Initialize groups directly from Bracket Draw (MAIN)
-  const initializeGroupsFromDrawn = (): BracketGroup[] => {
+  // Initialize groups directly from Bracket Draw (MAIN) and sync with live scores
+  const initializeGroupsFromDrawn = useCallback((): BracketGroup[] => {
     const drawn = getDrawnGroups(tournamentSlug, categoryId);
     if (!drawn || drawn.length === 0) return [];
 
+    const liveMatches = getMatches();
     let courtCounter = 1;
+
     return drawn.map((dGrp) => {
       const teams = dGrp.slots
         .map((s) => s.team)
@@ -192,14 +205,55 @@ export function DrawsManager({
       const matches: BracketMatch[] = [];
       for (let i = 0; i < teams.length; i++) {
         for (let j = i + 1; j < teams.length; j++) {
+          const teamA = teams[i]!;
+          const teamB = teams[j]!;
+          const matchId = `live-${tournamentSlug}-${categoryId}-${dGrp.letter}-${i + 1}v${j + 1}`;
+          const bracketMatchId = `bracket-${dGrp.letter}-m${i + 1}-${j + 1}`;
+
+          const liveMatch = liveMatches.find(
+            (lm) =>
+              lm.id === matchId ||
+              (lm.categoryId === categoryId &&
+                ((lm.teamAName === teamA.name && lm.teamBName === teamB.name) ||
+                  (lm.teamAName === teamB.name && lm.teamBName === teamA.name)))
+          );
+
+          let scoreA: number | undefined = undefined;
+          let scoreB: number | undefined = undefined;
+          let status: BracketMatch["status"] = "scheduled";
+          let court = courtCounter <= 4 ? `Court ${courtCounter}` : "Queue";
+
+          if (liveMatch) {
+            court = liveMatch.court;
+            if (liveMatch.status === "final") {
+              status = "completed";
+              if (liveMatch.teamAName === teamA.name) {
+                scoreA = liveMatch.score.teamAScore;
+                scoreB = liveMatch.score.teamBScore;
+              } else {
+                scoreA = liveMatch.score.teamBScore;
+                scoreB = liveMatch.score.teamAScore;
+              }
+            } else if (liveMatch.status === "live") {
+              status = "in_progress";
+              if (liveMatch.teamAName === teamA.name) {
+                scoreA = liveMatch.score.teamAScore;
+                scoreB = liveMatch.score.teamBScore;
+              } else {
+                scoreA = liveMatch.score.teamBScore;
+                scoreB = liveMatch.score.teamAScore;
+              }
+            }
+          }
+
           matches.push({
-            id: `bracket-${dGrp.letter}-m${i + 1}-${j + 1}`,
-            court: courtCounter <= 4 ? `Court ${courtCounter}` : "Queue",
-            teamAId: teams[i]!.id,
-            teamBId: teams[j]!.id,
-            scoreA: undefined,
-            scoreB: undefined,
-            status: "scheduled",
+            id: bracketMatchId,
+            court,
+            teamAId: teamA.id,
+            teamBId: teamB.id,
+            scoreA,
+            scoreB,
+            status,
           });
           courtCounter++;
         }
@@ -212,7 +266,7 @@ export function DrawsManager({
         matches,
       };
     });
-  };
+  }, [tournamentSlug, categoryId]);
 
   // State for brackets and main draw
   const [brackets, setBrackets] = useState<BracketGroup[]>(() => initializeGroupsFromDrawn());
@@ -224,8 +278,7 @@ export function DrawsManager({
     return Boolean(existing && existing.length > 0);
   });
 
-  // Sync brackets whenever tournament or category changes
-  useEffect(() => {
+  const syncFromStorage = useCallback(() => {
     setBrackets(initializeGroupsFromDrawn());
     const existing = getMainDrawMatches(tournamentSlug, categoryId);
     if (existing && existing.length > 0) {
@@ -235,7 +288,28 @@ export function DrawsManager({
       setMainDrawMatches([]);
       setMainDrawGenerated(false);
     }
-  }, [tournamentSlug, categoryId]);
+  }, [initializeGroupsFromDrawn, tournamentSlug, categoryId]);
+
+  // Real-time synchronization across draw resets, score entries, and cross-tab actions
+  useEffect(() => {
+    syncFromStorage();
+
+    const handleSync = () => {
+      syncFromStorage();
+    };
+
+    window.addEventListener("dv_drawn_groups_updated", handleSync);
+    window.addEventListener("dv_live_matches_updated", handleSync);
+    window.addEventListener("dv_main_draw_updated", handleSync);
+    window.addEventListener("storage", handleSync);
+
+    return () => {
+      window.removeEventListener("dv_drawn_groups_updated", handleSync);
+      window.removeEventListener("dv_live_matches_updated", handleSync);
+      window.removeEventListener("dv_main_draw_updated", handleSync);
+      window.removeEventListener("storage", handleSync);
+    };
+  }, [syncFromStorage]);
 
   // Compute standings for a bracket (Point Differential is primary tie-breaker)
   const calculateBracketStandings = (group: BracketGroup): StandingRow[] => {

@@ -6,6 +6,9 @@ import {
   scorePoint,
   sideOut,
   endGame,
+  resetMatch,
+  purgeMatchesForCategory,
+  purgeMatchesNotInTeams,
 } from "@/lib/match-store";
 import {
   FACILITY_COURTS,
@@ -30,9 +33,143 @@ import {
   addMatchesToQueue,
   checkRestPeriodConflict,
   checkSimultaneousPlayConflict,
+  purgeQueueForCategory,
+  purgeQueueNotInTeams,
+  getCategorySequence,
+  saveCategorySequence,
+  getActiveWaveId,
+  setActiveWaveId,
+  reorderCategorySequence,
 } from "@/lib/court-dispatch";
 import { getDrawnGroups } from "@/components/admin/BracketDraw";
 import { getMainDrawMatches } from "@/components/admin/DrawsManager";
+import { dbUpdateCourtStation } from "@/lib/supabase-service";
+
+/**
+ * Computes all unassigned matches for a category from drawn groups, direct roster buckets, or main draw playoffs.
+ */
+function computeCategoryUnassignedMatches(
+  tournamentSlug: string,
+  cat: Category | undefined,
+  queue: QueueItem[],
+  stations: Record<FacilityCourt, CourtStation>,
+  matches: LiveMatch[],
+): {
+  id: string;
+  stage: string;
+  teamAName: string;
+  teamAPlayers: string[];
+  teamBName: string;
+  teamBPlayers: string[];
+}[] {
+  if (!cat?.teams || cat.teams.length < 2) {
+    return [];
+  }
+
+  const poolGroups = getDrawnGroups(tournamentSlug, cat.id);
+  const playoffMatches = getMainDrawMatches(tournamentSlug, cat.id);
+  const validTeamIds = new Set(cat.teams.map((t) => t.id));
+  const validTeamNames = new Set(cat.teams.map((t) => t.name.trim().toLowerCase()));
+
+  const queuedIds = new Set(
+    queue
+      .filter(
+        (q) =>
+          (!q.categoryId || q.categoryId === cat.id) &&
+          (!q.tournamentSlug || q.tournamentSlug === tournamentSlug),
+      )
+      .map((q) => q.matchId),
+  );
+  const activeCourtMatchIds = new Set(
+    Object.values(stations)
+      .map((s) => s.currentMatchId)
+      .filter(Boolean),
+  );
+
+  const list: {
+    id: string;
+    stage: string;
+    teamAName: string;
+    teamAPlayers: string[];
+    teamBName: string;
+    teamBPlayers: string[];
+  }[] = [];
+
+  // 1. From Drawn Pool Groups (only if groups are drawn and slots contain currently registered teams)
+  const hasDrawnSlots =
+    poolGroups &&
+    poolGroups.some((g) =>
+      g.isDrawn &&
+      g.slots.some(
+        (s) =>
+          s.team !== null &&
+          (validTeamIds.has(s.team.id) || validTeamNames.has(s.team.name.trim().toLowerCase())),
+      ),
+    );
+
+  if (hasDrawnSlots && poolGroups) {
+    for (const group of poolGroups) {
+      if (!group.isDrawn) continue;
+      const teams = group.slots
+        .map((s) => s.team)
+        .filter(
+          (t): t is { id: string; name: string; players: string[] } =>
+            t !== null &&
+            (validTeamIds.has(t.id) || validTeamNames.has(t.name.trim().toLowerCase())),
+        );
+
+      for (let i = 0; i < teams.length; i++) {
+        for (let j = i + 1; j < teams.length; j++) {
+          const teamA = teams[i]!;
+          const teamB = teams[j]!;
+          const matchId = `live-${tournamentSlug}-${cat.id}-${group.letter}-${i + 1}v${j + 1}`;
+          const existingLive = matches.find((m) => m.id === matchId);
+
+          if (existingLive?.status === "final") continue;
+          if (queuedIds.has(matchId) || activeCourtMatchIds.has(matchId)) continue;
+
+          list.push({
+            id: matchId,
+            stage: `Bracket ${group.letter} (Pool Play)`,
+            teamAName: teamA.name,
+            teamAPlayers: teamA.players,
+            teamBName: teamB.name,
+            teamBPlayers: teamB.players,
+          });
+        }
+      }
+    }
+  }
+
+  // 3. From Playoff Knockout Matches (only if both teams are registered in this category)
+  if (playoffMatches) {
+    for (const km of playoffMatches) {
+      if (!km.teamA || !km.teamB) continue;
+      if (
+        !validTeamNames.has(km.teamA.name.trim().toLowerCase()) ||
+        !validTeamNames.has(km.teamB.name.trim().toLowerCase())
+      ) {
+        continue;
+      }
+      const matchId = `live-ko-${tournamentSlug}-${cat.id}-${km.id}`;
+      const existingLive = matches.find((m) => m.id === matchId);
+
+      if (existingLive?.status === "final" || km.winner) continue;
+      if (queuedIds.has(matchId) || activeCourtMatchIds.has(matchId)) continue;
+
+      list.push({
+        id: matchId,
+        stage: `${km.round} - ${km.label}`,
+        teamAName: km.teamA.name,
+        teamAPlayers: km.teamA.players ?? [],
+        teamBName: km.teamB.name,
+        teamBPlayers: km.teamB.players ?? [],
+      });
+    }
+  }
+
+  return list;
+}
 
 interface CourtDispatchProps {
   tournament: Tournament;
@@ -59,6 +196,30 @@ export function CourtDispatch({
   const [announcement, setAnnouncement] = useState<DeskAnnouncement | null>(() => getLatestAnnouncement());
   const [activeQueueTab, setActiveQueueTab] = useState<"queue" | "unassigned" | "history" | "custom">("queue");
   const [copyNotice, setCopyNotice] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [viewMode, setViewMode] = useState<"card" | "compact">(() => {
+    if (typeof localStorage !== "undefined") {
+      return (localStorage.getItem("dv_dispatch_view_mode") as "card" | "compact") ?? "card";
+    }
+    return "card";
+  });
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  const [resetConfirmMatch, setResetConfirmMatch] = useState<{ court: FacilityCourt; match: LiveMatch } | null>(null);
+
+  // Category sequence & wave arrangement state
+  const [categoryOrder, setCategoryOrder] = useState<string[]>(() =>
+    getCategorySequence(tournamentSlug, tournament.categories),
+  );
+  const [activeWaveId, setActiveWaveIdState] = useState<string>(() =>
+    getActiveWaveId(tournamentSlug, categoryId),
+  );
+  const [isDeckCollapsed, setIsDeckCollapsed] = useState(false);
+
+  // Sync sequence order and active wave when tournament or category props change
+  useEffect(() => {
+    setCategoryOrder(getCategorySequence(tournamentSlug, tournament.categories));
+    setActiveWaveIdState(getActiveWaveId(tournamentSlug, categoryId));
+  }, [tournamentSlug, tournament.categories, categoryId]);
 
   // Custom Match form state
   const [customTeamA, setCustomTeamA] = useState("");
@@ -75,23 +236,85 @@ export function CourtDispatch({
     return () => clearInterval(timer);
   }, []);
 
+  // Revision counter to invalidate memoized bracket matches on draw events
+  const [drawVersion, setDrawVersion] = useState(0);
+
   // Sync stations, queue, and announcement with storage
   const reloadData = useCallback(() => {
     setStations(getCourtStations());
     setQueue(getDispatchQueue());
     setAnnouncement(getLatestAnnouncement());
+    setCategoryOrder(getCategorySequence(tournamentSlug, tournament.categories));
+    setActiveWaveIdState(getActiveWaveId(tournamentSlug, categoryId));
     refreshMatches();
-  }, [refreshMatches]);
+  }, [refreshMatches, tournamentSlug, tournament.categories, categoryId]);
 
   useEffect(() => {
-    const handleStorage = () => reloadData();
+    const handleStorage = () => {
+      setDrawVersion((v) => v + 1);
+      reloadData();
+    };
     window.addEventListener("storage", handleStorage);
-    const interval = setInterval(reloadData, 3000);
+    window.addEventListener("dv_drawn_groups_updated", handleStorage);
+    window.addEventListener("dv_dispatch_queue_updated", handleStorage);
+    window.addEventListener("dv_live_matches_updated", handleStorage);
+    window.addEventListener("dv_category_sequence_updated", handleStorage);
+    const interval = setInterval(handleStorage, 2000);
     return () => {
       window.removeEventListener("storage", handleStorage);
+      window.removeEventListener("dv_drawn_groups_updated", handleStorage);
+      window.removeEventListener("dv_dispatch_queue_updated", handleStorage);
+      window.removeEventListener("dv_live_matches_updated", handleStorage);
+      window.removeEventListener("dv_category_sequence_updated", handleStorage);
       clearInterval(interval);
     };
   }, [reloadData]);
+
+  // Auto-sync & auto-cleanup: If players/teams were deleted from the database/roster,
+  // automatically purge orphaned matches from the dispatch queue, court stations, and bracket cache.
+  useEffect(() => {
+    if (!category) return;
+    const currentQueue = getDispatchQueue();
+    const isCatMatch = (q: QueueItem) =>
+      q.categoryId === categoryId ||
+      (!q.categoryId && q.matchId && q.matchId.includes(categoryId));
+
+    // Case 1: All players in category were deleted
+    if (!category.teams || category.teams.length === 0) {
+      try {
+        localStorage.removeItem(`dv_drawn_groups_${tournamentSlug}_${categoryId}`);
+        localStorage.removeItem(`dv_main_draw_${tournamentSlug}_${categoryId}`);
+      } catch {
+        // ignore
+      }
+
+      const hasStale = currentQueue.some(
+        (q) => isCatMatch(q) && !q.id.startsWith("custom-"),
+      );
+      if (hasStale) {
+        purgeQueueForCategory(tournamentSlug, categoryId);
+        purgeMatchesForCategory(tournamentSlug, categoryId);
+        reloadData();
+      }
+    } else {
+      // Case 2: Specific teams or players were deleted from database
+      const validNames = category.teams.map((t) => t.name.trim().toLowerCase());
+      const validSet = new Set(validNames);
+      const hasOrphanMatches = currentQueue.some((q) => {
+        if (!isCatMatch(q) || q.id.startsWith("custom-")) return false;
+        return !validSet.has(q.teamAName.trim().toLowerCase()) || !validSet.has(q.teamBName.trim().toLowerCase());
+      });
+
+      if (hasOrphanMatches) {
+        purgeQueueNotInTeams(tournamentSlug, categoryId, validNames);
+        purgeMatchesNotInTeams(tournamentSlug, categoryId, validNames);
+        reloadData();
+      }
+    }
+  }, [category, categoryId, tournamentSlug, reloadData]);
+
+  // Division filter for active queue & history ("current" = selected category only, "all" = all categories)
+  const [queueDivisionFilter, setQueueDivisionFilter] = useState<"current" | "all">("current");
 
   // Derive active matches for each court
   const courtMatches = useMemo(() => {
@@ -121,80 +344,73 @@ export function CourtDispatch({
     return map;
   }, [stations, matches]);
 
-  // Extract all unassigned matches from Pool Draws and Main Draw Playoffs
+  // Extract all unassigned matches from Pool Draws, Category Teams Roster, or Main Draw Playoffs
   const unassignedMatches = useMemo(() => {
-    const poolGroups = getDrawnGroups(tournamentSlug, categoryId);
-    const playoffMatches = getMainDrawMatches(tournamentSlug, categoryId);
-    const queuedIds = new Set(queue.map((q) => q.matchId));
-    const activeCourtMatchIds = new Set(
-      Object.values(stations)
-        .map((s) => s.currentMatchId)
-        .filter(Boolean),
-    );
+    return computeCategoryUnassignedMatches(tournamentSlug, category, queue, stations, matches);
+  }, [tournamentSlug, category, queue, stations, matches, drawVersion]);
 
-    const list: {
-      id: string;
-      stage: string;
-      teamAName: string;
-      teamAPlayers: string[];
-      teamBName: string;
-      teamBPlayers: string[];
-    }[] = [];
-
-    // 1. From Pool Groups
-    if (poolGroups) {
-      for (const group of poolGroups) {
-        const teams = group.slots
-          .map((s) => s.team)
-          .filter((t): t is { id: string; name: string; players: string[] } => t !== null);
-
-        for (let i = 0; i < teams.length; i++) {
-          for (let j = i + 1; j < teams.length; j++) {
-            const teamA = teams[i]!;
-            const teamB = teams[j]!;
-            const matchId = `live-${tournamentSlug}-${categoryId}-${group.letter}-${i + 1}v${j + 1}`;
-            const existingLive = matches.find((m) => m.id === matchId);
-
-            // Skip if match is already completed, currently on court, or in queue
-            if (existingLive?.status === "final") continue;
-            if (queuedIds.has(matchId) || activeCourtMatchIds.has(matchId)) continue;
-
-            list.push({
-              id: matchId,
-              stage: `Bracket ${group.letter} (Pool Play)`,
-              teamAName: teamA.name,
-              teamAPlayers: teamA.players,
-              teamBName: teamB.name,
-              teamBPlayers: teamB.players,
-            });
-          }
-        }
+  // Statistics and progress for each category across the tournament
+  const categoryStatsMap = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        totalMatches: number;
+        completedCount: number;
+        onCourtCount: number;
+        queuedCount: number;
+        unassignedCount: number;
+        progressPercent: number;
+        isCompleted: boolean;
       }
+    >();
+
+    for (const cat of tournament.categories) {
+      const unassigned = computeCategoryUnassignedMatches(tournamentSlug, cat, queue, stations, matches);
+      const completedCount = matches.filter(
+        (m) => (m.categoryId === cat.id || m.id.includes(cat.id)) && m.status === "final",
+      ).length;
+      const onCourtCount = matches.filter(
+        (m) =>
+          (m.categoryId === cat.id || m.id.includes(cat.id)) &&
+          (m.status === "live" || m.status === "scheduled"),
+      ).length;
+      const queuedCount = queue.filter(
+        (q) =>
+          (q.status === "queued" || q.status === "on_deck") &&
+          (q.categoryId === cat.id || q.matchId.includes(cat.id)),
+      ).length;
+      const unassignedCount = unassigned.length;
+      const totalMatches = completedCount + onCourtCount + queuedCount + unassignedCount;
+      const progressPercent = totalMatches > 0 ? Math.round((completedCount / totalMatches) * 100) : 0;
+      const isCompleted = totalMatches > 0 && completedCount === totalMatches;
+
+      map.set(cat.id, {
+        totalMatches,
+        completedCount,
+        onCourtCount,
+        queuedCount,
+        unassignedCount,
+        progressPercent,
+        isCompleted,
+      });
     }
 
-    // 2. From Playoff Knockout Matches
-    if (playoffMatches) {
-      for (const km of playoffMatches) {
-        if (!km.teamA || !km.teamB) continue;
-        const matchId = `live-ko-${tournamentSlug}-${categoryId}-${km.id}`;
-        const existingLive = matches.find((m) => m.id === matchId);
+    return map;
+  }, [tournament.categories, tournamentSlug, queue, stations, matches, drawVersion]);
 
-        if (existingLive?.status === "final" || km.winner) continue;
-        if (queuedIds.has(matchId) || activeCourtMatchIds.has(matchId)) continue;
-
-        list.push({
-          id: matchId,
-          stage: `${km.round} - ${km.label}`,
-          teamAName: km.teamA.name,
-          teamAPlayers: km.teamA.players,
-          teamBName: km.teamB.name,
-          teamBPlayers: km.teamB.players,
-        });
-      }
-    }
-
-    return list;
-  }, [tournamentSlug, categoryId, queue, stations, matches]);
+  const activeIndex = categoryOrder.indexOf(activeWaveId);
+  const currentWaveNumber = activeIndex >= 0 ? activeIndex + 1 : 1;
+  const nextCategory =
+    activeIndex >= 0 && activeIndex < categoryOrder.length - 1
+      ? tournament.categories.find((c) => c.id === categoryOrder[activeIndex + 1])
+      : null;
+  const nextWaveNumber = nextCategory ? activeIndex + 2 : null;
+  const activeStats = categoryStatsMap.get(activeWaveId);
+  const isActiveWaveComplete = Boolean(
+    activeStats &&
+      activeStats.totalMatches > 0 &&
+      activeStats.completedCount === activeStats.totalMatches,
+  );
 
   // Metrics
   const metrics = useMemo(() => {
@@ -236,6 +452,98 @@ export function CourtDispatch({
     };
   }, [stations, queue, matches]);
 
+  // Filtered active queue (search-aware, division-aware, priority-sorted)
+  const filteredQueue = useMemo(() => {
+    const q = searchQuery.toLowerCase();
+    const validTeamNames = category?.teams
+      ? new Set(category.teams.map((t) => t.name.trim().toLowerCase()))
+      : new Set<string>();
+
+    return queue
+      .filter((item) => item.status === "queued" || item.status === "on_deck")
+      .filter((item) => {
+        if (queueDivisionFilter === "current") {
+          const isThisCategory =
+            item.categoryId === categoryId ||
+            (!item.categoryId && item.matchId && item.matchId.includes(categoryId));
+          if (!isThisCategory) return false;
+
+          // If current category has 0 registered teams, never show any bracket matches for this category
+          if ((!category?.teams || category.teams.length === 0) && !item.id.startsWith("custom-")) {
+            return false;
+          }
+
+          // If category has teams, ensure queue item teams still exist in category roster
+          if (category?.teams && category.teams.length > 0 && !item.id.startsWith("custom-")) {
+            const hasA = validTeamNames.has(item.teamAName.trim().toLowerCase());
+            const hasB = validTeamNames.has(item.teamBName.trim().toLowerCase());
+            if (!hasA || !hasB) return false;
+          }
+
+          return true;
+        } else {
+          // If viewing all divisions, omit any orphan tournament matches whose teams no longer exist
+          if (!item.id.startsWith("custom-") && item.categoryId === categoryId && (!category?.teams || category.teams.length === 0)) {
+            return false;
+          }
+        }
+        return true;
+      })
+      .filter(
+        (item) =>
+          !q ||
+          item.teamAName.toLowerCase().includes(q) ||
+          item.teamBName.toLowerCase().includes(q) ||
+          item.stage.toLowerCase().includes(q) ||
+          (item.teamAPlayers ?? []).some((p) => p.toLowerCase().includes(q)) ||
+          (item.teamBPlayers ?? []).some((p) => p.toLowerCase().includes(q)),
+      )
+      .sort((a, b) => a.priority - b.priority);
+  }, [queue, searchQuery, queueDivisionFilter, categoryId, tournamentSlug, category]);
+
+  // Filtered history (search-aware, division-aware)
+  const filteredHistory = useMemo(() => {
+    const q = searchQuery.toLowerCase();
+    return matches.filter(
+      (m) =>
+        m.status === "final" &&
+        (queueDivisionFilter === "all" || !m.categoryId || m.categoryId === categoryId) &&
+        (!q ||
+          m.teamAName.toLowerCase().includes(q) ||
+          m.teamBName.toLowerCase().includes(q) ||
+          (m.stage ?? "").toLowerCase().includes(q)),
+    );
+  }, [matches, searchQuery, queueDivisionFilter, categoryId]);
+
+  // Unassigned matches grouped by bracket stage (search-aware, Pool Play first)
+  const groupedUnassigned = useMemo(() => {
+    const q = searchQuery.toLowerCase();
+    const filtered = !q
+      ? unassignedMatches
+      : unassignedMatches.filter(
+        (m) =>
+          m.teamAName.toLowerCase().includes(q) ||
+          m.teamBName.toLowerCase().includes(q) ||
+          m.stage.toLowerCase().includes(q) ||
+          m.teamAPlayers.some((p) => p.toLowerCase().includes(q)) ||
+          m.teamBPlayers.some((p) => p.toLowerCase().includes(q)),
+      );
+
+    const map = new Map<string, typeof unassignedMatches>();
+    filtered.forEach((m) => {
+      if (!map.has(m.stage)) map.set(m.stage, []);
+      map.get(m.stage)!.push(m);
+    });
+
+    return Array.from(map.entries()).sort(([a], [b]) => {
+      const aPool = a.includes("Pool Play");
+      const bPool = b.includes("Pool Play");
+      if (aPool && !bPool) return -1;
+      if (!aPool && bPool) return 1;
+      return a.localeCompare(b);
+    });
+  }, [unassignedMatches, searchQuery]);
+
   // Actions
   const handleDispatch = (court: FacilityCourt, match: { id: string; teamAName: string; teamAPlayers?: string[]; teamBName: string; teamBPlayers?: string[] }, umpire?: string) => {
     dispatchMatchToCourt(court, match, umpire);
@@ -272,6 +580,7 @@ export function CourtDispatch({
   const handleSetMatchLive = (court: FacilityCourt, matchId: string) => {
     updateMatchStore(matchId, (m) => ({
       ...m,
+      court,
       status: "live",
       startedAt: m.startedAt ?? Date.now(),
     }));
@@ -279,8 +588,18 @@ export function CourtDispatch({
     nextStations[court] = {
       ...nextStations[court],
       status: "live",
+      currentMatchId: matchId,
     };
     saveCourtStations(nextStations);
+
+    const currentQueue = getDispatchQueue();
+    const updatedQueue = currentQueue.map((q) =>
+      q.matchId === matchId
+        ? { ...q, status: "live" as const, assignedCourt: court }
+        : q
+    );
+    saveDispatchQueue(updatedQueue);
+
     reloadData();
   };
 
@@ -308,7 +627,45 @@ export function CourtDispatch({
     updateMatchStore(matchId, (m) => sideOut(m));
   };
 
-  const handleQueueUnassignedAll = () => {
+  const handleRequestResetMatch = (court: FacilityCourt, m: LiveMatch) => {
+    const hasPoints =
+      m.score.teamAScore > 0 ||
+      m.score.teamBScore > 0 ||
+      (m.score.rallies && m.score.rallies.length > 0) ||
+      m.status === "final";
+
+    if (hasPoints) {
+      setResetConfirmMatch({ court, match: m });
+    } else {
+      executeResetMatch(court, m);
+    }
+  };
+
+  const executeResetMatch = (court: FacilityCourt, m: LiveMatch) => {
+    updateMatchStore(m.id, resetMatch);
+    if (typeof localStorage !== "undefined") {
+      try {
+        localStorage.removeItem(`dv_toss_done_${m.id}`);
+      } catch {
+        // ignore
+      }
+    }
+    const nextStations = { ...stations };
+    nextStations[court] = {
+      ...nextStations[court],
+      status: "warmup",
+      currentMatchId: m.id,
+    };
+    saveCourtStations(nextStations);
+    dbUpdateCourtStation(court, {
+      status: "warmup",
+      currentMatchId: m.id,
+    }).catch(() => {});
+    reloadData();
+    setResetConfirmMatch(null);
+  };
+
+  const handleQueueUnassignedAll = useCallback(() => {
     const items = unassignedMatches.map((m) => ({
       matchId: m.id,
       tournamentSlug,
@@ -319,9 +676,11 @@ export function CourtDispatch({
       teamBName: m.teamBName,
       teamBPlayers: m.teamBPlayers,
     }));
-    addMatchesToQueue(items);
-    reloadData();
-  };
+    if (items.length > 0) {
+      addMatchesToQueue(items);
+      reloadData();
+    }
+  }, [unassignedMatches, tournamentSlug, categoryId, reloadData]);
 
   const handleQueueSingle = (m: typeof unassignedMatches[number]) => {
     addMatchesToQueue([
@@ -338,6 +697,67 @@ export function CourtDispatch({
     ]);
     reloadData();
   };
+
+  const handleMoveCategory = (catId: string, direction: "prev" | "next") => {
+    const updated = reorderCategorySequence(tournamentSlug, tournament.categories, catId, direction);
+    setCategoryOrder(updated);
+  };
+
+  const handleSelectWave = (catId: string) => {
+    setActiveWaveId(tournamentSlug, catId);
+    setActiveWaveIdState(catId);
+    setCategoryId(catId);
+
+    // Auto-enqueue unassigned matches for this category if its queue is currently empty
+    const targetCategory = tournament.categories.find((c) => c.id === catId);
+    if (targetCategory && targetCategory.teams && targetCategory.teams.length >= 2) {
+      const existingQueueCount = queue.filter(
+        (q) =>
+          (q.categoryId === catId || (!q.categoryId && q.matchId && q.matchId.includes(catId))) &&
+          (!q.tournamentSlug || q.tournamentSlug === tournamentSlug || (q.matchId && q.matchId.includes(tournamentSlug))),
+      ).length;
+
+      if (existingQueueCount === 0) {
+        const catUnassigned = computeCategoryUnassignedMatches(tournamentSlug, targetCategory, queue, stations, matches);
+        if (catUnassigned.length > 0) {
+          addMatchesToQueue(
+            catUnassigned.map((m) => ({
+              matchId: m.id,
+              tournamentSlug,
+              categoryId: catId,
+              stage: m.stage,
+              teamAName: m.teamAName,
+              teamAPlayers: m.teamAPlayers,
+              teamBName: m.teamBName,
+              teamBPlayers: m.teamBPlayers,
+            })),
+          );
+        }
+      }
+    }
+    reloadData();
+  };
+
+  const handleAdvanceWave = () => {
+    if (!nextCategory) return;
+    handleSelectWave(nextCategory.id);
+  };
+
+  const getCategoryLabel = useCallback(
+    (itemCategoryId?: string, matchId?: string) => {
+      if (itemCategoryId) {
+        const found = tournament.categories.find((c) => c.id === itemCategoryId);
+        if (found) return found.label;
+      }
+      if (matchId) {
+        for (const c of tournament.categories) {
+          if (matchId.includes(c.id)) return c.label;
+        }
+      }
+      return category?.label ?? "Division";
+    },
+    [tournament.categories, category?.label],
+  );
 
   const handleCreateCustomMatch = (e: React.FormEvent) => {
     e.preventDefault();
@@ -377,6 +797,47 @@ export function CourtDispatch({
     navigator.clipboard.writeText(announcement.message);
     setCopyNotice("Announcement copied to clipboard!");
     setTimeout(() => setCopyNotice(null), 3000);
+  };
+
+  const handleSetViewMode = (mode: "card" | "compact") => {
+    setViewMode(mode);
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem("dv_dispatch_view_mode", mode);
+    }
+  };
+
+  const toggleGroupCollapse = (stage: string) => {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(stage)) next.delete(stage);
+      else next.add(stage);
+      return next;
+    });
+  };
+
+  const handleQueueStageGroup = (
+    stageMatches: Array<{
+      id: string;
+      stage: string;
+      teamAName: string;
+      teamAPlayers: string[];
+      teamBName: string;
+      teamBPlayers: string[];
+    }>,
+  ) => {
+    addMatchesToQueue(
+      stageMatches.map((m) => ({
+        matchId: m.id,
+        tournamentSlug,
+        categoryId,
+        stage: m.stage,
+        teamAName: m.teamAName,
+        teamAPlayers: m.teamAPlayers,
+        teamBName: m.teamBName,
+        teamBPlayers: m.teamBPlayers,
+      })),
+    );
+    reloadData();
   };
 
   // Helper to format elapsed duration (e.g. "14:25")
@@ -430,7 +891,12 @@ export function CourtDispatch({
             <label className="text-xs uppercase tracking-wider text-muted-foreground">Division:</label>
             <select
               value={categoryId}
-              onChange={(e) => setCategoryId(e.target.value)}
+              onChange={(e) => {
+                const nextId = e.target.value;
+                setCategoryId(nextId);
+                setActiveWaveId(tournamentSlug, nextId);
+                setActiveWaveIdState(nextId);
+              }}
               className="bg-charcoal text-sand border border-border rounded px-3 py-1.5 text-xs font-semibold focus:border-pickle focus:outline-none cursor-pointer"
             >
               {tournament.categories.map((c) => (
@@ -607,18 +1073,20 @@ export function CourtDispatch({
             const restWarningA = activeMatch ? checkRestPeriodConflict(activeMatch.teamAName) : null;
             const restWarningB = activeMatch ? checkRestPeriodConflict(activeMatch.teamBName) : null;
 
+            const isCourtLive = station.status === "live" || activeMatch?.status === "live";
+            const isCourtWarmup = !isCourtLive && (station.status === "warmup" || (activeMatch && activeMatch.status === "scheduled"));
+
             return (
               <div
                 key={courtName}
-                className={`surface-card p-0 overflow-hidden border flex flex-col justify-between transition-all ${
-                  station.status === "live"
+                className={`surface-card p-0 overflow-hidden border flex flex-col justify-between transition-all ${isCourtLive
                     ? "border-pickle/80 shadow-md shadow-pickle/5 bg-card"
-                    : station.status === "warmup"
-                    ? "border-amber-500/80 bg-card"
-                    : station.status === "maintenance"
-                    ? "border-brick/70 bg-card"
-                    : "border-border bg-card/60"
-                }`}
+                    : isCourtWarmup
+                      ? "border-amber-500/80 bg-card"
+                      : station.status === "maintenance"
+                        ? "border-brick/70 bg-card"
+                        : "border-border bg-card/60"
+                  }`}
               >
                 {/* Court Card Header */}
                 <div className="bg-charcoal px-4 py-3 border-b border-border flex items-center justify-between">
@@ -626,18 +1094,18 @@ export function CourtDispatch({
                     <span className="font-display text-xl tracking-wider text-sand">
                       {courtName}
                     </span>
-                    {station.status === "live" && (
+                    {isCourtLive && (
                       <span className="px-2 py-0.5 text-[0.65rem] font-bold uppercase tracking-widest bg-pickle/30 text-pickle border border-pickle/50 flex items-center gap-1.5">
                         <span className="h-1.5 w-1.5 rounded-full bg-pickle animate-ping" />
                         Live
                       </span>
                     )}
-                    {station.status === "warmup" && (
+                    {isCourtWarmup && (
                       <span className="px-2 py-0.5 text-[0.65rem] font-bold uppercase tracking-widest bg-amber-500/20 text-amber-300 border border-amber-500/40">
                         Warm-up
                       </span>
                     )}
-                    {station.status === "available" && (
+                    {!isCourtLive && !isCourtWarmup && station.status === "available" && (
                       <span className="px-2 py-0.5 text-[0.65rem] font-bold uppercase tracking-widest bg-emerald-500/20 text-emerald-400 border border-emerald-500/40">
                         Available
                       </span>
@@ -651,7 +1119,7 @@ export function CourtDispatch({
 
                   {/* Stopwatch / Duration */}
                   <div className="text-right font-mono text-xs">
-                    {(station.status === "live" || station.status === "warmup") && (
+                    {(isCourtLive || isCourtWarmup) && (
                       <div className="flex items-center gap-1.5 text-sand">
                         <span className="text-[0.65rem] uppercase tracking-wider text-sand/60">Time:</span>
                         <span className="font-bold text-sm text-pickle">
@@ -659,7 +1127,7 @@ export function CourtDispatch({
                         </span>
                       </div>
                     )}
-                    {station.status === "available" && (
+                    {!isCourtLive && !isCourtWarmup && station.status === "available" && (
                       <span className="text-[0.65rem] uppercase tracking-widest text-emerald-400 font-semibold">
                         Ready
                       </span>
@@ -670,7 +1138,7 @@ export function CourtDispatch({
                 {/* Court Body */}
                 <div className="p-4 sm:p-5 flex-1 flex flex-col justify-between space-y-4">
                   {/* State 1: Active Match on Court (Live or Warm-up) */}
-                  {(station.status === "live" || station.status === "warmup") && activeMatch ? (
+                  {(isCourtLive || isCourtWarmup) && activeMatch ? (
                     <div className="space-y-4">
                       {/* Match metadata */}
                       <div className="flex items-center justify-between text-xs text-muted-foreground border-b border-border/50 pb-2">
@@ -754,7 +1222,7 @@ export function CourtDispatch({
                       {/* Quick Desk Controls */}
                       <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-border/50">
                         <div className="flex items-center gap-1.5">
-                          {station.status === "warmup" && (
+                          {isCourtWarmup && (
                             <button
                               onClick={() => handleSetMatchLive(courtName, activeMatch.id)}
                               className="px-3 py-1.5 text-xs font-bold uppercase tracking-wider bg-pickle text-sand border border-pickle hover:bg-pickle/90 transition-colors cursor-pointer"
@@ -762,7 +1230,7 @@ export function CourtDispatch({
                               Start Play (Go Live)
                             </button>
                           )}
-                          {station.status === "live" && (
+                          {isCourtLive && (
                             <button
                               onClick={() => handleQuickSideOut(activeMatch.id)}
                               className="px-2.5 py-1 text-xs font-semibold uppercase tracking-wider bg-charcoal text-sand border border-border hover:border-sand transition-colors cursor-pointer"
@@ -775,6 +1243,13 @@ export function CourtDispatch({
                             className="px-3 py-1.5 text-xs font-bold uppercase tracking-wider bg-brick text-sand border border-brick hover:bg-brick/90 transition-colors cursor-pointer"
                           >
                             Finalize Match
+                          </button>
+                          <button
+                            onClick={() => handleRequestResetMatch(courtName, activeMatch)}
+                            title="Reset score to 0-0 and require coin toss"
+                            className="px-3 py-1.5 text-xs font-bold uppercase tracking-wider bg-charcoal text-sand border border-pickle/50 hover:bg-pickle hover:text-sand transition-colors cursor-pointer"
+                          >
+                            Coin Toss (Reset)
                           </button>
                         </div>
 
@@ -882,209 +1357,669 @@ export function CourtDispatch({
         </div>
       </div>
 
-      {/* ── Match Queue & Dispatch Controls ── */}
-      <div className="surface-card p-4 sm:p-6 border border-border space-y-5">
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-b border-border pb-4">
+      {/* ── Category Waves & Sequence Arrangement Deck ── */}
+      <div className="surface-card p-4 sm:p-5 border border-border space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-b border-border/60 pb-3">
           <div>
-            <h3 className="font-display text-xl sm:text-2xl text-foreground">
-              Match Queue &amp; Roster Dispatcher
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-xs uppercase tracking-[0.28em] text-pickle font-bold">
+                Wave Sequencing
+              </span>
+              <span className="px-2 py-0.5 text-[0.65rem] font-bold uppercase tracking-wider bg-charcoal text-sand border border-border">
+                {categoryOrder.length} Divisions Arranged
+              </span>
+            </div>
+            <h3 className="font-display text-xl sm:text-2xl text-foreground mt-0.5">
+              Category Waves &amp; Sequence Arrangement
             </h3>
             <p className="text-xs text-muted-foreground">
-              Prioritize upcoming matches and assign directly to Courts 1–4.
+              Prioritize division order in the match queue. The active wave feeds Courts 1–4 before rolling over to the next category.
             </p>
           </div>
 
-          {/* Queue Tab buttons */}
-          <div className="flex flex-wrap gap-1.5">
-            {[
-              { key: "queue", label: `Active Queue (${queue.filter((q) => q.status === "queued" || q.status === "on_deck").length})` },
-              { key: "unassigned", label: `Unassigned Tournament (${unassignedMatches.length})` },
-              { key: "history", label: `Court Log (${metrics.completedCount})` },
-              { key: "custom", label: "+ Add Custom Match" },
-            ].map((t) => (
+          <div className="flex items-center gap-2 shrink-0">
+            {nextCategory && (
               <button
-                key={t.key}
-                onClick={() => setActiveQueueTab(t.key as typeof activeQueueTab)}
-                className={`px-3 py-1.5 text-xs font-bold uppercase tracking-wider border transition-colors cursor-pointer ${
-                  activeQueueTab === t.key
-                    ? "border-primary bg-primary text-primary-foreground"
-                    : "border-border bg-card text-foreground hover:border-primary"
-                }`}
+                onClick={handleAdvanceWave}
+                className="px-3.5 py-1.5 text-xs font-bold uppercase tracking-wider bg-pickle text-sand border border-pickle hover:bg-pickle/90 transition-colors cursor-pointer"
+                title={`Advance to Wave ${nextWaveNumber}: ${nextCategory.label}`}
               >
-                {t.label}
+                Advance to Wave {nextWaveNumber} &rarr;
               </button>
-            ))}
+            )}
+            <button
+              onClick={() => setIsDeckCollapsed((prev) => !prev)}
+              className="px-3 py-1.5 text-xs font-bold uppercase tracking-wider bg-charcoal text-sand border border-border hover:border-sand transition-colors cursor-pointer"
+            >
+              {isDeckCollapsed ? "Show Arrangement Deck" : "Collapse"}
+            </button>
+          </div>
+        </div>
+
+        {/* Wave Completion Alert Banner (if active wave matches are all complete) */}
+        {isActiveWaveComplete && nextCategory && (
+          <div className="p-3.5 bg-pickle/15 border border-pickle/50 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div>
+              <span className="text-[0.65rem] font-bold uppercase tracking-widest text-pickle block">
+                Wave Completed
+              </span>
+              <p className="text-xs sm:text-sm font-semibold text-foreground">
+                All matches for {category.label} have finished! Ready to release {nextCategory.label} into the match queue.
+              </p>
+            </div>
+            <button
+              onClick={handleAdvanceWave}
+              className="px-4 py-2 text-xs font-bold uppercase tracking-wider bg-pickle text-sand hover:bg-pickle/90 transition-colors cursor-pointer shrink-0"
+            >
+              Unlock Wave {nextWaveNumber}: {nextCategory.label} &rarr;
+            </button>
+          </div>
+        )}
+
+        {/* Cards Grid */}
+        {!isDeckCollapsed && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3.5">
+            {categoryOrder.map((catId, idx) => {
+              const cat = tournament.categories.find((c) => c.id === catId);
+              if (!cat) return null;
+              const stats = categoryStatsMap.get(catId);
+              const isActive = catId === activeWaveId;
+              const isCompleted = stats?.isCompleted;
+
+              return (
+                <div
+                  key={catId}
+                  className={`surface-card p-4 border transition-all flex flex-col justify-between gap-3.5 ${
+                    isActive
+                      ? "border-pickle bg-pickle/10 shadow-sm ring-1 ring-pickle/40"
+                      : isCompleted
+                      ? "border-border/50 bg-charcoal/25 opacity-85"
+                      : "border-border bg-card hover:border-border/80"
+                  }`}
+                >
+                  {/* Card Header: Wave Number, Level, Reorder Buttons */}
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span
+                        className={`px-2 py-0.5 text-[0.65rem] font-display uppercase tracking-wider border ${
+                          isActive
+                            ? "bg-pickle text-sand border-pickle font-bold"
+                            : "bg-charcoal text-sand/80 border-border"
+                        }`}
+                      >
+                        Wave {idx + 1}
+                      </span>
+                      <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground">
+                        {cat.division} &middot; {cat.level}
+                      </span>
+                    </div>
+
+                    {/* Move Earlier / Later */}
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        onClick={() => handleMoveCategory(catId, "prev")}
+                        disabled={idx === 0}
+                        title="Move earlier in queue sequence"
+                        className="px-2 py-0.5 text-[0.65rem] font-bold bg-charcoal text-sand border border-border hover:border-sand disabled:opacity-25 cursor-pointer"
+                      >
+                        &larr;
+                      </button>
+                      <button
+                        onClick={() => handleMoveCategory(catId, "next")}
+                        disabled={idx === categoryOrder.length - 1}
+                        title="Move later in queue sequence"
+                        className="px-2 py-0.5 text-[0.65rem] font-bold bg-charcoal text-sand border border-border hover:border-sand disabled:opacity-25 cursor-pointer"
+                      >
+                        &rarr;
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Category Details & Progress */}
+                  <div>
+                    <h4 className="font-display text-base sm:text-lg text-foreground leading-tight truncate">
+                      {cat.label}
+                    </h4>
+                    <div className="mt-1 flex items-center justify-between text-[0.7rem] text-muted-foreground">
+                      <span>{cat.teams?.length || 0} Registered Teams</span>
+                      <span
+                        className={`font-bold uppercase tracking-wider ${
+                          isActive
+                            ? "text-pickle"
+                            : isCompleted
+                            ? "text-sand/70"
+                            : "text-muted-foreground"
+                        }`}
+                      >
+                        {isActive ? "Active Wave" : isCompleted ? "Completed" : "Waiting"}
+                      </span>
+                    </div>
+
+                    {/* Progress Bar */}
+                    <div className="mt-2.5 space-y-1">
+                      <div className="flex items-center justify-between text-[0.65rem] text-muted-foreground">
+                        <span>
+                          {stats?.completedCount ?? 0} / {stats?.totalMatches ?? 0} Matches Final
+                        </span>
+                        <span>{stats?.progressPercent ?? 0}%</span>
+                      </div>
+                      <div className="w-full h-1.5 bg-charcoal overflow-hidden border border-border/50">
+                        <div
+                          className={`h-full transition-all duration-300 ${
+                            isActive
+                              ? "bg-pickle"
+                              : isCompleted
+                              ? "bg-sand/40"
+                              : "bg-pickle/50"
+                          }`}
+                          style={{ width: `${stats?.progressPercent ?? 0}%` }}
+                        />
+                      </div>
+                    </div>
+
+                    {/* Micro-metrics strip */}
+                    <div className="mt-2.5 grid grid-cols-3 gap-1 text-center text-[0.65rem] pt-2 border-t border-border/40">
+                      <div className="bg-charcoal/40 p-1 border border-border/30">
+                        <span className="text-muted-foreground block text-[0.55rem] uppercase">
+                          On Court
+                        </span>
+                        <span className="font-bold text-foreground">
+                          {stats?.onCourtCount ?? 0}
+                        </span>
+                      </div>
+                      <div className="bg-charcoal/40 p-1 border border-border/30">
+                        <span className="text-muted-foreground block text-[0.55rem] uppercase">
+                          Queued
+                        </span>
+                        <span className="font-bold text-foreground">
+                          {stats?.queuedCount ?? 0}
+                        </span>
+                      </div>
+                      <div className="bg-charcoal/40 p-1 border border-border/30">
+                        <span className="text-muted-foreground block text-[0.55rem] uppercase">
+                          Unassigned
+                        </span>
+                        <span className="font-bold text-foreground">
+                          {stats?.unassignedCount ?? 0}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Card Action Footer */}
+                  <div className="pt-2 border-t border-border/40 flex items-center justify-between gap-2">
+                    {isActive ? (
+                      <div className="w-full flex items-center justify-between gap-2">
+                        <span className="text-[0.65rem] font-bold text-pickle uppercase tracking-wider">
+                          Prioritized on Courts 1–4
+                        </span>
+                        {stats && stats.unassignedCount > 0 && (
+                          <button
+                            onClick={handleQueueUnassignedAll}
+                            className="px-2 py-1 text-[0.6rem] font-bold uppercase tracking-wider bg-pickle text-sand border border-pickle hover:bg-pickle/90 transition-colors cursor-pointer shrink-0"
+                            title="Add remaining matches for this wave to queue"
+                          >
+                            + Queue {stats.unassignedCount}
+                          </button>
+                        )}
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => handleSelectWave(catId)}
+                        className="w-full py-1.5 text-[0.65rem] font-bold uppercase tracking-wider bg-charcoal hover:bg-pickle hover:text-sand text-sand/80 border border-border hover:border-pickle transition-colors cursor-pointer"
+                      >
+                        Set as Active Wave
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* ── Match Queue & Dispatch Controls ── */}
+      <div className="surface-card p-4 sm:p-6 border border-border space-y-5">
+        <div className="space-y-3 border-b border-border pb-4">
+          <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <h3 className="font-display text-xl sm:text-2xl text-foreground">
+                  Match Queue &amp; Roster Dispatcher
+                </h3>
+                <span className="px-2 py-0.5 text-[0.65rem] font-bold uppercase tracking-wider bg-pickle/20 text-pickle border border-pickle/40">
+                  Wave {currentWaveNumber}: {category.label}
+                </span>
+              </div>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Prioritize upcoming matches and assign directly to Courts 1–4.
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              {/* Queue Tab buttons */}
+              <div className="flex flex-wrap gap-1.5">
+                {[
+                  {
+                    key: "queue",
+                    label: `Active Queue (${queueDivisionFilter === "current"
+                        ? queue.filter(
+                          (q) =>
+                            (q.status === "queued" || q.status === "on_deck") &&
+                            (!q.categoryId || q.categoryId === categoryId) &&
+                            (!q.tournamentSlug || q.tournamentSlug === tournamentSlug),
+                        ).length
+                        : queue.filter((q) => q.status === "queued" || q.status === "on_deck").length
+                      })`,
+                  },
+                  { key: "unassigned", label: `Unassigned (${unassignedMatches.length})` },
+                  { key: "history", label: `Log (${filteredHistory.length})` },
+                  { key: "custom", label: "+ Custom" },
+                ].map((t) => (
+                  <button
+                    key={t.key}
+                    onClick={() => setActiveQueueTab(t.key as typeof activeQueueTab)}
+                    className={`px-2.5 py-1.5 text-[0.65rem] font-bold uppercase tracking-wider border transition-colors cursor-pointer ${activeQueueTab === t.key
+                        ? "border-pickle bg-pickle text-sand"
+                        : "border-border bg-card text-foreground hover:border-pickle"
+                      }`}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+
+              {/* Division Scope Toggle (Active Queue & Log) */}
+              {(activeQueueTab === "queue" || activeQueueTab === "history") && (
+                <div className="flex items-center border border-border overflow-hidden">
+                  <button
+                    onClick={() => setQueueDivisionFilter("current")}
+                    title={`Show matches for ${category.label}`}
+                    className={`px-2 py-1.5 text-[0.6rem] font-bold uppercase tracking-wider transition-colors cursor-pointer ${queueDivisionFilter === "current"
+                        ? "bg-pickle text-sand"
+                        : "bg-charcoal text-sand/60 hover:text-sand"
+                      }`}
+                  >
+                    {category.label}
+                  </button>
+                  <button
+                    onClick={() => setQueueDivisionFilter("all")}
+                    title="Show matches across all divisions"
+                    className={`px-2 py-1.5 text-[0.6rem] font-bold uppercase tracking-wider transition-colors cursor-pointer ${queueDivisionFilter === "all"
+                        ? "bg-pickle text-sand"
+                        : "bg-charcoal text-sand/60 hover:text-sand"
+                      }`}
+                  >
+                    All Divisions
+                  </button>
+                </div>
+              )}
+
+              {/* Card / Compact view toggle — Active Queue only */}
+              {activeQueueTab === "queue" && (
+                <div className="flex items-center border border-border overflow-hidden">
+                  <button
+                    onClick={() => handleSetViewMode("card")}
+                    title="Card view"
+                    className={`px-2.5 py-1.5 text-[0.65rem] font-bold uppercase tracking-widest transition-colors cursor-pointer ${viewMode === "card" ? "bg-pickle text-sand" : "bg-charcoal text-sand/60 hover:text-sand"
+                      }`}
+                  >
+                    Card
+                  </button>
+                  <button
+                    onClick={() => handleSetViewMode("compact")}
+                    title="Compact list view"
+                    className={`px-2.5 py-1.5 text-[0.65rem] font-bold uppercase tracking-widest transition-colors cursor-pointer ${viewMode === "compact" ? "bg-pickle text-sand" : "bg-charcoal text-sand/60 hover:text-sand"
+                      }`}
+                  >
+                    Compact
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Search bar */}
+          <div className="relative">
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search by team name, player, or bracket stage..."
+              className="w-full bg-charcoal border border-border text-sand text-sm px-4 py-2.5 pl-9 focus:border-pickle focus:outline-none placeholder:text-sand/40"
+            />
+            <svg
+              className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-sand/40 pointer-events-none"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
+            {searchQuery && (
+              <button
+                onClick={() => setSearchQuery("")}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-[0.65rem] font-bold uppercase tracking-wider text-sand/50 hover:text-sand cursor-pointer"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+
+          {/* ── Category Navigation Bar ── */}
+          <div className="flex items-center gap-1.5 overflow-x-auto pt-1 pb-0.5 text-xs no-scrollbar">
+            <span className="text-[0.65rem] font-bold uppercase tracking-wider text-muted-foreground shrink-0 mr-1">
+              Category:
+            </span>
+            <button
+              onClick={() => setQueueDivisionFilter("all")}
+              className={`px-2.5 py-1 text-[0.65rem] font-bold uppercase tracking-wider border transition-colors cursor-pointer shrink-0 ${
+                queueDivisionFilter === "all"
+                  ? "bg-pickle text-sand border-pickle font-bold"
+                  : "bg-charcoal text-sand/70 border-border hover:border-sand"
+              }`}
+            >
+              All Categories ({queue.filter((q) => q.status === "queued" || q.status === "on_deck").length})
+            </button>
+            {tournament.categories.map((c) => {
+              const catQueueCount = queue.filter(
+                (q) =>
+                  (q.status === "queued" || q.status === "on_deck") &&
+                  (q.categoryId === c.id || q.matchId?.includes(c.id)),
+              ).length;
+              const isSelected =
+                queueDivisionFilter === "current" && categoryId === c.id;
+              return (
+                <button
+                  key={c.id}
+                  onClick={() => {
+                    setCategoryId(c.id);
+                    setActiveWaveId(tournamentSlug, c.id);
+                    setActiveWaveIdState(c.id);
+                    setQueueDivisionFilter("current");
+                  }}
+                  className={`px-2.5 py-1 text-[0.65rem] font-bold uppercase tracking-wider border transition-colors cursor-pointer shrink-0 ${
+                    isSelected
+                      ? "bg-pickle text-sand border-pickle font-bold"
+                      : "bg-charcoal text-sand/70 border-border hover:border-sand"
+                  }`}
+                >
+                  {c.label} ({catQueueCount})
+                </button>
+              );
+            })}
           </div>
         </div>
 
         {/* ── TAB 1: ACTIVE QUEUE ── */}
         {activeQueueTab === "queue" && (
-          <div className="space-y-4">
-            {queue.filter((q) => q.status === "queued" || q.status === "on_deck").length === 0 ? (
+          <div className="space-y-3">
+            {filteredQueue.length === 0 ? (
               <div className="py-12 text-center space-y-3">
-                <p className="text-sm text-muted-foreground">
-                  The active dispatch queue is currently empty.
-                </p>
-                {unassignedMatches.length > 0 && (
-                  <button
-                    onClick={handleQueueUnassignedAll}
-                    className="px-4 py-2 text-xs font-bold uppercase tracking-wider bg-pickle text-sand border border-pickle hover:bg-pickle/90 transition-colors cursor-pointer"
-                  >
-                    Queue All {unassignedMatches.length} Remaining Tournament Matches
-                  </button>
+                {searchQuery ? (
+                  <p className="text-sm text-muted-foreground">
+                    No matches found for <span className="font-semibold text-foreground">"{searchQuery}"</span>.
+                  </p>
+                ) : (
+                  <>
+                    <p className="text-sm text-muted-foreground">The active dispatch queue is currently empty.</p>
+                    {unassignedMatches.length > 0 && (
+                      <button
+                        onClick={handleQueueUnassignedAll}
+                        className="px-4 py-2 text-xs font-bold uppercase tracking-wider bg-pickle text-sand border border-pickle hover:bg-pickle/90 transition-colors cursor-pointer"
+                      >
+                        Queue All {unassignedMatches.length} Remaining Tournament Matches
+                      </button>
+                    )}
+                  </>
                 )}
               </div>
-            ) : (
-              <div className="space-y-2.5">
-                {queue
-                  .filter((q) => q.status === "queued" || q.status === "on_deck")
-                  .sort((a, b) => a.priority - b.priority)
-                  .map((item, idx) => {
-                    const restA = checkRestPeriodConflict(item.teamAName);
-                    const restB = checkRestPeriodConflict(item.teamBName);
-                    const liveA = checkSimultaneousPlayConflict(item.teamAName);
-                    const liveB = checkSimultaneousPlayConflict(item.teamBName);
-
-                    return (
-                      <div
-                        key={item.id}
-                        className="surface-card p-3.5 border border-border flex flex-col md:flex-row md:items-center md:justify-between gap-3 bg-card hover:border-border/80 transition-colors"
+            ) : viewMode === "compact" ? (
+              /* Compact single-row list */
+              <div className="border border-border divide-y divide-border/50 overflow-hidden">
+                {filteredQueue.map((item, idx) => {
+                  const restA = checkRestPeriodConflict(item.teamAName);
+                  const restB = checkRestPeriodConflict(item.teamBName);
+                  const liveA = checkSimultaneousPlayConflict(item.teamAName);
+                  const liveB = checkSimultaneousPlayConflict(item.teamBName);
+                  const hasWarning = !!(restA || restB || liveA || liveB);
+                  const catLabel = getCategoryLabel(item.categoryId, item.matchId);
+                  return (
+                    <div
+                      key={item.id}
+                      className="flex items-center gap-2 py-2 px-3 hover:bg-charcoal/30 transition-colors border-l-2 border-l-pickle"
+                    >
+                      <span className="h-6 w-6 flex items-center justify-center font-display text-xs shrink-0 text-sand/60 border border-border bg-charcoal">
+                        {idx + 1}
+                      </span>
+                      <span
+                        title={`Category: ${catLabel}`}
+                        className="px-1.5 py-0.5 text-[0.6rem] font-bold uppercase tracking-wider bg-pickle/20 text-pickle border border-pickle/40 shrink-0 truncate max-w-[7.5rem]"
                       >
-                        <div className="flex items-center gap-3 min-w-0">
-                          <div className="h-8 w-8 rounded bg-charcoal text-sand flex items-center justify-center font-display text-sm shrink-0 border border-border">
-                            #{idx + 1}
-                          </div>
-
-                          <div className="min-w-0">
-                            <div className="flex items-center gap-2">
-                              <span className="font-semibold text-foreground text-sm truncate">
-                                {item.teamAName} vs {item.teamBName}
-                              </span>
-                              <span className="px-1.5 py-0.5 text-[0.6rem] uppercase tracking-wider bg-charcoal text-sand/80 border border-border">
-                                {item.stage}
-                              </span>
-                              {item.assignedCourt && (
-                                <span className="px-1.5 py-0.5 text-[0.6rem] uppercase tracking-wider bg-pickle/20 text-pickle border border-pickle/40">
-                                  Designated {item.assignedCourt}
-                                </span>
-                              )}
-                            </div>
-
-                            {/* Warnings */}
-                            <div className="flex flex-wrap gap-2 mt-1">
-                              {(restA || restB) && (
-                                <span className="text-[0.65rem] text-amber-400 font-medium">
-                                  Rest Warning: {(restA ?? restB)?.teamName} finished {(restA ?? restB)?.minutesAgo}m ago
-                                </span>
-                              )}
-                              {(liveA || liveB) && (
-                                <span className="text-[0.65rem] text-brick font-bold">
-                                  Conflict: {(liveA ?? liveB)?.teamName} is live on {(liveA ?? liveB)?.court}
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Controls: Move priority + Dispatch to Court 1-4 */}
-                        <div className="flex flex-wrap items-center gap-1.5 shrink-0 self-end md:self-auto">
-                          {/* Priority reordering */}
-                          <div className="flex items-center gap-1 mr-2 border-r border-border/50 pr-2">
+                        {catLabel}
+                      </span>
+                      <span className="text-[0.6rem] font-bold uppercase tracking-wider text-sand/70 w-24 shrink-0 truncate">
+                        {item.stage}
+                      </span>
+                      <span className="flex-1 font-semibold text-foreground text-sm truncate min-w-0">
+                        {item.teamAName} <span className="text-foreground/40 font-normal">vs</span> {item.teamBName}
+                      </span>
+                      {hasWarning && (
+                        <span
+                          title={`${restA || restB ? "Rest warning. " : ""}${liveA || liveB ? "Simultaneous play conflict." : ""}`}
+                          className="text-amber-400 font-bold text-xs shrink-0 cursor-help"
+                        >
+                          !
+                        </span>
+                      )}
+                      <div className="flex items-center gap-0.5 shrink-0">
+                        <button
+                          onClick={() => { reorderQueue(item.matchId, "up"); reloadData(); }}
+                          disabled={idx === 0}
+                          className="px-1.5 py-0.5 text-[0.6rem] font-bold bg-charcoal text-sand/70 border border-border hover:text-sand disabled:opacity-30 cursor-pointer"
+                          title="Move Up"
+                        >
+                          Up
+                        </button>
+                        <button
+                          onClick={() => { reorderQueue(item.matchId, "down"); reloadData(); }}
+                          className="px-1.5 py-0.5 text-[0.6rem] font-bold bg-charcoal text-sand/70 border border-border hover:text-sand cursor-pointer"
+                          title="Move Down"
+                        >
+                          Dn
+                        </button>
+                      </div>
+                      <div className="flex items-center gap-0.5 shrink-0">
+                        {FACILITY_COURTS.map((c) => {
+                          const isOccupied =
+                            stations[c].status === "live" ||
+                            stations[c].status === "warmup" ||
+                            stations[c].status === "maintenance";
+                          return (
                             <button
-                              onClick={() => {
-                                reorderQueue(item.matchId, "up");
-                                reloadData();
-                              }}
-                              disabled={idx === 0}
-                              className="px-2 py-1 text-[0.65rem] font-bold bg-charcoal text-sand border border-border hover:border-sand disabled:opacity-30 cursor-pointer"
-                              title="Move Up"
-                            >
-                              Up
-                            </button>
-                            <button
-                              onClick={() => {
-                                reorderQueue(item.matchId, "down");
-                                reloadData();
-                              }}
-                              className="px-2 py-1 text-[0.65rem] font-bold bg-charcoal text-sand border border-border hover:border-sand cursor-pointer"
-                              title="Move Down"
-                            >
-                              Down
-                            </button>
-                          </div>
-
-                          {/* Quick dispatch buttons for 4 courts */}
-                          {FACILITY_COURTS.map((c) => {
-                            const isCourtOccupied = stations[c].status === "live" || stations[c].status === "warmup" || stations[c].status === "maintenance";
-                            return (
-                              <button
-                                key={c}
-                                onClick={() => handleDispatch(c, {
+                              key={c}
+                              onClick={() =>
+                                handleDispatch(c, {
                                   id: item.matchId,
                                   teamAName: item.teamAName,
                                   teamAPlayers: item.teamAPlayers,
                                   teamBName: item.teamBName,
                                   teamBPlayers: item.teamBPlayers,
-                                })}
-                                disabled={isCourtOccupied}
-                                className={`px-2.5 py-1 text-[0.65rem] font-bold uppercase tracking-wider border transition-colors cursor-pointer ${
-                                  isCourtOccupied
-                                    ? "border-border/40 text-muted-foreground/40 cursor-not-allowed"
-                                    : "border-pickle/60 text-pickle hover:bg-pickle hover:text-sand"
+                                })
+                              }
+                              disabled={isOccupied}
+                              title={isOccupied ? `${c} is occupied` : `Dispatch to ${c}`}
+                              className={`px-2 py-0.5 text-[0.6rem] font-bold border transition-colors ${isOccupied
+                                  ? "border-border/40 text-muted-foreground/40 cursor-not-allowed"
+                                  : "border-pickle/60 text-pickle hover:bg-pickle hover:text-sand cursor-pointer"
                                 }`}
-                                title={isCourtOccupied ? `${c} is currently occupied` : `Dispatch immediately to ${c}`}
-                              >
-                                &rarr; {c}
-                              </button>
-                            );
-                          })}
+                            >
+                              {c.replace("Court ", "C")}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <button
+                        onClick={() => { removeQueueItem(item.matchId); reloadData(); }}
+                        className="text-[0.6rem] text-muted-foreground hover:text-brick px-1 cursor-pointer shrink-0"
+                        title="Remove from queue"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              /* Card view */
+              <div className="space-y-2.5">
+                {filteredQueue.map((item, idx) => {
+                  const restA = checkRestPeriodConflict(item.teamAName);
+                  const restB = checkRestPeriodConflict(item.teamBName);
+                  const liveA = checkSimultaneousPlayConflict(item.teamAName);
+                  const liveB = checkSimultaneousPlayConflict(item.teamBName);
+                  const catLabel = getCategoryLabel(item.categoryId, item.matchId);
 
-                          {/* Designate on-deck */}
-                          <select
-                            value={item.assignedCourt ?? ""}
-                            onChange={(e) => {
-                              const val = e.target.value as FacilityCourt | "";
-                              setCourtOnDeck(val ? val : "Court 1", val ? item.matchId : null);
-                              reloadData();
-                            }}
-                            className="bg-charcoal text-sand border border-border px-2 py-1 text-[0.65rem] focus:outline-none cursor-pointer"
-                          >
-                            <option value="">On-Deck...</option>
-                            {FACILITY_COURTS.map((c) => (
-                              <option key={c} value={c}>
-                                On-Deck {c}
-                              </option>
-                            ))}
-                          </select>
+                  return (
+                    <div
+                      key={item.id}
+                      className="surface-card p-3.5 border border-border border-l-4 border-l-pickle flex flex-col md:flex-row md:items-center md:justify-between gap-3 bg-card hover:border-border/80 transition-colors"
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className="h-8 w-8 rounded bg-charcoal text-sand flex items-center justify-center font-display text-sm shrink-0 border border-border">
+                          #{idx + 1}
+                        </div>
 
-                          {/* Remove */}
-                          <button
-                            onClick={() => {
-                              removeQueueItem(item.matchId);
-                              reloadData();
-                            }}
-                            className="text-xs text-muted-foreground hover:text-brick p-1 cursor-pointer ml-1"
-                            title="Remove from queue"
-                          >
-                            Remove
-                          </button>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span
+                              title={`Category: ${catLabel}`}
+                              className="px-2 py-0.5 text-[0.65rem] font-bold uppercase tracking-wider bg-pickle/20 text-pickle border border-pickle/40 shrink-0"
+                            >
+                              {catLabel}
+                            </span>
+                            <span className="font-semibold text-foreground text-sm truncate">
+                              {item.teamAName} vs {item.teamBName}
+                            </span>
+                            <span className="px-1.5 py-0.5 text-[0.6rem] uppercase tracking-wider bg-charcoal text-sand/80 border border-border shrink-0">
+                              {item.stage}
+                            </span>
+                            {item.assignedCourt && (
+                              <span className="px-1.5 py-0.5 text-[0.6rem] uppercase tracking-wider bg-pickle/20 text-pickle border border-pickle/40 shrink-0">
+                                Designated {item.assignedCourt}
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="flex flex-wrap gap-2 mt-1">
+                            {(restA || restB) && (
+                              <span className="text-[0.65rem] text-amber-400 font-medium">
+                                Rest Warning: {(restA ?? restB)?.teamName} finished {(restA ?? restB)?.minutesAgo}m ago
+                              </span>
+                            )}
+                            {(liveA || liveB) && (
+                              <span className="text-[0.65rem] text-brick font-bold">
+                                Conflict: {(liveA ?? liveB)?.teamName} is live on {(liveA ?? liveB)?.court}
+                              </span>
+                            )}
+                          </div>
                         </div>
                       </div>
-                    );
-                  })}
+
+                      <div className="flex flex-wrap items-center gap-1.5 shrink-0 self-end md:self-auto">
+                        <div className="flex items-center gap-1 mr-2 border-r border-border/50 pr-2">
+                          <button
+                            onClick={() => { reorderQueue(item.matchId, "up"); reloadData(); }}
+                            disabled={idx === 0}
+                            className="px-2 py-1 text-[0.65rem] font-bold bg-charcoal text-sand border border-border hover:border-sand disabled:opacity-30 cursor-pointer"
+                            title="Move Up"
+                          >
+                            Up
+                          </button>
+                          <button
+                            onClick={() => { reorderQueue(item.matchId, "down"); reloadData(); }}
+                            className="px-2 py-1 text-[0.65rem] font-bold bg-charcoal text-sand border border-border hover:border-sand cursor-pointer"
+                            title="Move Down"
+                          >
+                            Down
+                          </button>
+                        </div>
+
+                        {FACILITY_COURTS.map((c) => {
+                          const isCourtOccupied =
+                            stations[c].status === "live" ||
+                            stations[c].status === "warmup" ||
+                            stations[c].status === "maintenance";
+                          return (
+                            <button
+                              key={c}
+                              onClick={() =>
+                                handleDispatch(c, {
+                                  id: item.matchId,
+                                  teamAName: item.teamAName,
+                                  teamAPlayers: item.teamAPlayers,
+                                  teamBName: item.teamBName,
+                                  teamBPlayers: item.teamBPlayers,
+                                })
+                              }
+                              disabled={isCourtOccupied}
+                              title={isCourtOccupied ? `${c} is currently occupied` : `Dispatch immediately to ${c}`}
+                              className={`px-2.5 py-1 text-[0.65rem] font-bold uppercase tracking-wider border transition-colors cursor-pointer ${isCourtOccupied
+                                  ? "border-border/40 text-muted-foreground/40 cursor-not-allowed"
+                                  : "border-pickle/60 text-pickle hover:bg-pickle hover:text-sand"
+                                }`}
+                            >
+                              &rarr; {c}
+                            </button>
+                          );
+                        })}
+
+                        <select
+                          value={item.assignedCourt ?? ""}
+                          onChange={(e) => {
+                            const val = e.target.value as FacilityCourt | "";
+                            setCourtOnDeck(val ? val : "Court 1", val ? item.matchId : null);
+                            reloadData();
+                          }}
+                          className="bg-charcoal text-sand border border-border px-2 py-1 text-[0.65rem] focus:outline-none cursor-pointer"
+                        >
+                          <option value="">On-Deck...</option>
+                          {FACILITY_COURTS.map((c) => (
+                            <option key={c} value={c}>
+                              On-Deck {c}
+                            </option>
+                          ))}
+                        </select>
+
+                        <button
+                          onClick={() => { removeQueueItem(item.matchId); reloadData(); }}
+                          className="text-xs text-muted-foreground hover:text-brick p-1 cursor-pointer ml-1"
+                          title="Remove from queue"
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
         )}
 
-        {/* ── TAB 2: UNASSIGNED TOURNAMENT MATCHES ── */}
+        {/* ── TAB 2: BRACKET CARDS ── */}
         {activeQueueTab === "unassigned" && (
           <div className="space-y-4">
+            {/* Sub-header */}
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-b border-border/50 pb-3">
               <span className="text-xs text-muted-foreground">
-                Matches from Round-Robin Brackets and Main Draw Playoffs ready to enter the queue.
+                {searchQuery
+                  ? `${groupedUnassigned.reduce((acc, [, m]) => acc + m.length, 0)} match(es) in ${groupedUnassigned.length
+                  } bracket(s) matching "${searchQuery}"`
+                  : `${groupedUnassigned.length} bracket(s) — ${unassignedMatches.length} matches remaining`}
               </span>
-              {unassignedMatches.length > 0 && (
+              {unassignedMatches.length > 0 && !searchQuery && (
                 <button
                   onClick={handleQueueUnassignedAll}
                   className="px-3 py-1.5 text-xs font-bold uppercase tracking-wider bg-pickle text-sand border border-pickle hover:bg-pickle/90 transition-colors cursor-pointer"
@@ -1094,34 +2029,102 @@ export function CourtDispatch({
               )}
             </div>
 
-            {unassignedMatches.length === 0 ? (
-              <div className="py-12 text-center text-xs text-muted-foreground">
-                All tournament matches are currently queued, on court, or completed!
+            {groupedUnassigned.length === 0 ? (
+              <div className="py-16 text-center text-xs text-muted-foreground space-y-3">
+                <p>
+                  {searchQuery
+                    ? `No brackets or matches found for "${searchQuery}".`
+                    : (!category?.teams || category.teams.length < 2)
+                      ? `No registered teams in ${category?.label ?? "this division"} yet. Add or auto-populate teams in Setup to dispatch matches.`
+                      : `All bracket matches for ${category?.label ?? "this division"} are active in the dispatch queue or underway on court.`}
+                </p>
+                {!searchQuery && category?.teams && category.teams.length >= 2 && (
+                  <button
+                    onClick={() => setActiveQueueTab("queue")}
+                    className="inline-block px-4 py-2 bg-pickle text-sand text-xs font-bold uppercase tracking-wider hover:opacity-90 transition-opacity cursor-pointer"
+                  >
+                    View Active Queue &rarr;
+                  </button>
+                )}
               </div>
             ) : (
-              <div className="grid gap-3 sm:grid-cols-2">
-                {unassignedMatches.map((m) => (
-                  <div
-                    key={m.id}
-                    className="p-3 bg-card border border-border rounded flex items-center justify-between gap-3"
-                  >
-                    <div className="min-w-0">
-                      <span className="text-[0.65rem] uppercase tracking-wider text-pickle font-semibold block truncate">
-                        {m.stage}
-                      </span>
-                      <span className="font-semibold text-foreground text-sm block truncate">
-                        {m.teamAName} vs {m.teamBName}
-                      </span>
-                    </div>
+              <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 xl:grid-cols-3">
+                {groupedUnassigned.map(([stage, stageMatches]) => {
+                  // Derive a short bracket type label
+                  const typeLabel = stage.includes("Pool Play")
+                    ? "Pool Play"
+                    : stage.toLowerCase().includes("final")
+                      ? "Finals"
+                      : stage.toLowerCase().includes("semi")
+                        ? "Semifinals"
+                        : stage.toLowerCase().includes("quarter")
+                          ? "Quarterfinals"
+                          : "Playoff";
 
-                    <button
-                      onClick={() => handleQueueSingle(m)}
-                      className="px-3 py-1.5 text-xs font-bold uppercase tracking-wider bg-charcoal text-sand border border-border hover:border-pickle hover:text-pickle transition-colors shrink-0 cursor-pointer"
+                  // Short display name — strip the type suffix for the heading
+                  const shortName = stage
+                    .replace(" (Pool Play)", "")
+                    .replace(" (Playoff)", "");
+
+                  return (
+                    <div
+                      key={stage}
+                      className="surface-card border border-border overflow-hidden flex flex-col"
                     >
-                      + Add to Queue
-                    </button>
-                  </div>
-                ))}
+                      {/* Card Header */}
+                      <div className="bg-charcoal px-4 py-3 border-b border-border flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <span className="text-[0.6rem] font-bold uppercase tracking-widest text-pickle block">
+                            {typeLabel}
+                          </span>
+                          <span className="font-display text-lg text-sand leading-tight block truncate">
+                            {shortName}
+                          </span>
+                        </div>
+                        <span className="font-display text-3xl text-sand/30 shrink-0 leading-none mt-1">
+                          {stageMatches.length}
+                        </span>
+                      </div>
+
+                      {/* Match list */}
+                      <div className="flex-1 overflow-y-auto divide-y divide-border/50" style={{ maxHeight: "11rem" }}>
+                        {stageMatches.map((m) => (
+                          <div
+                            key={m.id}
+                            className="flex items-center justify-between gap-2 px-4 py-2 hover:bg-charcoal/20 transition-colors"
+                          >
+                            <div className="min-w-0">
+                              <span className="text-sm text-foreground font-semibold truncate block">
+                                {m.teamAName} <span className="text-foreground/40 font-normal">vs</span> {m.teamBName}
+                              </span>
+                              {(m.teamAPlayers.length > 0 || m.teamBPlayers.length > 0) && (
+                                <span className="text-[0.6rem] text-muted-foreground truncate block">
+                                  {[...m.teamAPlayers, ...m.teamBPlayers].join(" / ")}
+                                </span>
+                              )}
+                            </div>
+                            <button
+                              onClick={() => handleQueueSingle(m)}
+                              className="text-[0.6rem] font-bold uppercase tracking-wider text-pickle hover:text-sand border border-pickle/40 hover:border-sand px-2 py-0.5 shrink-0 transition-colors cursor-pointer"
+                            >
+                              + Queue
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* Card footer — Queue all CTA */}
+                      <div className="px-4 py-3 bg-charcoal/40 border-t border-border">
+                        <button
+                          onClick={() => handleQueueStageGroup(stageMatches)}
+                          className="w-full py-2 text-[0.65rem] font-bold uppercase tracking-widest bg-pickle text-sand hover:opacity-90 transition-opacity cursor-pointer"
+                        >
+                          Queue All {stageMatches.length} Matches
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -1130,47 +2133,47 @@ export function CourtDispatch({
         {/* ── TAB 3: COURT MATCH HISTORY / COMPLETED ── */}
         {activeQueueTab === "history" && (
           <div className="space-y-3">
-            {matches.filter((m) => m.status === "final").length === 0 ? (
+            {filteredHistory.length === 0 ? (
               <div className="py-12 text-center text-xs text-muted-foreground">
-                No completed matches yet.
+                {searchQuery
+                  ? `No completed matches found for "${searchQuery}".`
+                  : "No completed matches yet."}
               </div>
             ) : (
               <div className="divide-y divide-border">
-                {matches
-                  .filter((m) => m.status === "final")
-                  .map((m) => (
-                    <div
-                      key={m.id}
-                      className="py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2"
-                    >
-                      <div className="flex items-center gap-3">
-                        <span className="px-2 py-0.5 text-[0.65rem] font-bold uppercase tracking-wider bg-charcoal text-sand border border-border">
-                          {m.court}
+                {filteredHistory.map((m) => (
+                  <div
+                    key={m.id}
+                    className="py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2"
+                  >
+                    <div className="flex items-center gap-3">
+                      <span className="px-2 py-0.5 text-[0.65rem] font-bold uppercase tracking-wider bg-charcoal text-sand border border-border">
+                        {m.court}
+                      </span>
+                      <div>
+                        <span className="font-semibold text-sm text-foreground">
+                          {m.teamAName} vs {m.teamBName}
                         </span>
-                        <div>
-                          <span className="font-semibold text-sm text-foreground">
-                            {m.teamAName} vs {m.teamBName}
-                          </span>
-                          {m.winnerTeam && (
-                            <span className="block text-[0.65rem] text-pickle font-medium">
-                              Winner: {m.winnerTeam}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-
-                      <div className="flex items-center gap-4 text-right">
-                        <div className="font-display text-xl text-sand">
-                          {m.score.teamAScore} - {m.score.teamBScore}
-                        </div>
-                        {m.officiatedBy && (
-                          <span className="text-[0.65rem] text-muted-foreground uppercase tracking-wider">
-                            Official: {m.officiatedBy}
+                        {m.winnerTeam && (
+                          <span className="block text-[0.65rem] text-pickle font-medium">
+                            Winner: {m.winnerTeam}
                           </span>
                         )}
                       </div>
                     </div>
-                  ))}
+
+                    <div className="flex items-center gap-4 text-right">
+                      <div className="font-display text-xl text-sand">
+                        {m.score.teamAScore} - {m.score.teamBScore}
+                      </div>
+                      {m.officiatedBy && (
+                        <span className="text-[0.65rem] text-muted-foreground uppercase tracking-wider">
+                          Official: {m.officiatedBy}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
           </div>
@@ -1251,6 +2254,41 @@ export function CourtDispatch({
           </form>
         )}
       </div>
+
+      {/* Admin Reset Confirmation Modal */}
+      {resetConfirmMatch && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-charcoal/90 backdrop-blur-sm p-4">
+          <div className="surface-card border-2 border-pickle/60 max-w-sm w-full p-6 space-y-4">
+            <div>
+              <span className="text-[0.65rem] uppercase tracking-[0.28em] font-bold text-pickle block">
+                Pre-Match Reset
+              </span>
+              <h3 className="font-display text-2xl text-foreground mt-1">
+                Reset Match & Require Toss?
+              </h3>
+            </div>
+            <p className="text-sm text-foreground/80">
+              This will reset the score to 0-0 for <strong>{resetConfirmMatch.match.teamAName}</strong> vs <strong>{resetConfirmMatch.match.teamBName}</strong> on {resetConfirmMatch.court}, clear all rallies, and set the station to warm-up with coin toss required.
+            </p>
+            <div className="flex gap-3 justify-end pt-2">
+              <button
+                type="button"
+                onClick={() => setResetConfirmMatch(null)}
+                className="px-4 py-2 text-xs font-bold uppercase tracking-widest border border-border text-foreground hover:border-foreground/50 transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => executeResetMatch(resetConfirmMatch.court, resetConfirmMatch.match)}
+                className="px-4 py-2 text-xs font-bold uppercase tracking-widest bg-pickle text-sand hover:opacity-90 transition-opacity cursor-pointer"
+              >
+                Reset & Require Toss
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
