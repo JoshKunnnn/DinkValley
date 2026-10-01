@@ -50,6 +50,7 @@ export type Category = {
   division: "Men's" | "Women's" | "Mixed" | "Open";
   fee?: string | undefined;
   teams: Team[];
+  pendingTeams?: Team[] | undefined;
   pools: PoolMatch[];
   standings: Standing[];
   playoffs: PlayoffMatch[];

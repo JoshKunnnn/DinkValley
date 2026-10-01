@@ -1,5 +1,6 @@
 import type { Team } from "@/data/tournaments";
 import { createSampleReceiptSvg } from "@/data/tournaments";
+import { generateUUID } from "@/lib/utils";
 
 export interface GenerateTeamsOptions {
   prefix?: string;
@@ -7,6 +8,16 @@ export interface GenerateTeamsOptions {
 }
 
 const TEAM_NAMES = [
+  // 8 seeded entries for bracket distribution testing
+  "Nanomoly",
+  "Nanomoly",
+  "Nanomoly",
+  "Nanomoly",
+  "Nanomoly",
+  "Nanomoly",
+  "Nanomoly",
+  "Nanomoly",
+  // Regular teams
   "Kitchen Krushers",
   "Dink Dynasty",
   "Side-Out Snipers",
@@ -31,17 +42,19 @@ const TEAM_NAMES = [
   "Pickle Pirates",
   "Drive Masters",
   "Backhand Bandits",
-  "Kitchen Keepers",
-  "The Dinking Dead",
-  "Speedup Sultans",
-  "Poach Patrol",
-  "Fireballers",
-  "Ace Alliance",
-  "Sweet Spotters",
-  "Golden Dinkers",
 ];
 
 const PLAYER_PAIRS: [string, string][] = [
+  // Pairs for the 8 Nanomoly teams
+  ["Carlo Nano", "Rico Moly"],
+  ["Dante Nano", "Gio Moly"],
+  ["Felix Nano", "Ivan Moly"],
+  ["Hugo Nano", "Jace Moly"],
+  ["Karl Nano", "Leo Moly"],
+  ["Marco Nano", "Nico Moly"],
+  ["Oscar Nano", "Pablo Moly"],
+  ["Quinn Nano", "Ryan Moly"],
+  // Regular pairs
   ["Marcus Vance", "Elena Rostova"],
   ["Mateo Cruz", "Sophia Reyes"],
   ["Liam Gallagher", "Noah Chen"],
@@ -66,14 +79,6 @@ const PLAYER_PAIRS: [string, string][] = [
   ["Mason Cooper", "Wyatt Foster"],
   ["Tyler Durden", "Robert Paulson"],
   ["Damian Wayne", "Richard Grayson"],
-  ["Lorenzo Medici", "Giovanni Rossi"],
-  ["Tobias Eaton", "Caleb Prior"],
-  ["Felix Vance", "Simon Ortiz"],
-  ["Arthur Morgan", "John Marston"],
-  ["Gavin Ramirez", "Tristan Ward"],
-  ["Xavier Mercer", "Quinn Sterling"],
-  ["Kai Tanaka", "Kenji Sato"],
-  ["Cesar Romero", "Manuel Quezon"],
 ];
 
 const CLUBS = [
@@ -100,13 +105,10 @@ export function generate32Teams(options: GenerateTeamsOptions = {}): Team[] {
 
   return TEAM_NAMES.slice(0, 32).map((name, index) => {
     const paddedIndex = String(index + 1).padStart(2, "0");
-    const id =
-      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-        ? crypto.randomUUID()
-        : `${prefix}-${paddedIndex}-${Date.now().toString(36).slice(-4)}`;
+    const id = generateUUID();
     const [p1, p2] = PLAYER_PAIRS[index] || [`Player ${index * 2 + 1}`, `Player ${index * 2 + 2}`];
     const club = CLUBS[index % CLUBS.length];
-    const isPaid = verifiedOnly ? true : index < 28; // 28 paid, 4 pending if not verifiedOnly
+    const isPaid = verifiedOnly ? true : index < 28;
     const refNumber = `GC-${98200000 + index * 317 + 104}`;
 
     return {

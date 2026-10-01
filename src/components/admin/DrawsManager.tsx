@@ -2,6 +2,11 @@ import { useState, useMemo, useEffect, useCallback } from "react";
 import type { Team, Tournament, Category } from "@/data/tournaments";
 import { getDrawnGroups } from "./BracketDraw";
 import { getMatches, saveMatches, sanitizeCourtName, type LiveMatch } from "@/lib/match-store";
+import {
+  dbSaveMainDraw,
+  dbDeleteMainDraw,
+  getCachedMainDraw,
+} from "@/lib/supabase-service";
 
 export type BracketMatch = {
   id: string;
@@ -69,7 +74,29 @@ const MAIN_DRAW_KEY = (slug: string, catId: string) => `dv_main_draw_${slug}_${c
 
 export function saveMainDrawMatches(slug: string, catId: string, matches: KnockoutMatch[]) {
   try {
-    localStorage.setItem(MAIN_DRAW_KEY(slug, catId), JSON.stringify(matches));
+    dbSaveMainDraw(slug, catId, matches).catch((err) => {
+      console.warn("[Supabase] Failed to save main draw:", err);
+    });
+    try {
+      localStorage.setItem(MAIN_DRAW_KEY(slug, catId), JSON.stringify(matches));
+    } catch {
+      // ignore
+    }
+    window.dispatchEvent(new Event("dv_main_draw_updated"));
+    window.dispatchEvent(new Event("storage"));
+  } catch {
+    // ignore
+  }
+}
+
+export function resetMainDrawMatches(slug: string, catId: string) {
+  try {
+    dbDeleteMainDraw(slug, catId).catch(() => {});
+    try {
+      localStorage.removeItem(MAIN_DRAW_KEY(slug, catId));
+    } catch {
+      // ignore
+    }
     window.dispatchEvent(new Event("dv_main_draw_updated"));
     window.dispatchEvent(new Event("storage"));
   } catch {
@@ -78,8 +105,13 @@ export function saveMainDrawMatches(slug: string, catId: string, matches: Knocko
 }
 
 export function getMainDrawMatches(slug: string, catId: string): KnockoutMatch[] | null {
+  const cached = getCachedMainDraw(slug, catId);
+  if (cached && Array.isArray(cached) && cached.length > 0) {
+    return cached as KnockoutMatch[];
+  }
+
   try {
-    const raw = localStorage.getItem(MAIN_DRAW_KEY(slug, catId));
+    const raw = typeof localStorage !== "undefined" ? localStorage.getItem(MAIN_DRAW_KEY(slug, catId)) : null;
     if (!raw) return null;
     const parsed = JSON.parse(raw) as KnockoutMatch[];
     if (!Array.isArray(parsed)) return null;
@@ -96,6 +128,8 @@ export function getMainDrawMatches(slug: string, catId: string): KnockoutMatch[]
 
     if (modified) {
       saveMainDrawMatches(slug, catId, sanitized);
+    } else {
+      dbSaveMainDraw(slug, catId, sanitized).catch(() => {});
     }
     return sanitized;
   } catch {

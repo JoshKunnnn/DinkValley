@@ -1,6 +1,75 @@
 import { supabase } from "@/integrations/supabase/client";
 import type { Tournament, Category, Team } from "@/data/tournaments";
 import type { LiveMatch, LiveScore } from "@/lib/match-store";
+import { generateUUID } from "@/lib/utils";
+
+// Global in-memory caches populated directly from Supabase
+const _drawnGroupsCache = new Map<string, any[]>();
+const _mainDrawCache = new Map<string, any[]>();
+let _dispatchQueueCache: any[] = [];
+
+export function getCachedDrawnGroups(tournamentSlug: string, categoryId: string): any[] | null {
+  if (!tournamentSlug || !categoryId) return null;
+  // 1. Direct match
+  const direct = _drawnGroupsCache.get(`${tournamentSlug}_${categoryId}`);
+  if (direct && Array.isArray(direct) && direct.length > 0) {
+    return direct;
+  }
+
+  // 2. Flexible cross-match across tournament entries (resolving UUID vs slug)
+  for (const [key, val] of _drawnGroupsCache.entries()) {
+    if (key.startsWith(`${tournamentSlug}_`)) {
+      const storedCat = key.substring(`${tournamentSlug}_`.length);
+      if (
+        storedCat === categoryId ||
+        storedCat.toLowerCase() === categoryId.toLowerCase() ||
+        storedCat.includes(categoryId) ||
+        categoryId.includes(storedCat)
+      ) {
+        if (Array.isArray(val) && val.length > 0) {
+          return val;
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+export async function dbGetDrawnGroups(tournamentSlug: string, categoryId: string): Promise<any[] | null> {
+  const cached = getCachedDrawnGroups(tournamentSlug, categoryId);
+  if (cached && Array.isArray(cached) && cached.length > 0) return cached;
+
+  try {
+    const { data: tourney } = await supabase
+      .from("tournaments")
+      .select("id, rules")
+      .eq("slug", tournamentSlug)
+      .maybeSingle();
+
+    if (tourney?.rules && typeof tourney.rules === "object" && !Array.isArray(tourney.rules)) {
+      const meta = tourney.rules as any;
+      if (meta.drawnGroups && typeof meta.drawnGroups === "object") {
+        for (const [catId, grps] of Object.entries(meta.drawnGroups)) {
+          _drawnGroupsCache.set(`${tournamentSlug}_${catId}`, grps as any);
+        }
+        return getCachedDrawnGroups(tournamentSlug, categoryId);
+      }
+    }
+  } catch (err) {
+    console.warn("[Supabase] Failed to fetch drawn groups:", err);
+  }
+
+  return null;
+}
+
+export function getCachedMainDraw(tournamentSlug: string, categoryId: string): any[] | null {
+  return _mainDrawCache.get(`${tournamentSlug}_${categoryId}`) || null;
+}
+
+export function getCachedDispatchQueue(): any[] {
+  return _dispatchQueueCache;
+}
 
 /**
  * Fetch all tournaments from Supabase, including categories and teams.
@@ -28,8 +97,40 @@ export async function dbGetTournaments(): Promise<Tournament[]> {
     }
 
     return dbTournaments.map((t) => {
+      let parsedRules: string[] = [];
+      let metaObj: any = null;
+
+      if (Array.isArray(t.rules)) {
+        parsedRules = t.rules as string[];
+      } else if (t.rules && typeof t.rules === "object") {
+        metaObj = t.rules as any;
+        parsedRules = Array.isArray(metaObj.rules) ? metaObj.rules : [];
+        if (metaObj.drawnGroups && typeof metaObj.drawnGroups === "object") {
+          for (const [catId, groups] of Object.entries(metaObj.drawnGroups)) {
+            _drawnGroupsCache.set(`${t.slug}_${catId}`, groups as any);
+          }
+          if (typeof window !== "undefined") {
+            window.dispatchEvent(new Event("dv_drawn_groups_updated"));
+          }
+        }
+        if (metaObj.mainDraw && typeof metaObj.mainDraw === "object") {
+          for (const [catId, draw] of Object.entries(metaObj.mainDraw)) {
+            _mainDrawCache.set(`${t.slug}_${catId}`, draw as any);
+          }
+          if (typeof window !== "undefined") {
+            window.dispatchEvent(new Event("dv_main_draw_updated"));
+          }
+        }
+        if (Array.isArray(metaObj.dispatchQueue)) {
+          _dispatchQueueCache = metaObj.dispatchQueue;
+          if (typeof window !== "undefined") {
+            window.dispatchEvent(new Event("dv_dispatch_queue_updated"));
+          }
+        }
+      }
+
       const categories: Category[] = (t.categories || []).map((c: any) => {
-        const teams: Team[] = (c.teams || []).map((tm: any) => ({
+        let teams: Team[] = (c.teams || []).map((tm: any) => ({
           id: tm.id,
           name: tm.name,
           players: Array.isArray(tm.players) ? tm.players : [],
@@ -40,20 +141,67 @@ export async function dbGetTournaments(): Promise<Tournament[]> {
           paymentStatus: (tm.payment_status as Team["paymentStatus"]) || "Pending",
         }));
 
+        // If category teams is empty, recover teams from drawn groups if present
+        if (teams.length === 0 && metaObj?.drawnGroups && typeof metaObj.drawnGroups === "object") {
+          const catKey = c.category_slug || c.id;
+          const grps =
+            metaObj.drawnGroups[catKey] ||
+            metaObj.drawnGroups[c.id] ||
+            metaObj.drawnGroups[c.category_slug];
+
+          if (Array.isArray(grps)) {
+            const seen = new Set<string>();
+            grps.forEach((g: any) => {
+              g.slots?.forEach((s: any) => {
+                if (s.team && !seen.has(s.team.name)) {
+                  seen.add(s.team.name);
+                  teams.push(s.team);
+                }
+              });
+            });
+
+            // Asynchronously sync recovered teams to Supabase teams table in background
+            if (teams.length > 0 && c.id) {
+              const isUuid = (id?: string) =>
+                id ? /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) : false;
+
+              const teamsToInsert = teams.map((tm) => ({
+                ...(isUuid(tm.id) ? { id: tm.id } : {}),
+                tournament_id: t.id,
+                category_id: c.id,
+                name: tm.name,
+                players: tm.players || [],
+                club: tm.club || null,
+                paid: Boolean(tm.paid ?? true),
+                payment_proof_url: tm.paymentProofUrl || null,
+                payment_ref: tm.paymentRef || null,
+                payment_status: tm.paymentStatus || "Verified",
+              }));
+
+              Promise.resolve(
+                supabase.from("teams").insert(teamsToInsert)
+              ).catch(() => {});
+            }
+          }
+        }
+
+        const verifiedTeams = teams.filter((tm) => tm.paid === true || tm.paymentStatus === "Verified");
+        const pendingTeams = teams.filter((tm) => tm.paid !== true && tm.paymentStatus !== "Verified");
+
         return {
           id: c.category_slug || c.id,
           label: c.label,
           level: c.level as Category["level"],
           division: c.division as Category["division"],
           fee: c.entry_fee || undefined,
-          teams,
+          teams: verifiedTeams,
+          pendingTeams: pendingTeams,
           pools: [],
           standings: [],
           playoffs: [],
         };
       });
 
-      const parsedRules: string[] = Array.isArray(t.rules) ? (t.rules as string[]) : [];
       const parsedSchedule = Array.isArray(t.schedule)
         ? (t.schedule as { time: string; title: string; detail: string }[])
         : [];
@@ -85,6 +233,21 @@ export async function dbGetTournaments(): Promise<Tournament[]> {
  */
 export async function dbSaveTournament(t: Tournament): Promise<boolean> {
   try {
+    // Preserve existing metadata in rules if present
+    const { data: existingTourney } = await supabase
+      .from("tournaments")
+      .select("rules")
+      .eq("slug", t.slug)
+      .maybeSingle();
+
+    let rulesToSave: any = t.rules;
+    if (existingTourney?.rules && typeof existingTourney.rules === "object" && !Array.isArray(existingTourney.rules)) {
+      rulesToSave = {
+        ...(existingTourney.rules as any),
+        rules: Array.isArray(t.rules) ? t.rules : (existingTourney.rules as any).rules || [],
+      };
+    }
+
     // 1. Upsert tournament header
     const { data: tourneyRow, error: tErr } = await supabase
       .from("tournaments")
@@ -99,7 +262,7 @@ export async function dbSaveTournament(t: Tournament): Promise<boolean> {
           city: t.city,
           entry_fee: t.entryFee || null,
           format: t.format,
-          rules: t.rules,
+          rules: rulesToSave,
           schedule: t.schedule,
           updated_at: new Date().toISOString(),
         },
@@ -138,14 +301,27 @@ export async function dbSaveTournament(t: Tournament): Promise<boolean> {
         continue;
       }
 
-      // 3. Sync teams: remove previous teams for this category and insert current roster
+      // 3. Sync teams: remove previous teams for this category and insert current roster (verified & pending)
       await supabase.from("teams").delete().eq("category_id", catRow.id);
 
-      if (cat.teams && cat.teams.length > 0) {
+      const allCategoryTeams = [
+        ...(cat.teams || []).map((tm) => ({
+          ...tm,
+          paid: tm.paid ?? true,
+          paymentStatus: tm.paymentStatus || "Verified",
+        })),
+        ...(cat.pendingTeams || []).map((tm) => ({
+          ...tm,
+          paid: false,
+          paymentStatus: "Pending" as const,
+        })),
+      ];
+
+      if (allCategoryTeams.length > 0) {
         const isUuid = (id?: string) =>
           id ? /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) : false;
 
-        const teamsToInsert = cat.teams.map((tm) => ({
+        const teamsToInsert = allCategoryTeams.map((tm) => ({
           ...(isUuid(tm.id) ? { id: tm.id } : {}),
           tournament_id: tournamentId,
           category_id: catRow.id,
@@ -570,7 +746,7 @@ export async function dbRegisterProfile(profile: {
   try {
     const { error } = await supabase.from("profiles").upsert(
       {
-        id: crypto.randomUUID(),
+        id: generateUUID(),
         email: profile.email.toLowerCase().trim(),
         name: profile.name.trim(),
         role: profile.role,
@@ -599,3 +775,307 @@ export async function dbGetProfiles(): Promise<any[]> {
     return [];
   }
 }
+
+/**
+ * Save drawn bracket groups directly to Supabase.
+ */
+export async function dbSaveDrawnGroups(
+  tournamentSlug: string,
+  categoryId: string,
+  groups: any[]
+): Promise<boolean> {
+  try {
+    _drawnGroupsCache.set(`${tournamentSlug}_${categoryId}`, groups);
+
+    const { data: tourney } = await supabase
+      .from("tournaments")
+      .select("id, rules")
+      .eq("slug", tournamentSlug)
+      .maybeSingle();
+
+    if (!tourney) return false;
+
+    // Lookup category row to sync under both UUID and category_slug
+    let catSlug = categoryId;
+    let catUuid = categoryId;
+    if (tourney.id) {
+      const { data: catRow } = await supabase
+        .from("categories")
+        .select("id, category_slug")
+        .eq("tournament_id", tourney.id)
+        .or(`id.eq.${categoryId},category_slug.eq.${categoryId}`)
+        .maybeSingle();
+
+      if (catRow) {
+        catUuid = catRow.id;
+        catSlug = catRow.category_slug;
+      }
+    }
+
+    _drawnGroupsCache.set(`${tournamentSlug}_${catSlug}`, groups);
+    _drawnGroupsCache.set(`${tournamentSlug}_${catUuid}`, groups);
+
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new Event("dv_drawn_groups_updated"));
+    }
+
+    const existing =
+      tourney.rules && typeof tourney.rules === "object" && !Array.isArray(tourney.rules)
+        ? (tourney.rules as any)
+        : { rules: Array.isArray(tourney.rules) ? tourney.rules : [] };
+
+    const drawnGroups = {
+      ...(existing.drawnGroups || {}),
+      [categoryId]: groups,
+      [catSlug]: groups,
+      [catUuid]: groups,
+    };
+    const updatedMeta = { ...existing, drawnGroups };
+
+    const { error } = await supabase
+      .from("tournaments")
+      .update({ rules: updatedMeta, updated_at: new Date().toISOString() })
+      .eq("slug", tournamentSlug);
+
+    return !error;
+  } catch (err) {
+    console.warn("[Supabase] Failed to save drawn groups:", err);
+    return false;
+  }
+}
+
+/**
+ * Delete drawn bracket groups for a category from Supabase.
+ */
+export async function dbDeleteDrawnGroups(
+  tournamentSlug: string,
+  categoryId: string
+): Promise<boolean> {
+  try {
+    _drawnGroupsCache.delete(`${tournamentSlug}_${categoryId}`);
+
+    const { data: tourney } = await supabase
+      .from("tournaments")
+      .select("id, rules")
+      .eq("slug", tournamentSlug)
+      .maybeSingle();
+
+    if (!tourney) return false;
+
+    let catSlug = categoryId;
+    let catUuid = categoryId;
+    if (tourney.id) {
+      const { data: catRow } = await supabase
+        .from("categories")
+        .select("id, category_slug")
+        .eq("tournament_id", tourney.id)
+        .or(`id.eq.${categoryId},category_slug.eq.${categoryId}`)
+        .maybeSingle();
+
+      if (catRow) {
+        catUuid = catRow.id;
+        catSlug = catRow.category_slug;
+      }
+    }
+
+    _drawnGroupsCache.delete(`${tournamentSlug}_${catSlug}`);
+    _drawnGroupsCache.delete(`${tournamentSlug}_${catUuid}`);
+
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new Event("dv_drawn_groups_updated"));
+    }
+
+    if (tourney.rules && typeof tourney.rules === "object" && !Array.isArray(tourney.rules)) {
+      const existing = tourney.rules as any;
+      const drawnGroups = { ...(existing.drawnGroups || {}) };
+      delete drawnGroups[categoryId];
+      delete drawnGroups[catSlug];
+      delete drawnGroups[catUuid];
+      const updatedMeta = { ...existing, drawnGroups };
+
+      const { error } = await supabase
+        .from("tournaments")
+        .update({ rules: updatedMeta, updated_at: new Date().toISOString() })
+        .eq("slug", tournamentSlug);
+
+      return !error;
+    }
+    return true;
+  } catch (err) {
+    console.warn("[Supabase] Failed to delete drawn groups:", err);
+    return false;
+  }
+}
+
+/**
+ * Save playoff main draw knockout matches directly to Supabase.
+ */
+export async function dbSaveMainDraw(
+  tournamentSlug: string,
+  categoryId: string,
+  matches: any[]
+): Promise<boolean> {
+  try {
+    _mainDrawCache.set(`${tournamentSlug}_${categoryId}`, matches);
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new Event("dv_main_draw_updated"));
+    }
+
+    const { data: tourney } = await supabase
+      .from("tournaments")
+      .select("id, rules")
+      .eq("slug", tournamentSlug)
+      .maybeSingle();
+
+    if (!tourney) return false;
+
+    const existing =
+      tourney.rules && typeof tourney.rules === "object" && !Array.isArray(tourney.rules)
+        ? (tourney.rules as any)
+        : { rules: Array.isArray(tourney.rules) ? tourney.rules : [] };
+
+    const mainDraw = { ...(existing.mainDraw || {}), [categoryId]: matches };
+    const updatedMeta = { ...existing, mainDraw };
+
+    const { error } = await supabase
+      .from("tournaments")
+      .update({ rules: updatedMeta, updated_at: new Date().toISOString() })
+      .eq("slug", tournamentSlug);
+
+    return !error;
+  } catch (err) {
+    console.warn("[Supabase] Failed to save main draw:", err);
+    return false;
+  }
+}
+
+/**
+ * Delete playoff main draw for a category from Supabase.
+ */
+export async function dbDeleteMainDraw(
+  tournamentSlug: string,
+  categoryId: string
+): Promise<boolean> {
+  try {
+    _mainDrawCache.delete(`${tournamentSlug}_${categoryId}`);
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new Event("dv_main_draw_updated"));
+    }
+
+    const { data: tourney } = await supabase
+      .from("tournaments")
+      .select("id, rules")
+      .eq("slug", tournamentSlug)
+      .maybeSingle();
+
+    if (!tourney) return false;
+
+    if (tourney.rules && typeof tourney.rules === "object" && !Array.isArray(tourney.rules)) {
+      const existing = tourney.rules as any;
+      const mainDraw = { ...(existing.mainDraw || {}) };
+      delete mainDraw[categoryId];
+      const updatedMeta = { ...existing, mainDraw };
+
+      const { error } = await supabase
+        .from("tournaments")
+        .update({ rules: updatedMeta, updated_at: new Date().toISOString() })
+        .eq("slug", tournamentSlug);
+
+      return !error;
+    }
+    return true;
+  } catch (err) {
+    console.warn("[Supabase] Failed to delete main draw:", err);
+    return false;
+  }
+}
+
+/**
+ * Save dispatch queue directly to Supabase.
+ */
+export async function dbSaveDispatchQueue(
+  queue: any[],
+  tournamentSlug?: string
+): Promise<boolean> {
+  try {
+    _dispatchQueueCache = queue;
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new Event("dv_dispatch_queue_updated"));
+    }
+
+    const slug = tournamentSlug || "dink-valley-tournament";
+    const { data: tourney } = await supabase
+      .from("tournaments")
+      .select("id, rules")
+      .eq("slug", slug)
+      .maybeSingle();
+
+    if (!tourney) return false;
+
+    const existing =
+      tourney.rules && typeof tourney.rules === "object" && !Array.isArray(tourney.rules)
+        ? (tourney.rules as any)
+        : { rules: Array.isArray(tourney.rules) ? tourney.rules : [] };
+
+    const updatedMeta = { ...existing, dispatchQueue: queue };
+
+    const { error } = await supabase
+      .from("tournaments")
+      .update({ rules: updatedMeta, updated_at: new Date().toISOString() })
+      .eq("slug", slug);
+
+    return !error;
+  } catch (err) {
+    console.warn("[Supabase] Failed to save dispatch queue:", err);
+    return false;
+  }
+}
+
+/**
+ * Delete dispatch queue items from Supabase.
+ */
+export async function dbDeleteDispatchQueue(
+  tournamentSlug?: string,
+  categoryId?: string
+): Promise<boolean> {
+  try {
+    if (categoryId) {
+      _dispatchQueueCache = _dispatchQueueCache.filter((item) => item.categoryId !== categoryId);
+    } else {
+      _dispatchQueueCache = [];
+    }
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new Event("dv_dispatch_queue_updated"));
+    }
+
+    const slug = tournamentSlug || "dink-valley-tournament";
+    const { data: tourney } = await supabase
+      .from("tournaments")
+      .select("id, rules")
+      .eq("slug", slug)
+      .maybeSingle();
+
+    if (!tourney) return false;
+
+    if (tourney.rules && typeof tourney.rules === "object" && !Array.isArray(tourney.rules)) {
+      const existing = tourney.rules as any;
+      const currentQueue = Array.isArray(existing.dispatchQueue) ? existing.dispatchQueue : [];
+      const filteredQueue = categoryId
+        ? currentQueue.filter((item: any) => item.categoryId !== categoryId)
+        : [];
+      const updatedMeta = { ...existing, dispatchQueue: filteredQueue };
+
+      const { error } = await supabase
+        .from("tournaments")
+        .update({ rules: updatedMeta, updated_at: new Date().toISOString() })
+        .eq("slug", slug);
+
+      return !error;
+    }
+    return true;
+  } catch (err) {
+    console.warn("[Supabase] Failed to delete dispatch queue:", err);
+    return false;
+  }
+}
+

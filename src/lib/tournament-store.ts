@@ -6,6 +6,7 @@ import {
   dbDeleteTournament,
   dbDeleteTeam,
   dbDeleteAllTeamsInCategory,
+  dbDeleteDrawnGroups,
   dbSubscribeToLive,
 } from "@/lib/supabase-service";
 import {
@@ -205,6 +206,93 @@ export function addTeamToCategory(tournamentSlug: string, categoryId: string, te
 }
 
 /**
+ * Add a pending team registration awaiting admin verification.
+ */
+export function addPendingRegistration(tournamentSlug: string, categoryId: string, team: Team): Tournament | undefined {
+  const current = getTournaments();
+  const tournament = current.find((t) => t.slug === tournamentSlug);
+  if (!tournament) return undefined;
+
+  const categories = tournament.categories.map((c) => {
+    if (c.id === categoryId) {
+      const pendingTeams = [
+        ...(c.pendingTeams || []).filter((t) => t.id !== team.id),
+        { ...team, paid: false, paymentStatus: "Pending" as const },
+      ];
+      return { ...c, pendingTeams };
+    }
+    return c;
+  });
+
+  return updateTournament(tournamentSlug, { categories });
+}
+
+/**
+ * Approve a pending registration, moving it to verified category teams.
+ */
+export function approvePendingRegistration(tournamentSlug: string, categoryId: string, teamId: string): Tournament | undefined {
+  const current = getTournaments();
+  const tournament = current.find((t) => t.slug === tournamentSlug);
+  if (!tournament) return undefined;
+
+  const categories = tournament.categories.map((c) => {
+    if (c.id === categoryId) {
+      const pending = c.pendingTeams || [];
+      const target = pending.find((t) => t.id === teamId);
+      const remainingPending = pending.filter((t) => t.id !== teamId);
+
+      if (target) {
+        const verifiedTeam: Team = {
+          ...target,
+          paid: true,
+          paymentStatus: "Verified",
+        };
+        const teams = [...c.teams.filter((t) => t.id !== teamId), verifiedTeam];
+        return { ...c, teams, pendingTeams: remainingPending };
+      }
+
+      // If team was already in teams as unpaid, mark it verified
+      const existingInTeams = c.teams.find((t) => t.id === teamId);
+      if (existingInTeams) {
+        const teams = c.teams.map((t) =>
+          t.id === teamId ? { ...t, paid: true, paymentStatus: "Verified" as const } : t
+        );
+        return { ...c, teams, pendingTeams: remainingPending };
+      }
+
+      return { ...c, pendingTeams: remainingPending };
+    }
+    return c;
+  });
+
+  return updateTournament(tournamentSlug, { categories });
+}
+
+/**
+ * Reject / decline a pending registration.
+ */
+export function rejectPendingRegistration(tournamentSlug: string, categoryId: string, teamId: string): Tournament | undefined {
+  const current = getTournaments();
+  const tournament = current.find((t) => t.slug === tournamentSlug);
+  if (!tournament) return undefined;
+
+  const categories = tournament.categories.map((c) => {
+    if (c.id === categoryId) {
+      const pendingTeams = (c.pendingTeams || []).filter((t) => t.id !== teamId);
+      return { ...c, pendingTeams };
+    }
+    return c;
+  });
+
+  // Delete from Supabase in background
+  dbDeleteTeam(teamId).catch((err) => {
+    console.warn("[Supabase] Failed to delete rejected team:", err);
+  });
+
+  return updateTournament(tournamentSlug, { categories });
+}
+
+/**
  * Remove a team from a specific category within a tournament.
  */
 export function removeTeamFromCategory(tournamentSlug: string, categoryId: string, teamId: string): Tournament | undefined {
@@ -216,12 +304,13 @@ export function removeTeamFromCategory(tournamentSlug: string, categoryId: strin
 
   const categories = tournament.categories.map((c) => {
     if (c.id === categoryId) {
-      const targetTeam = c.teams.find((t) => t.id === teamId);
+      const targetTeam = c.teams.find((t) => t.id === teamId) || (c.pendingTeams || []).find((t) => t.id === teamId);
       if (targetTeam) {
         removedTeamName = targetTeam.name;
       }
       const teams = c.teams.filter((t) => t.id !== teamId);
-      return { ...c, teams };
+      const pendingTeams = (c.pendingTeams || []).filter((t) => t.id !== teamId);
+      return { ...c, teams, pendingTeams };
     }
     return c;
   });
@@ -305,7 +394,8 @@ export function deleteAllTeamsInCategory(
   purgeQueueForCategory(tournamentSlug, categoryId);
   purgeMatchesForCategory(tournamentSlug, categoryId);
 
-  // Delete from Supabase in background
+  // Delete drawn groups and teams from Supabase
+  dbDeleteDrawnGroups(tournamentSlug, categoryId).catch(() => {});
   dbDeleteAllTeamsInCategory(tournamentSlug, categoryId).catch((err) => {
     console.warn("[Supabase] Failed to delete category teams:", err);
   });
@@ -326,61 +416,13 @@ export function useTournamentStore() {
   useEffect(() => {
     refresh();
 
-    const mergeWithLocal = (cloudTournaments: Tournament[]) => {
-      const local = getTournaments();
-      if (!cloudTournaments || cloudTournaments.length === 0) return local;
-      if (!local || local.length === 0) return cloudTournaments;
-
-      return cloudTournaments.map((cloudT) => {
-        const localT = local.find((l) => l.slug === cloudT.slug);
-        if (!localT) return cloudT;
-
-        const categories = cloudT.categories.map((cloudC) => {
-          const localC = localT.categories.find((lc) => lc.id === cloudC.id);
-          if (!localC) return cloudC;
-
-          // If database returned teams array, database is the source of truth
-          const teams = Array.isArray(cloudC.teams) ? cloudC.teams : localC.teams || [];
-
-          // If teams were deleted from database, auto purge corresponding matches
-          if (localC.teams && localC.teams.length > teams.length) {
-            if (teams.length === 0) {
-              purgeQueueForCategory(cloudT.slug, cloudC.id);
-              purgeMatchesForCategory(cloudT.slug, cloudC.id);
-            } else {
-              const currentNames = new Set(teams.map((t) => t.name.trim().toLowerCase()));
-              const removedTeams = localC.teams.filter(
-                (lt) => !currentNames.has(lt.name.trim().toLowerCase())
-              );
-              for (const rt of removedTeams) {
-                purgeQueueForTeam(cloudT.slug, cloudC.id, rt.name);
-                purgeMatchesForTeam(cloudT.slug, cloudC.id, rt.name);
-              }
-            }
-          }
-
-          return {
-            ...cloudC,
-            teams,
-          };
-        });
-
-        return {
-          ...cloudT,
-          categories,
-          teamsCount: categories.reduce((sum, c) => sum + (c.teams?.length || 0), 0),
-        };
-      });
-    };
-
-    // Fetch from Supabase and hydrate local store
+    // Fetch directly from Supabase as single source of truth
     let mounted = true;
     dbGetTournaments()
       .then((cloudTournaments) => {
-        if (mounted && cloudTournaments.length > 0) {
-          const merged = mergeWithLocal(cloudTournaments);
-          saveTournaments(merged);
-          setTournaments(merged);
+        if (mounted && cloudTournaments) {
+          saveTournaments(cloudTournaments);
+          setTournaments(cloudTournaments);
         }
       })
       .catch((err) => {
@@ -394,10 +436,9 @@ export function useTournamentStore() {
         () => {
           dbGetTournaments()
             .then((cloudTournaments) => {
-              if (mounted && cloudTournaments.length > 0) {
-                const merged = mergeWithLocal(cloudTournaments);
-                saveTournaments(merged);
-                setTournaments(merged);
+              if (mounted && cloudTournaments) {
+                saveTournaments(cloudTournaments);
+                setTournaments(cloudTournaments);
               }
             })
             .catch(() => {});

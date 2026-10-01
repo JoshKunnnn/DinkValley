@@ -1,4 +1,4 @@
-import { Link } from "@tanstack/react-router";
+import { Link, useRouterState } from "@tanstack/react-router";
 import { useState, useEffect, useRef } from "react";
 import { getAuthenticatedStaff, logoutStaff, type StaffRole } from "@/lib/auth-store";
 import { StaffPortalModal } from "./admin/StaffPortalModal";
@@ -165,8 +165,17 @@ export function SiteHeader() {
 }
 
 export function SiteFooter() {
+  const pathname = useRouterState({
+    select: (s) => s.location.pathname,
+  });
+  const isConsole = pathname.startsWith("/admin") || pathname.startsWith("/umpire");
+
   return (
-    <footer className="mt-20 border-t border-border bg-charcoal py-8">
+    <footer
+      className={`border-border bg-charcoal py-8 ${
+        isConsole ? "mt-0 border-t-0" : "mt-20 border-t"
+      }`}
+    >
       <div className="mx-auto flex max-w-6xl flex-col sm:flex-row sm:items-center sm:justify-between gap-4 px-5 text-sm text-sand/70">
         <div>
           <span className="font-display text-xl text-sand block">Dink Valley Pickleball Club</span>

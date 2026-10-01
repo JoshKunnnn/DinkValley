@@ -18,6 +18,7 @@ import {
   claimCourtStation,
   releaseCourtStation,
   vacateCourt,
+  completeQueueMatch,
   dispatchMatchToCourt,
   hydrateCourtStationsFromCloud,
   playDeskChime,
@@ -1328,6 +1329,8 @@ function UmpireConsole({
         officiatedBy: m.officiatedBy ?? currentUmpire,
       };
     });
+    // Complete match in dispatch queue
+    completeQueueMatch(match.id);
     // Vacate court station in database
     if (match.court && match.court !== "Queue") {
       vacateCourt(match.court as FacilityCourt);

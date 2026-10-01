@@ -6,7 +6,13 @@ import {
 import {
   dbUpdateCourtStation,
   dbGetCourtStations,
+  dbSaveDispatchQueue,
+  dbDeleteDispatchQueue,
+  getCachedDispatchQueue,
 } from "./supabase-service";
+import { isMatchInSameBracket } from "./bracket-utils";
+
+export { isMatchInSameBracket };
 
 /* ─────────────────────────────────────────────
    Facility 4 Courts Definition
@@ -114,7 +120,7 @@ export function getInitialCourtStations(): Record<FacilityCourt, CourtStation> {
 
 export function getCourtStations(): Record<FacilityCourt, CourtStation> {
   try {
-    const raw = localStorage.getItem(STATIONS_KEY);
+    const raw = typeof localStorage !== "undefined" ? localStorage.getItem(STATIONS_KEY) : null;
     if (!raw) return getInitialCourtStations();
     const parsed = JSON.parse(raw) as Record<FacilityCourt, CourtStation>;
 
@@ -135,6 +141,7 @@ export function saveCourtStations(stations: Record<FacilityCourt, CourtStation>,
   try {
     localStorage.setItem(STATIONS_KEY, JSON.stringify(stations));
     window.dispatchEvent(new Event("storage"));
+    window.dispatchEvent(new Event("dv_court_stations_updated"));
   } catch {
     // ignore
   }
@@ -155,23 +162,145 @@ export function saveCourtStations(stations: Record<FacilityCourt, CourtStation>,
   }
 }
 
+/**
+ * Reconciles Court Stations with the Matches store:
+ * 1. If a station is marked 'live' or 'warmup', verifies that currentMatchId exists and is an active, non-final match.
+ *    If missing or already final, clears the station back to 'available'.
+ * 2. If a non-final match has court = 'Court X', verifies that Court X station is actually assigned to it.
+ *    If Court X station is available or occupied by another match, moves the match's court back to 'Queue'.
+ */
+export function reconcileCourtStations(
+  stationsInput?: Record<FacilityCourt, CourtStation>,
+  matchesInput?: LiveMatch[],
+): {
+  stations: Record<FacilityCourt, CourtStation>;
+  matches: LiveMatch[];
+  modified: boolean;
+} {
+  const stations = { ...(stationsInput ?? getCourtStations()) };
+  const matches = [...(matchesInput ?? getMatches())];
+  let modified = false;
+
+  for (const c of FACILITY_COURTS) {
+    const st = stations[c];
+    if (!st) continue;
+
+    if (st.status === "live" || st.status === "warmup") {
+      let activeMatch = st.currentMatchId ? matches.find((m) => m.id === st.currentMatchId) : null;
+      if (!activeMatch || activeMatch.status === "final") {
+        // Fallback: see if there is another match explicitly assigned to this court
+        const fallback = matches.find((m) => m.court === c && (m.status === "live" || m.status === "scheduled"));
+        if (fallback) {
+          stations[c] = {
+            ...st,
+            currentMatchId: fallback.id,
+            status: fallback.status === "live" ? "live" : "warmup",
+            dispatchedAt: fallback.startedAt ?? st.dispatchedAt ?? Date.now(),
+          };
+          modified = true;
+        } else {
+          // No active match exists for this court station: reset to available
+          stations[c] = {
+            ...st,
+            status: "available",
+            currentMatchId: null,
+            dispatchedAt: null,
+          };
+          modified = true;
+        }
+      }
+    } else if (st.status === "available" && st.currentMatchId) {
+      stations[c] = {
+        ...st,
+        currentMatchId: null,
+        dispatchedAt: null,
+      };
+      modified = true;
+    }
+  }
+
+  // Reconcile matches against court stations
+  for (let i = 0; i < matches.length; i++) {
+    const m = matches[i];
+    if (!m || m.status === "final") continue;
+
+    if (m.court && FACILITY_COURTS.includes(m.court as FacilityCourt)) {
+      const st = stations[m.court as FacilityCourt];
+      const isStationAssigned = st && st.currentMatchId === m.id && st.status !== "available";
+      if (!isStationAssigned) {
+        // Match claims to be on a facility court, but the court station is not playing it: move to Queue
+        matches[i] = {
+          ...m,
+          court: "Queue",
+          status: "scheduled",
+          startedAt: undefined,
+        };
+        modified = true;
+      }
+    }
+  }
+
+  if (modified && typeof window !== "undefined") {
+    try {
+      localStorage.setItem(STATIONS_KEY, JSON.stringify(stations));
+      localStorage.setItem("dv_matches", JSON.stringify(matches));
+      window.dispatchEvent(new Event("dv_court_stations_updated"));
+      window.dispatchEvent(new Event("dv_matches_updated"));
+      window.dispatchEvent(new Event("dv_live_matches_updated"));
+    } catch {
+      // ignore
+    }
+  }
+
+  return { stations, matches, modified };
+}
+
 /* ─────────────────────────────────────────────
    Dispatch Queue Operations
 ───────────────────────────────────────────── */
 
 export function getDispatchQueue(): QueueItem[] {
-  try {
-    const raw = localStorage.getItem(QUEUE_KEY);
-    if (!raw) return [];
-    return JSON.parse(raw) as QueueItem[];
-  } catch {
-    return [];
+  let items: QueueItem[] = [];
+  const cached = getCachedDispatchQueue();
+  if (cached && Array.isArray(cached) && cached.length > 0) {
+    items = cached as QueueItem[];
+  } else {
+    try {
+      const raw = typeof localStorage !== "undefined" ? localStorage.getItem(QUEUE_KEY) : null;
+      if (raw) {
+        const parsed = JSON.parse(raw) as QueueItem[];
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          items = parsed;
+        }
+      }
+    } catch {
+      // ignore
+    }
   }
+
+  // Filter out any matches that pair players across different brackets in pool play
+  const valid = items.filter((q) =>
+    isMatchInSameBracket(q.tournamentSlug, q.categoryId, q.stage, q.teamAName, q.teamBName)
+  );
+
+  if (valid.length !== items.length) {
+    saveDispatchQueue(valid);
+  }
+
+  return valid;
 }
 
 export function saveDispatchQueue(queue: QueueItem[]): void {
+  // Ensure only matches with teams in the same bracket are persisted
+  const sanitized = queue.filter((q) =>
+    isMatchInSameBracket(q.tournamentSlug, q.categoryId, q.stage, q.teamAName, q.teamBName)
+  );
+
+  dbSaveDispatchQueue(sanitized).catch((err) => {
+    console.warn("[Supabase] Failed to persist dispatch queue to cloud:", err);
+  });
   try {
-    localStorage.setItem(QUEUE_KEY, JSON.stringify(queue));
+    localStorage.setItem(QUEUE_KEY, JSON.stringify(sanitized));
     window.dispatchEvent(new Event("storage"));
     window.dispatchEvent(new Event("dv_dispatch_queue_updated"));
   } catch {
@@ -262,6 +391,8 @@ export function dispatchMatchToCourt(
   match: {
     id: string;
     tournamentSlug?: string | undefined;
+    categoryId?: string | undefined;
+    stage?: string | undefined;
     teamAName: string;
     teamAPlayers?: string[] | undefined;
     teamBName: string;
@@ -270,6 +401,21 @@ export function dispatchMatchToCourt(
   umpire?: string | undefined,
   startImmediately = false,
 ): void {
+  // Validate that pool play matches only pair teams within the exact same bracket
+  if (match.stage && !isMatchInSameBracket(match.tournamentSlug || "", match.categoryId || "", match.stage, match.teamAName, match.teamBName)) {
+    console.warn(`[Dispatch Rejected] ${match.teamAName} vs ${match.teamBName} are not in the same bracket for stage: ${match.stage}`);
+    return;
+  }
+
+  // Validate that neither team nor player is already live or on-deck on another court
+  const conflictA = checkSimultaneousPlayConflict(match.teamAName, match.teamAPlayers, match.tournamentSlug);
+  const conflictB = checkSimultaneousPlayConflict(match.teamBName, match.teamBPlayers, match.tournamentSlug);
+  const conflict = conflictA || conflictB;
+  if (conflict && conflict.court !== court) {
+    console.warn(`[Dispatch Rejected] ${conflict.teamName} is already ${conflict.status} on ${conflict.court}`);
+    return;
+  }
+
   const matches = getMatches();
   const now = Date.now();
 
@@ -335,7 +481,7 @@ export function dispatchMatchToCourt(
   };
   saveCourtStations(stations);
 
-  // Remove or update from dispatch queue
+  // Update status of this match in dispatch queue
   const queue = getDispatchQueue();
   const updatedQueue = queue.map((q) => {
     if (q.matchId === match.id) {
@@ -347,6 +493,7 @@ export function dispatchMatchToCourt(
     }
     return q;
   });
+
   saveDispatchQueue(updatedQueue);
 
   // Emit Desk Announcement
@@ -364,11 +511,15 @@ export function dispatchMatchToCourt(
 
 /**
  * Auto-dispatches the #1 priority match from the queue to the given court.
+ * Skips any match where a team is currently playing on an active facility court.
  */
-export function autoDispatchNext(court: FacilityCourt, umpire?: string): QueueItem | null {
+export function autoDispatchNext(court: FacilityCourt, tournamentSlug?: string, umpire?: string): QueueItem | null {
   const queue = getDispatchQueue();
   const pending = queue
     .filter((q) => q.status === "queued" || q.status === "on_deck")
+    .filter((q) => !tournamentSlug || !q.tournamentSlug || q.tournamentSlug === tournamentSlug)
+    .filter((q) => !checkSimultaneousPlayConflict(q.teamAName, q.teamAPlayers, q.tournamentSlug || tournamentSlug) && !checkSimultaneousPlayConflict(q.teamBName, q.teamBPlayers, q.tournamentSlug || tournamentSlug))
+    .filter((q) => isMatchInSameBracket(q.tournamentSlug || tournamentSlug || "", q.categoryId || "", q.stage, q.teamAName, q.teamBName))
     .sort((a, b) => a.priority - b.priority);
 
   if (pending.length === 0) return null;
@@ -376,6 +527,9 @@ export function autoDispatchNext(court: FacilityCourt, umpire?: string): QueueIt
   const nextMatch = pending[0]!;
   dispatchMatchToCourt(court, {
     id: nextMatch.matchId,
+    tournamentSlug: nextMatch.tournamentSlug,
+    categoryId: nextMatch.categoryId,
+    stage: nextMatch.stage,
     teamAName: nextMatch.teamAName,
     teamAPlayers: nextMatch.teamAPlayers,
     teamBName: nextMatch.teamBName,
@@ -400,9 +554,12 @@ export function setCourtLive(court: FacilityCourt, matchId?: string): void {
 
 /**
  * Vacates a court, resetting it to available.
+ * Any non-final match currently assigned to this court is unassigned back to "Queue",
+ * and its dispatch queue status is returned to "queued".
  */
 export function vacateCourt(court: FacilityCourt): void {
   const stations = getCourtStations();
+  const currentMatchId = stations[court]?.currentMatchId;
   stations[court] = {
     ...stations[court],
     status: "available",
@@ -411,6 +568,55 @@ export function vacateCourt(court: FacilityCourt): void {
     maintenanceNote: null,
   };
   saveCourtStations(stations);
+
+  // Unassign any active or scheduled match on this court in matches store
+  const allMatches = getMatches();
+  let matchesModified = false;
+  const updatedMatches = allMatches.map((m) => {
+    if ((m.court === court || (currentMatchId && m.id === currentMatchId)) && m.status !== "final") {
+      matchesModified = true;
+      return {
+        ...m,
+        court: "Queue",
+        status: "scheduled" as const,
+        startedAt: undefined,
+      };
+    }
+    return m;
+  });
+  if (matchesModified) {
+    saveMatches(updatedMatches);
+  }
+
+  // Clear coin toss flag if present
+  if (typeof localStorage !== "undefined" && currentMatchId) {
+    try {
+      localStorage.removeItem(`dv_toss_done_${currentMatchId}`);
+    } catch {
+      // ignore
+    }
+  }
+
+  // Update dispatch queue: return dispatched/live match on this court back to queued
+  const queue = getDispatchQueue();
+  let queueModified = false;
+  const updatedQueue = queue.map((q) => {
+    if (
+      (q.assignedCourt === court || (currentMatchId && q.matchId === currentMatchId)) &&
+      (q.status === "dispatched" || q.status === "live")
+    ) {
+      queueModified = true;
+      return {
+        ...q,
+        assignedCourt: null,
+        status: "queued" as const,
+      };
+    }
+    return q;
+  });
+  if (queueModified) {
+    saveDispatchQueue(updatedQueue);
+  }
 }
 
 /**
@@ -438,9 +644,21 @@ export function setCourtOnDeck(court: FacilityCourt, matchId: string | null): vo
   };
   saveCourtStations(stations);
 
-  if (matchId) {
-    const queue = getDispatchQueue();
-    const updated = queue.map((q) => (q.matchId === matchId ? { ...q, status: "on_deck" as const, assignedCourt: court } : q));
+  const queue = getDispatchQueue();
+  let modified = false;
+  const updated = queue.map((q) => {
+    if (matchId && q.matchId === matchId) {
+      modified = true;
+      return { ...q, status: "on_deck" as const, assignedCourt: court };
+    }
+    // Any other match previously on_deck for this court reverts back to queued
+    if (q.assignedCourt === court && q.status === "on_deck") {
+      modified = true;
+      return { ...q, status: "queued" as const, assignedCourt: null };
+    }
+    return q;
+  });
+  if (modified) {
     saveDispatchQueue(updated);
   }
 }
@@ -496,31 +714,89 @@ export async function hydrateCourtStationsFromCloud(): Promise<Record<FacilityCo
 
 /**
  * Reorders an item in the queue.
+ * If scopedMatchIds is provided (e.g. from a filtered view), moves the match
+ * relative to its adjacent neighbors within that visible list.
  */
-export function reorderQueue(matchId: string, direction: "up" | "down" | "top"): void {
+export function reorderQueue(
+  matchId: string,
+  direction: "up" | "down" | "top",
+  scopedMatchIds?: string[],
+): void {
   const queue = getDispatchQueue();
-  const idx = queue.findIndex((q) => q.matchId === matchId);
-  if (idx === -1) return;
+  const currentItemIndex = queue.findIndex((q) => q.matchId === matchId);
+  if (currentItemIndex === -1) return;
 
-  const item = queue[idx]!;
   const newQueue = [...queue];
 
-  if (direction === "top") {
-    newQueue.splice(idx, 1);
-    newQueue.unshift(item);
-  } else if (direction === "up" && idx > 0) {
-    const prev = newQueue[idx - 1]!;
-    newQueue[idx - 1] = item;
-    newQueue[idx] = prev;
-  } else if (direction === "down" && idx < newQueue.length - 1) {
-    const next = newQueue[idx + 1]!;
-    newQueue[idx + 1] = item;
-    newQueue[idx] = next;
+  if (scopedMatchIds && scopedMatchIds.length > 0) {
+    const idxInScope = scopedMatchIds.indexOf(matchId);
+    if (idxInScope === -1) return;
+
+    if (direction === "top") {
+      const targetMatchId = scopedMatchIds[0]!;
+      const targetIdxInQueue = newQueue.findIndex((q) => q.matchId === targetMatchId);
+      if (targetIdxInQueue !== -1 && targetIdxInQueue !== currentItemIndex) {
+        const [removed] = newQueue.splice(currentItemIndex, 1);
+        newQueue.splice(targetIdxInQueue, 0, removed!);
+      }
+    } else if (direction === "up" && idxInScope > 0) {
+      const targetMatchId = scopedMatchIds[idxInScope - 1]!;
+      const targetIdxInQueue = newQueue.findIndex((q) => q.matchId === targetMatchId);
+      if (targetIdxInQueue !== -1) {
+        const temp = newQueue[currentItemIndex]!;
+        newQueue[currentItemIndex] = newQueue[targetIdxInQueue]!;
+        newQueue[targetIdxInQueue] = temp;
+      }
+    } else if (direction === "down" && idxInScope < scopedMatchIds.length - 1) {
+      const targetMatchId = scopedMatchIds[idxInScope + 1]!;
+      const targetIdxInQueue = newQueue.findIndex((q) => q.matchId === targetMatchId);
+      if (targetIdxInQueue !== -1) {
+        const temp = newQueue[currentItemIndex]!;
+        newQueue[currentItemIndex] = newQueue[targetIdxInQueue]!;
+        newQueue[targetIdxInQueue] = temp;
+      }
+    }
+  } else {
+    const item = newQueue[currentItemIndex]!;
+    if (direction === "top") {
+      newQueue.splice(currentItemIndex, 1);
+      newQueue.unshift(item);
+    } else if (direction === "up" && currentItemIndex > 0) {
+      const prev = newQueue[currentItemIndex - 1]!;
+      newQueue[currentItemIndex - 1] = item;
+      newQueue[currentItemIndex] = prev;
+    } else if (direction === "down" && currentItemIndex < newQueue.length - 1) {
+      const next = newQueue[currentItemIndex + 1]!;
+      newQueue[currentItemIndex + 1] = item;
+      newQueue[currentItemIndex] = next;
+    }
   }
 
   // Renumber priority
   const renumbered = newQueue.map((q, i) => ({ ...q, priority: i + 1 }));
   saveDispatchQueue(renumbered);
+}
+
+/**
+ * Marks a match in the dispatch queue as completed when finished.
+ */
+export function completeQueueMatch(matchId: string): void {
+  const queue = getDispatchQueue();
+  let modified = false;
+  const updated = queue.map((q) => {
+    if (q.matchId === matchId) {
+      modified = true;
+      return {
+        ...q,
+        status: "completed" as const,
+        assignedCourt: null,
+      };
+    }
+    return q;
+  });
+  if (modified) {
+    saveDispatchQueue(updated);
+  }
 }
 
 /**
@@ -539,6 +815,7 @@ export function removeQueueItem(matchId: string): void {
  * Also clears any court stations that were assigned to matches from this category.
  */
 export function purgeQueueForCategory(tournamentSlug: string, categoryId: string): void {
+  dbDeleteDispatchQueue(tournamentSlug, categoryId).catch(() => {});
   const queue = getDispatchQueue();
   const filtered = queue
     .filter((q) => {
@@ -654,6 +931,10 @@ export function addMatchesToQueue(
   const newItems: QueueItem[] = [];
   for (const it of items) {
     if (existingIds.has(it.matchId)) continue;
+    // Strictly ensure only matches within the same bracket are added to the queue
+    if (!isMatchInSameBracket(it.tournamentSlug, it.categoryId, it.stage, it.teamAName, it.teamBName)) {
+      continue;
+    }
     newItems.push({
       id: `q-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       matchId: it.matchId,
@@ -721,30 +1002,236 @@ export type LiveConflict = {
   teamName: string;
   court: string;
   matchId: string;
+  isPlayerConflict?: boolean;
+  playerName?: string;
+  status: "live" | "warmup" | "on_deck";
 };
 
-export function checkSimultaneousPlayConflict(teamName: string): LiveConflict | null {
+export type ActivePlayEngagement = {
+  court: string;
+  state: "live" | "warmup" | "on_deck";
+  matchId: string;
+  teamAName: string;
+  teamAPlayers: string[];
+  teamBName: string;
+  teamBPlayers: string[];
+};
+
+export function getAllActiveParticipants(tournamentSlug?: string): ActivePlayEngagement[] {
+  const stations = getCourtStations();
   const matches = getMatches();
-  const clean = teamName.trim().toLowerCase();
+  const queue = getDispatchQueue();
+  const results: ActivePlayEngagement[] = [];
+  const processedCourtMatchIds = new Set<string>();
 
-  const live = matches.find((m) => {
-    if (m.status !== "live" && m.status !== "scheduled") return false;
-    // Only actual operating facility courts constitute a physical simultaneous play conflict (not "Queue")
-    if (!m.court || !FACILITY_COURTS.includes(m.court as FacilityCourt)) return false;
-    const a = m.teamAName.trim().toLowerCase();
-    const b = m.teamBName.trim().toLowerCase();
-    return a === clean || b === clean;
-  });
+  // Helper to extract teams and players from any known source given a matchId
+  const resolveMatchDetails = (
+    matchId: string,
+    courtFallback?: string,
+  ): { teamAName: string; teamAPlayers: string[]; teamBName: string; teamBPlayers: string[] } | null => {
+    // 1. Check in matches store
+    const inMatches = matches.find((m) => m.id === matchId && m.status !== "final");
+    if (inMatches && inMatches.teamAName && inMatches.teamBName) {
+      return {
+        teamAName: inMatches.teamAName,
+        teamAPlayers: inMatches.teamAPlayers ?? [],
+        teamBName: inMatches.teamBName,
+        teamBPlayers: inMatches.teamBPlayers ?? [],
+      };
+    }
 
-  if (live) {
-    return {
-      teamName,
-      court: live.court,
-      matchId: live.id,
-    };
+    // 2. Check in dispatch queue
+    const inQueue = queue.find((q) => q.matchId === matchId);
+    if (inQueue && inQueue.teamAName && inQueue.teamBName) {
+      return {
+        teamAName: inQueue.teamAName,
+        teamAPlayers: inQueue.teamAPlayers ?? [],
+        teamBName: inQueue.teamBName,
+        teamBPlayers: inQueue.teamBPlayers ?? [],
+      };
+    }
+
+    // 3. Fallback: match by court in matches store
+    if (courtFallback) {
+      const byCourt = matches.find((m) => m.court === courtFallback && m.status !== "final");
+      if (byCourt && byCourt.teamAName && byCourt.teamBName) {
+        return {
+          teamAName: byCourt.teamAName,
+          teamAPlayers: byCourt.teamAPlayers ?? [],
+          teamBName: byCourt.teamBName,
+          teamBPlayers: byCourt.teamBPlayers ?? [],
+        };
+      }
+    }
+
+    // 4. Check drawn groups in localStorage
+    if (typeof localStorage !== "undefined") {
+      try {
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i);
+          if (key && key.startsWith("dv_drawn_groups_")) {
+            const raw = localStorage.getItem(key);
+            if (!raw) continue;
+            const groups = JSON.parse(raw);
+            if (!Array.isArray(groups)) continue;
+            for (const g of groups) {
+              const teams = (g.slots || []).map((s: any) => s.team).filter(Boolean);
+              for (let t1 = 0; t1 < teams.length; t1++) {
+                for (let t2 = t1 + 1; t2 < teams.length; t2++) {
+                  const subId = `${g.letter}-${t1 + 1}v${t2 + 1}`;
+                  if (matchId.includes(subId)) {
+                    return {
+                      teamAName: teams[t1].name,
+                      teamAPlayers: teams[t1].players ?? [],
+                      teamBName: teams[t2].name,
+                      teamBPlayers: teams[t2].players ?? [],
+                    };
+                  }
+                }
+              }
+            }
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    return null;
+  };
+
+  // 1. Facility Court Stations (Live & Warmup)
+  for (const c of FACILITY_COURTS) {
+    const st = stations[c];
+    if (!st) continue;
+
+    if ((st.status === "live" || st.status === "warmup") && st.currentMatchId) {
+      const details = resolveMatchDetails(st.currentMatchId, c);
+      if (details) {
+        results.push({
+          court: c,
+          state: st.status === "warmup" ? "warmup" : "live",
+          matchId: st.currentMatchId,
+          ...details,
+        });
+        processedCourtMatchIds.add(st.currentMatchId);
+      }
+    }
+
+    // On-Deck on Court Station
+    if (st.onDeckMatchId) {
+      const details = resolveMatchDetails(st.onDeckMatchId);
+      if (details) {
+        results.push({
+          court: c,
+          state: "on_deck",
+          matchId: st.onDeckMatchId,
+          ...details,
+        });
+        processedCourtMatchIds.add(st.onDeckMatchId);
+      }
+    }
+  }
+
+  // 2. Queue Items marked as on_deck
+  for (const q of queue) {
+    if (q.status === "on_deck" && !processedCourtMatchIds.has(q.matchId)) {
+      results.push({
+        court: q.assignedCourt || "On-Deck",
+        state: "on_deck",
+        matchId: q.matchId,
+        teamAName: q.teamAName,
+        teamAPlayers: q.teamAPlayers ?? [],
+        teamBName: q.teamBName,
+        teamBPlayers: q.teamBPlayers ?? [],
+      });
+      processedCourtMatchIds.add(q.matchId);
+    }
+  }
+
+  // 3. Any active matches in matches store with facility courts not yet captured
+  for (const m of matches) {
+    if (
+      m.status === "live" &&
+      m.court &&
+      FACILITY_COURTS.includes(m.court as FacilityCourt) &&
+      !processedCourtMatchIds.has(m.id)
+    ) {
+      const courtStation = stations[m.court as FacilityCourt];
+      if (courtStation && courtStation.status !== "available" && courtStation.currentMatchId === m.id) {
+        results.push({
+          court: m.court,
+          state: "live",
+          matchId: m.id,
+          teamAName: m.teamAName,
+          teamAPlayers: m.teamAPlayers ?? [],
+          teamBName: m.teamBName,
+          teamBPlayers: m.teamBPlayers ?? [],
+        });
+        processedCourtMatchIds.add(m.id);
+      }
+    }
+  }
+
+  return results;
+}
+
+export function checkSimultaneousPlayConflict(
+  teamName: string,
+  players?: string[],
+  tournamentSlug?: string,
+): LiveConflict | null {
+  const participants = getAllActiveParticipants(tournamentSlug);
+  const cleanTeam = teamName.trim().toLowerCase();
+  const cleanPlayers = (players ?? []).map((p) => p.trim().toLowerCase()).filter(Boolean);
+
+  for (const part of participants) {
+    const partA = part.teamAName.trim().toLowerCase();
+    const partB = part.teamBName.trim().toLowerCase();
+
+    // 1. Direct Team Name Match (either Pair A or Pair B in active match)
+    if (cleanTeam && (cleanTeam === partA || cleanTeam === partB)) {
+      return {
+        teamName,
+        court: part.court,
+        matchId: part.matchId,
+        status: part.state,
+      };
+    }
+
+    // 2. Individual Player Match in either Pair A or Pair B
+    const partPlayers = [
+      ...part.teamAPlayers.map((p) => p.trim().toLowerCase()),
+      ...part.teamBPlayers.map((p) => p.trim().toLowerCase()),
+    ].filter(Boolean);
+
+    for (const player of cleanPlayers) {
+      if (partPlayers.includes(player)) {
+        return {
+          teamName,
+          playerName: player,
+          isPlayerConflict: true,
+          court: part.court,
+          matchId: part.matchId,
+          status: part.state,
+        };
+      }
+    }
   }
 
   return null;
+}
+
+/**
+ * Removes any queued matches from the dispatch queue where either team
+ * is currently playing on an active facility court (Court 1, 2, 3, or 4).
+ * These matches are deferred back to unassigned status and can be queued
+ * as soon as the team concludes their match on court.
+ */
+export function removePlayingConflictsFromQueue(tournamentSlug?: string): QueueItem[] {
+  // Retain queued matches even if players are currently active on court.
+  // The UI displays live conflict badges, and autoDispatchNext skips matches until players finish.
+  return getDispatchQueue();
 }
 
 /* ─────────────────────────────────────────────
@@ -871,7 +1358,8 @@ export function isConfirmedDispatchedMatch(
     m.status === "live" &&
     m.court &&
     m.court !== "Queue" &&
-    (FACILITY_COURTS as readonly string[]).includes(m.court as FacilityCourt)
+    (FACILITY_COURTS as readonly string[]).includes(m.court as FacilityCourt) &&
+    currentStations[m.court as FacilityCourt]?.currentMatchId === m.id
   ) {
     return true;
   }

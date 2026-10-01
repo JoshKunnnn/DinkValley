@@ -1,7 +1,15 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useTournamentStore } from "@/lib/tournament-store";
+import { dbGetTournaments } from "@/lib/supabase-service";
 
-export const Route = createFileRoute("/")(  {
+export const Route = createFileRoute("/")({
+  loader: async () => {
+    try {
+      return await dbGetTournaments();
+    } catch {
+      return [];
+    }
+  },
   head: () => ({
     meta: [
       { title: "Dink Valley Tournaments | Brackets, Schedules & Results" },
@@ -27,7 +35,9 @@ const statusStyles: Record<string, string> = {
 };
 
 function Index() {
+  const loaderTournaments = Route.useLoaderData();
   const { tournaments } = useTournamentStore();
+  const displayTournaments = tournaments.length > 0 ? tournaments : loaderTournaments;
 
   return (
     <div>
@@ -72,11 +82,11 @@ function Index() {
         <div className="flex items-end justify-between border-b-2 border-charcoal pb-3">
           <h2 className="text-3xl sm:text-4xl">Tournaments</h2>
           <span className="text-sm uppercase tracking-widest text-muted-foreground">
-            {tournaments.length} {tournaments.length === 1 ? "event" : "events"}
+            {displayTournaments.length} {displayTournaments.length === 1 ? "event" : "events"}
           </span>
         </div>
 
-        {tournaments.length === 0 ? (
+        {displayTournaments.length === 0 ? (
           <div className="surface-card my-8 p-10 sm:p-14 text-center border border-border">
             <span className="text-xs uppercase tracking-[0.28em] text-pickle font-bold">
               Upcoming Events
@@ -90,7 +100,7 @@ function Index() {
         ) : (
           /* Responsive grid: 1 col mobile → 2 col sm → 3 col lg */
           <div className="mt-6 grid gap-4 sm:mt-8 sm:gap-5 md:grid-cols-2 lg:grid-cols-3">
-            {tournaments.map((t) => (
+            {displayTournaments.map((t) => (
               <Link
                 key={t.slug}
                 to="/tournaments/$slug"

@@ -22,10 +22,22 @@ import {
 } from "@/lib/court-dispatch";
 import { getDrawnGroups, type BracketGroup } from "@/components/admin/BracketDraw";
 import { getMainDrawMatches, type KnockoutMatch } from "@/components/admin/DrawsManager";
+import { dbGetTournaments, dbGetDrawnGroups, getCachedDrawnGroups } from "@/lib/supabase-service";
+import { MiniCourtVisualizer } from "@/components/public/MiniCourtVisualizer";
+import { FindMatchesModal } from "@/components/public/FindMatchesModal";
+import { PublicRegistrationModal } from "@/components/public/PublicRegistrationModal";
 
 export const Route = createFileRoute("/tournaments/$slug")({
-  loader: ({ params }) => {
-    const tournament = getTournament(params.slug);
+  loader: async ({ params }) => {
+    let cloudList: Tournament[] = [];
+    try {
+      cloudList = await dbGetTournaments();
+    } catch {
+      // ignore
+    }
+    const tournament =
+      cloudList.find((x) => x.slug === params.slug) ??
+      getTournament(params.slug);
     if (!tournament) throw notFound();
     return tournament;
   },
@@ -65,7 +77,16 @@ function TournamentPage() {
   const [activeId, setActiveId] = useState(() => t.categories?.[0]?.id ?? "");
   const { matches } = useMatchStore();
 
-  const category = t.categories?.find((c) => c.id === activeId) ?? t.categories?.[0];
+  // Keep active category synced if t.categories loads or changes
+  useEffect(() => {
+    if (t.categories && t.categories.length > 0) {
+      if (!activeId || !t.categories.some((c) => c.id === activeId)) {
+        setActiveId(t.categories[0]!.id);
+      }
+    }
+  }, [t.categories, activeId]);
+
+  const rawCategory = t.categories?.find((c) => c.id === activeId) ?? t.categories?.[0];
 
   // Check how many confirmed/dispatched matches exist across the tournament
   const confirmedMatches = useMemo(() => matches.filter((m) => isConfirmedDispatchedMatch(m)), [matches]);
@@ -73,11 +94,28 @@ function TournamentPage() {
   const finalMatches = useMemo(() => confirmedMatches.filter((m) => m.status === "final"), [confirmedMatches]);
   const scheduledMatches = useMemo(() => confirmedMatches.filter((m) => m.status === "scheduled"), [confirmedMatches]);
 
-  // Default to live tab if there are active live matches, otherwise bracket
   const [tab, setTab] = useState<TabKey>("bracket");
   const [drawRevision, setDrawRevision] = useState(0);
+  const [isRegModalOpen, setIsRegModalOpen] = useState(false);
+  const [findMatchesTeam, setFindMatchesTeam] = useState<Team | null>(null);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [activeBracketFilter, setActiveBracketFilter] = useState<string>("all");
+
+  const showToast = (msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => {
+      setToastMessage((c) => (c === msg ? null : c));
+    }, 2800);
+  };
 
   useEffect(() => {
+    let mounted = true;
+    dbGetTournaments()
+      .then(() => {
+        if (mounted) setDrawRevision((v) => v + 1);
+      })
+      .catch(() => {});
+
     const handleDrawChange = () => {
       setDrawRevision((v) => v + 1);
     };
@@ -88,6 +126,7 @@ function TournamentPage() {
     window.addEventListener("storage", handleDrawChange);
 
     return () => {
+      mounted = false;
       window.removeEventListener("dv_drawn_groups_updated", handleDrawChange);
       window.removeEventListener("dv_main_draw_updated", handleDrawChange);
       window.removeEventListener("dv_live_matches_updated", handleDrawChange);
@@ -95,17 +134,112 @@ function TournamentPage() {
     };
   }, []);
 
+  // Fetch drawn groups for current category directly from Supabase on mount / category change
+  useEffect(() => {
+    if (!rawCategory) return;
+    let mounted = true;
+    dbGetDrawnGroups(t.slug, rawCategory.id)
+      .then((grps) => {
+        if (mounted && grps && grps.length > 0) {
+          setDrawRevision((v) => v + 1);
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      mounted = false;
+    };
+  }, [t.slug, rawCategory?.id]);
+
+  // Listen to deep-link URL search parameters on mount
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const teamParam = params.get("team");
+    const bracketParam = params.get("bracket");
+    const tabParam = params.get("tab") as TabKey | null;
+    const regParam = params.get("register");
+
+    if (teamParam) {
+      for (const cat of t.categories) {
+        const found = cat.teams?.find(
+          (tm) =>
+            tm.name.toLowerCase() === teamParam.toLowerCase() ||
+            tm.players.some((p) => p.toLowerCase().includes(teamParam.toLowerCase())),
+        );
+        if (found) {
+          setActiveId(cat.id);
+          setFindMatchesTeam(found);
+          break;
+        }
+      }
+    }
+
+    if (bracketParam) {
+      setTab("pools");
+      setActiveBracketFilter(bracketParam.toUpperCase());
+    } else if (tabParam && ["live", "bracket", "pools", "teams"].includes(tabParam)) {
+      setTab(tabParam);
+    }
+
+    if (regParam === "true") {
+      setIsRegModalOpen(true);
+    }
+  }, [t]);
+
   // Check if drawn brackets exist from Bracket Draw (MAIN)
   const drawnGroups = useMemo(() => {
-    if (!category) return null;
-    return getDrawnGroups(t.slug, category.id);
-  }, [t.slug, category, drawRevision]);
+    if (!rawCategory) return null;
+    return getDrawnGroups(t.slug, rawCategory.id);
+  }, [t.slug, rawCategory, drawRevision]);
+
+  // Derive effective category with teams populated from drawn groups if empty
+  const category: Category | undefined = useMemo(() => {
+    if (!rawCategory) return undefined;
+    if (rawCategory.teams && rawCategory.teams.length > 0) return rawCategory;
+    if (drawnGroups && drawnGroups.length > 0) {
+      const extracted: Team[] = [];
+      const seen = new Set<string>();
+      drawnGroups.forEach((g) => {
+        g.slots.forEach((s) => {
+          if (s.team && !seen.has(s.team.name)) {
+            seen.add(s.team.name);
+            extracted.push(s.team);
+          }
+        });
+      });
+      if (extracted.length > 0) {
+        return {
+          ...rawCategory,
+          teams: extracted,
+        };
+      }
+    }
+    return rawCategory;
+  }, [rawCategory, drawnGroups]);
+
+  // Intelligent default tab: if drawn groups exist with teams and no live matches, default to "pools"
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("tab") || params.get("bracket") || params.get("team")) return;
+
+    if (liveMatches.length > 0) {
+      setTab("live");
+    } else if (
+      drawnGroups &&
+      drawnGroups.some((g) => g.isDrawn || g.slots.some((s) => s.team !== null))
+    ) {
+      setTab("pools");
+    }
+  }, [drawnGroups, liveMatches.length]);
 
   // Check if Point Differential seeded Main Draw exists from DrawsManager
   const mainDrawMatches = useMemo(() => {
     if (!category) return [];
     return getMainDrawMatches(t.slug, category.id);
   }, [t.slug, category, drawRevision]);
+
 
   if (!category) {
     return (
@@ -168,7 +302,8 @@ function TournamentPage() {
         onViewLiveCourts={() => setTab("live")}
       />
 
-      {/* ── Category picker + tabs ── */}
+
+      {/* ── Category picker + capacity bar + tabs ── */}
       <section className="mx-auto max-w-6xl px-4 py-8 sm:px-5 sm:py-10">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div>
@@ -205,35 +340,110 @@ function TournamentPage() {
           ))}
         </div>
 
-        {/* View tabs — horizontal scroll on mobile */}
-        <div className="mt-8 flex gap-0 overflow-x-auto border-b-2 border-charcoal">
-          {(
-            [
-              { key: "live", label: "Live Courts", badge: liveMatches.length },
-              { key: "bracket", label: "Playoff Bracket" },
-              { key: "pools", label: drawnGroups ? "Drawn Brackets & Pools" : "Pool Play" },
-              { key: "teams", label: "Teams" },
-            ] as const
-          ).map((item) => {
-            const isActive = tab === item.key;
-            return (
-              <button
-                key={item.key}
-                onClick={() => setTab(item.key)}
-                className={`flex-shrink-0 px-3 py-2 font-display text-sm uppercase tracking-wide sm:px-5 sm:text-lg transition-colors flex items-center gap-2 ${
-                  isActive ? "bg-charcoal text-sand" : "text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                <span>{item.label}</span>
-                {item.key === "live" && item.badge > 0 && (
-                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[0.6rem] font-bold bg-pickle text-sand rounded">
-                    <span className="h-1.5 w-1.5 rounded-full bg-sand animate-pulse" />
-                    {item.badge}
-                  </span>
-                )}
-              </button>
-            );
-          })}
+        {/* ── Category Capacity Bar & Public Register Action ── */}
+        {(() => {
+          const currentCount = category.teams?.length ?? 0;
+          const maxCapacity = 32;
+          const percentFilled = Math.min(100, Math.round((currentCount / maxCapacity) * 100));
+          const slotsRemaining = Math.max(0, maxCapacity - currentCount);
+
+          return (
+            <div className="mt-4 surface-card p-4 sm:p-5 border border-border">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[0.65rem] font-bold uppercase tracking-[0.24em] text-pickle">
+                      Category Roster Capacity &middot; {category.label}
+                    </span>
+                    <span className="px-1.5 py-0.2 text-[0.6rem] font-mono bg-charcoal border border-border text-sand rounded">
+                      {category.level}
+                    </span>
+                  </div>
+                  <div className="flex items-baseline gap-2 flex-wrap">
+                    <span className="font-display text-2xl text-foreground font-bold">
+                      {currentCount} of {maxCapacity} Confirmed Teams
+                    </span>
+                    <span className="text-xs font-mono text-muted-foreground">
+                      ({percentFilled}% filled)
+                    </span>
+                    {category.pendingTeams && category.pendingTeams.length > 0 && (
+                      <span className="text-xs font-mono text-brick font-semibold">
+                        &middot; {category.pendingTeams.length} pending verification
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    onClick={() => setIsRegModalOpen(true)}
+                    className="px-4 py-2 bg-pickle text-sand text-xs font-bold uppercase tracking-widest hover:opacity-90 transition-opacity rounded cursor-pointer flex items-center gap-1.5"
+                  >
+                    <span>Register Team</span>
+                    <span>+</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Progress track */}
+              <div className="mt-3">
+                <div className="h-2 w-full bg-charcoal rounded-full overflow-hidden border border-border/60">
+                  <div
+                    className="h-full bg-pickle transition-all duration-500 rounded-full"
+                    style={{ width: `${percentFilled}%` }}
+                  />
+                </div>
+                <div className="mt-1.5 flex justify-between text-[0.65rem] font-mono text-muted-foreground">
+                  <span>{slotsRemaining} slots remaining</span>
+                  <span>Max {maxCapacity} teams</span>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* ── Sticky Mobile Navigation Bar ── */}
+        <div className="sticky top-0 z-30 bg-background/95 backdrop-blur-md border-b-2 border-charcoal pt-3 pb-0 -mx-4 px-4 sm:-mx-5 sm:px-5 shadow-sm mt-6">
+          <div className="flex items-center justify-between gap-2 overflow-x-auto no-scrollbar">
+            <div className="flex gap-0 overflow-x-auto shrink-0">
+              {(
+                [
+                  { key: "live", label: "Live Courts", badge: liveMatches.length },
+                  { key: "bracket", label: "Playoff Bracket" },
+                  { key: "pools", label: drawnGroups ? "Drawn Brackets & Pools" : "Pool Play" },
+                  { key: "teams", label: "Teams" },
+                ] as const
+              ).map((item) => {
+                const isActive = tab === item.key;
+                return (
+                  <button
+                    key={item.key}
+                    onClick={() => setTab(item.key)}
+                    className={`flex-shrink-0 px-3 py-2 font-display text-sm uppercase tracking-wide sm:px-5 sm:text-lg transition-colors flex items-center gap-2 ${
+                      isActive ? "bg-charcoal text-sand" : "text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    <span>{item.label}</span>
+                    {item.key === "live" && item.badge > 0 && (
+                      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[0.6rem] font-bold bg-pickle text-sand rounded">
+                        <span className="h-1.5 w-1.5 rounded-full bg-sand animate-pulse" />
+                        {item.badge}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Quick Find My Matches button in sticky header */}
+            <button
+              onClick={() => setTab("teams")}
+              className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono font-bold uppercase tracking-wider bg-charcoal border border-border text-pickle hover:border-pickle transition-colors shrink-0 rounded cursor-pointer"
+            >
+              <span>Find My Matches</span>
+              <span>&rarr;</span>
+            </button>
+          </div>
         </div>
 
         {/* Tab Contents */}
@@ -249,6 +459,8 @@ function TournamentPage() {
               category={category}
               matches={matches}
               mainDrawMatches={mainDrawMatches}
+              drawnGroups={drawnGroups}
+              onSwitchToPools={() => setTab("pools")}
             />
           )}
           {tab === "pools" && (
@@ -256,9 +468,27 @@ function TournamentPage() {
               category={category}
               matches={matches}
               drawnGroups={drawnGroups}
+              initialBracketFilter={activeBracketFilter}
+              onShareBracket={(letter) => {
+                if (typeof window !== "undefined") {
+                  const url = new URL(window.location.href);
+                  url.searchParams.set("tab", "pools");
+                  url.searchParams.set("bracket", letter);
+                  navigator.clipboard.writeText(url.toString()).then(() => {
+                    showToast(`Bracket ${letter} link copied to clipboard`);
+                  });
+                }
+              }}
             />
           )}
-          {tab === "teams" && <Teams category={category} />}
+          {tab === "teams" && (
+            <Teams
+              category={category}
+              drawnGroups={drawnGroups}
+              onFindMatches={(tm) => setFindMatchesTeam(tm)}
+              onRegisterClick={() => setIsRegModalOpen(true)}
+            />
+          )}
         </div>
       </section>
 
@@ -292,6 +522,38 @@ function TournamentPage() {
           </ul>
         </div>
       </section>
+
+      {/* ── Modals & Notifications ── */}
+      <FindMatchesModal
+        isOpen={Boolean(findMatchesTeam)}
+        onClose={() => setFindMatchesTeam(null)}
+        team={findMatchesTeam}
+        category={category}
+        matches={matches}
+        drawnGroups={drawnGroups}
+        onViewLiveCourts={(courtName) => {
+          setTab("live");
+        }}
+        onToast={showToast}
+      />
+
+      <PublicRegistrationModal
+        isOpen={isRegModalOpen}
+        onClose={() => setIsRegModalOpen(false)}
+        tournament={t}
+        initialCategory={category}
+        onRegistered={(newTeam) => {
+          showToast(`Team ${newTeam.name} submitted for admin verification!`);
+        }}
+      />
+
+      {/* Floating Toast Notification */}
+      {toastMessage && (
+        <div className="fixed bottom-6 right-6 z-50 px-4 py-2.5 bg-charcoal border-2 border-pickle text-sand text-xs font-mono tracking-wider shadow-2xl rounded flex items-center gap-2.5 animate-in fade-in slide-in-from-bottom-2">
+          <span className="h-2 w-2 rounded-full bg-pickle animate-ping" />
+          <span>{toastMessage}</span>
+        </div>
+      )}
     </div>
   );
 }
@@ -333,7 +595,7 @@ function LiveActionTicker({
   }
 
   return (
-    <section className="border-b-2 border-pickle bg-charcoal text-sand py-4 shadow-md">
+    <section className="border-b border-border bg-charcoal text-sand py-4 shadow-md">
       <div className="mx-auto max-w-6xl px-4 sm:px-5">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-3">
           <div className="flex items-center gap-2.5">
@@ -454,6 +716,28 @@ function LiveCourtsTab({
     );
   }, [scheduledMatches]);
 
+  const onDeckUpcoming = useMemo(() => {
+    const list: { id: string; teamAName: string; teamBName: string; court: string }[] = [];
+    FACILITY_COURTS.forEach((courtName) => {
+      const st = stations[courtName];
+      if (st?.onDeckMatchId) {
+        const m = matches.find((x) => x.id === st.onDeckMatchId);
+        if (m && !list.some((existing) => existing.id === m.id)) {
+          list.push({ id: m.id, teamAName: m.teamAName, teamBName: m.teamBName, court: courtName });
+        }
+      }
+    });
+    queue
+      .filter((q) => q.status === "on_deck" || q.status === "queued")
+      .slice(0, 3)
+      .forEach((q) => {
+        if (!list.some((existing) => existing.id === q.id)) {
+          list.push({ id: q.id, teamAName: q.teamAName, teamBName: q.teamBName, court: q.assignedCourt ?? "Queue" });
+        }
+      });
+    return list;
+  }, [stations, queue, matches]);
+
   return (
     <div className="space-y-8">
       {/* Overview & Filter Bar */}
@@ -496,6 +780,32 @@ function LiveCourtsTab({
           ))}
         </div>
       </div>
+
+      {/* ── On-Deck / Standby Calling Alert Banner ── */}
+      {onDeckUpcoming.length > 0 && (
+        <div className="p-3.5 sm:p-4 bg-charcoal border-l-4 border-pickle border-y border-r border-border rounded flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 text-sand shadow-sm">
+          <div className="flex items-start sm:items-center gap-3">
+            <span className="relative flex h-3 w-3 mt-1 sm:mt-0 shrink-0">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-pickle opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-3 w-3 bg-pickle"></span>
+            </span>
+            <div>
+              <div className="text-[0.65rem] uppercase tracking-[0.24em] font-bold text-pickle font-mono">
+                Standby Calling &middot; On-Deck Dispatch Notification
+              </div>
+              <div className="text-xs sm:text-sm font-semibold text-sand mt-0.5">
+                {onDeckUpcoming.map((q) => `${q.teamAName} vs ${q.teamBName} (${q.court})`).join("  |  ")}
+              </div>
+              <div className="text-[0.65rem] text-sand/70 font-mono mt-0.5">
+                Teams on standby: please proceed to the facility court corridor. Warm-up starts promptly upon match completion.
+              </div>
+            </div>
+          </div>
+          <span className="px-2.5 py-1 text-[0.65rem] font-mono font-bold uppercase tracking-widest bg-card border border-border text-pickle rounded shrink-0 self-start sm:self-auto">
+            Report To Desk
+          </span>
+        </div>
+      )}
 
       {/* ── 4 Dedicated Facility Courts Live Board ── */}
       <div className="space-y-3">
@@ -575,10 +885,18 @@ function LiveCourtsTab({
                       </div>
 
                       {liveMatch && (
-                        <div className="text-[0.65rem] font-mono text-pickle pt-1">
-                          Call: {activeMatch.score.servingTeam === "A" ? activeMatch.score.teamAScore : activeMatch.score.teamBScore}-
-                          {activeMatch.score.servingTeam === "A" ? activeMatch.score.teamBScore : activeMatch.score.teamAScore}-
-                          {activeMatch.score.serverNumber}
+                        <div className="mt-2.5 space-y-2">
+                          <div className="text-[0.65rem] font-mono text-pickle">
+                            Call: {activeMatch.score.servingTeam === "A" ? activeMatch.score.teamAScore : activeMatch.score.teamBScore}-
+                            {activeMatch.score.servingTeam === "A" ? activeMatch.score.teamBScore : activeMatch.score.teamAScore}-
+                            {activeMatch.score.serverNumber}
+                          </div>
+                          <MiniCourtVisualizer
+                            score={liveMatch.score}
+                            teamAName={liveMatch.teamAName}
+                            teamBName={liveMatch.teamBName}
+                            compact={true}
+                          />
                         </div>
                       )}
                     </div>
@@ -948,6 +1266,17 @@ function LiveCourtCard({ match }: { match: LiveMatch }) {
           </div>
         )}
 
+        {/* 2D Court Visualizer */}
+        {isLive && (
+          <div className="mt-3">
+            <MiniCourtVisualizer
+              score={s}
+              teamAName={match.teamAName}
+              teamBName={match.teamBName}
+            />
+          </div>
+        )}
+
         {/* Final Winner Banner */}
         {isFinal && match.winnerTeam && (
           <div className="mt-4 pt-3 border-t border-border/60 text-center bg-pickle/10 p-2 rounded">
@@ -1159,10 +1488,14 @@ function Bracket({
   category,
   matches,
   mainDrawMatches,
+  drawnGroups,
+  onSwitchToPools,
 }: {
   category: Category;
   matches: LiveMatch[];
   mainDrawMatches: KnockoutMatch[] | null;
+  drawnGroups?: BracketGroup[] | null;
+  onSwitchToPools?: () => void;
 }) {
   // If official point differential seeded Main Draw has been generated in admin
   if (mainDrawMatches && mainDrawMatches.length > 0) {
@@ -1301,6 +1634,28 @@ function Bracket({
         </div>
       </div>
 
+      {drawnGroups &&
+        drawnGroups.some((g) => g.isDrawn || g.slots.some((s) => s.team !== null)) &&
+        onSwitchToPools && (
+          <div className="surface-card p-4 sm:p-5 border border-pickle/40 bg-pickle/10 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div>
+              <span className="text-xs font-mono font-bold uppercase tracking-widest text-pickle flex items-center gap-1.5">
+                <span className="h-2 w-2 rounded-full bg-pickle animate-pulse" />
+                Tournament in Pool Play Stage
+              </span>
+              <p className="text-xs text-sand/80 mt-1">
+                Group matches and standings are currently active. Top teams from each pool will advance to this playoff bracket.
+              </p>
+            </div>
+            <button
+              onClick={onSwitchToPools}
+              className="px-4 py-2 bg-pickle text-sand text-xs font-bold uppercase tracking-wider hover:opacity-90 transition-opacity rounded shrink-0 cursor-pointer"
+            >
+              View Drawn Groups & Pool Play &rarr;
+            </button>
+          </div>
+        )}
+
       <div className="space-y-6 md:space-y-0 md:grid md:grid-cols-[1fr_auto_1fr] md:items-center md:gap-6">
         <div className="space-y-4 sm:space-y-6">
           {semis.map((m, i) => (
@@ -1346,10 +1701,12 @@ function BracketCard({
   grp,
   matches,
   defaultOpen = false,
+  onShareBracket,
 }: {
   grp: BracketGroup;
   matches: LiveMatch[];
   defaultOpen?: boolean;
+  onShareBracket?: ((letter: string) => void) | undefined;
 }) {
   const [open, setOpen] = useState(defaultOpen);
   const teams = grp.slots.map((s) => s.team).filter((t): t is Team => t !== null);
@@ -1456,10 +1813,32 @@ function BracketCard({
           )}
         </div>
 
-        <div className={`shrink-0 transition-transform duration-200 ${open ? "rotate-180" : ""}`}>
-          <svg className="w-5 h-5 text-muted-foreground" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
-          </svg>
+        <div className="flex items-center gap-2 shrink-0">
+          {onShareBracket && (
+            <span
+              role="button"
+              tabIndex={0}
+              onClick={(e) => {
+                e.stopPropagation();
+                onShareBracket(grp.letter);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.stopPropagation();
+                  onShareBracket(grp.letter);
+                }
+              }}
+              className="px-2.5 py-1 text-[0.6rem] font-mono uppercase tracking-widest bg-charcoal border border-border hover:border-pickle text-sand rounded transition-colors cursor-pointer"
+              title="Share Bracket Link"
+            >
+              Share Link
+            </span>
+          )}
+          <div className={`shrink-0 transition-transform duration-200 ${open ? "rotate-180" : ""}`}>
+            <svg className="w-5 h-5 text-muted-foreground" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+            </svg>
+          </div>
         </div>
       </button>
 
@@ -1505,37 +1884,47 @@ function BracketCard({
                   </tr>
                 </thead>
                 <tbody>
-                  {standings.map((row, i) => (
-                    <tr
-                      key={row.name}
-                      className={`border-t border-border/60 transition-colors ${
-                        i === 0 && (row.w > 0 || row.pd > 0)
-                          ? "bg-pickle/5"
-                          : i % 2 === 0
-                            ? "bg-background"
-                            : "bg-card"
-                      }`}
-                    >
-                      <td className="px-3 py-2 font-semibold truncate max-w-[120px]">
-                        {i === 0 && row.w > 0 && (
-                          <span className="inline-block mr-1.5 h-1.5 w-1.5 rounded-full bg-pickle align-middle" />
-                        )}
-                        {row.name}
-                      </td>
-                      <td className="px-2 py-2 text-center font-mono font-bold text-pickle">{row.w}</td>
-                      <td className="px-2 py-2 text-center font-mono text-muted-foreground">{row.l}</td>
-                      <td className={`px-2 py-2 text-center font-mono ${row.pd > 0 ? "text-pickle" : row.pd < 0 ? "text-brick" : "text-muted-foreground"}`}>
-                        {row.pd > 0 ? `+${row.pd}` : row.pd}
-                      </td>
-                    </tr>
-                  ))}
+                  {standings.map((row, i) => {
+                    const isQualified = i < 2;
+                    return (
+                      <tr
+                        key={row.name}
+                        className={`border-t border-border/60 transition-colors ${
+                          isQualified
+                            ? "border-l-4 border-l-pickle bg-pickle/5"
+                            : i % 2 === 0
+                              ? "bg-background"
+                              : "bg-card"
+                        }`}
+                      >
+                        <td className="px-3 py-2 font-semibold truncate max-w-[140px]">
+                          <div className="flex items-center gap-1.5 truncate">
+                            {isQualified && (
+                              <span
+                                className="px-1.5 py-0.2 bg-pickle text-sand text-[0.6rem] font-bold font-mono rounded shrink-0"
+                                title="Top 2 Playoff Qualification"
+                              >
+                                Q
+                              </span>
+                            )}
+                            <span className="font-mono text-muted-foreground text-[0.65rem] shrink-0 w-3">{i + 1}.</span>
+                            <span className="truncate">{row.name}</span>
+                          </div>
+                        </td>
+                        <td className="px-2 py-2 text-center font-mono font-bold text-pickle">{row.w}</td>
+                        <td className="px-2 py-2 text-center font-mono text-muted-foreground">{row.l}</td>
+                        <td className={`px-2 py-2 text-center font-mono ${row.pd > 0 ? "text-pickle" : row.pd < 0 ? "text-brick" : "text-muted-foreground"}`}>
+                          {row.pd > 0 ? `+${row.pd}` : row.pd}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
-              {completedCount === 0 && (
-                <p className="text-[0.6rem] text-muted-foreground mt-2 font-mono uppercase tracking-widest">
-                  Standings update as matches are finalized.
-                </p>
-              )}
+              <div className="mt-2 flex items-center justify-between text-[0.6rem] text-muted-foreground font-mono uppercase tracking-widest">
+                <span>Top 2 advance to playoff bracket</span>
+                <span>Standings live sync</span>
+              </div>
             </div>
           </div>
 
@@ -1583,16 +1972,20 @@ function BracketCard({
                         Match {matchIdx + 1} &middot; {live?.court === "Queue" ? "Queue (Courts 1–4)" : (live?.court ?? "Court TBD")}
                       </span>
                       {isLive && (
-                        <span className="inline-flex items-center gap-1 font-bold text-pickle">
+                        <span className="inline-flex items-center gap-1 font-bold text-pickle font-mono text-[0.6rem] bg-pickle/20 px-2 py-0.5 rounded border border-pickle/40">
                           <span className="h-1.5 w-1.5 rounded-full bg-pickle animate-ping" />
-                          Live
+                          LIVE
                         </span>
                       )}
                       {isFinal && (
-                        <span className="font-bold text-brick">Final</span>
+                        <span className="font-bold text-foreground font-mono text-[0.6rem] bg-muted/40 px-2 py-0.5 rounded border border-border">
+                          FINAL
+                        </span>
                       )}
                       {!isLive && !isFinal && (
-                        <span className="text-muted-foreground">Scheduled</span>
+                        <span className="text-muted-foreground font-mono text-[0.6rem] bg-muted/20 px-2 py-0.5 rounded border border-border/60">
+                          SCHEDULED
+                        </span>
                       )}
                     </div>
 
@@ -1633,15 +2026,36 @@ function Pools({
   category,
   matches,
   drawnGroups,
+  initialBracketFilter,
+  onShareBracket,
 }: {
   category: Category;
   matches: LiveMatch[];
   drawnGroups: BracketGroup[] | null;
+  initialBracketFilter?: string | null | undefined;
+  onShareBracket?: ((letter: string) => void) | undefined;
 }) {
   const [expandedAll, setExpandedAll] = useState(false);
+  const [selectedBracket, setSelectedBracket] = useState<string>(initialBracketFilter || "all");
+
+  useEffect(() => {
+    if (initialBracketFilter) {
+      setSelectedBracket(initialBracketFilter);
+    }
+  }, [initialBracketFilter]);
 
   // If drawn groups exist from Bracket Draw ceremony, display official drawn brackets
   if (drawnGroups && drawnGroups.length > 0) {
+    const validGroups = drawnGroups.filter(
+      (g) => g.isDrawn || g.slots.some((s) => s.team !== null)
+    );
+    const groupsToDisplay = validGroups.length > 0 ? validGroups : drawnGroups;
+
+    const displayedGroups =
+      selectedBracket === "all"
+        ? groupsToDisplay
+        : groupsToDisplay.filter((g) => g.letter === selectedBracket);
+
     return (
       <div className="space-y-6">
         {/* Section header */}
@@ -1660,25 +2074,70 @@ function Pools({
           </div>
           <div className="flex items-center gap-3 shrink-0">
             <span className="text-xs font-mono text-muted-foreground uppercase tracking-widest">
-              {drawnGroups.length} brackets
+              {groupsToDisplay.length} brackets
             </span>
             <button
               onClick={() => setExpandedAll((v) => !v)}
-              className="px-3 py-1.5 text-xs font-semibold border border-border bg-card hover:border-pickle hover:text-pickle transition-colors uppercase tracking-widest"
+              className="px-3 py-1.5 text-xs font-semibold border border-border bg-card hover:border-pickle hover:text-pickle transition-colors uppercase tracking-widest cursor-pointer"
             >
               {expandedAll ? "Collapse All" : "Expand All"}
             </button>
           </div>
         </div>
 
+        {/* Quick Bracket Jump Bar */}
+        <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar border-b border-border pb-3">
+          <span className="text-[0.65rem] font-bold uppercase tracking-widest text-muted-foreground mr-1 shrink-0 font-mono">
+            Jump:
+          </span>
+          <button
+            onClick={() => setSelectedBracket("all")}
+            className={`px-3 py-1.5 text-xs font-mono font-bold uppercase tracking-wider border rounded transition-colors shrink-0 cursor-pointer ${
+              selectedBracket === "all"
+                ? "border-pickle bg-pickle text-sand"
+                : "border-border bg-card text-foreground hover:border-pickle"
+            }`}
+          >
+            All Brackets ({groupsToDisplay.length})
+          </button>
+          {groupsToDisplay.map((grp) => {
+            const isSelected = selectedBracket === grp.letter;
+            const hasLiveMatch = grp.slots.some((s) => {
+              if (!s.team) return false;
+              return matches.some(
+                (m) =>
+                  m.status === "live" &&
+                  (m.teamAName === s.team!.name || m.teamBName === s.team!.name),
+              );
+            });
+            return (
+              <button
+                key={grp.letter}
+                onClick={() => setSelectedBracket(grp.letter)}
+                className={`px-3 py-1.5 text-xs font-mono font-bold uppercase tracking-wider border rounded transition-colors shrink-0 flex items-center gap-1.5 cursor-pointer ${
+                  isSelected
+                    ? "border-pickle bg-pickle text-sand"
+                    : "border-border bg-card text-foreground hover:border-pickle"
+                }`}
+              >
+                <span>Bracket {grp.letter}</span>
+                {hasLiveMatch && (
+                  <span className="h-1.5 w-1.5 rounded-full bg-pickle animate-ping" />
+                )}
+              </button>
+            );
+          })}
+        </div>
+
         {/* Bracket cards */}
         <div className="space-y-3">
-          {drawnGroups.map((grp, idx) => (
+          {displayedGroups.map((grp, idx) => (
             <BracketCard
               key={grp.letter}
               grp={grp}
               matches={matches}
-              defaultOpen={expandedAll || idx === 0}
+              defaultOpen={selectedBracket !== "all" || expandedAll || idx === 0}
+              onShareBracket={onShareBracket}
             />
           ))}
         </div>
@@ -1807,74 +2266,231 @@ function Pools({
    TAB 4: TEAMS & PAYMENT PROOF
 ═══════════════════════════════════════════════ */
 
-function Teams({ category }: { category: Category }) {
+function Teams({
+  category,
+  drawnGroups,
+  onFindMatches,
+  onRegisterClick,
+}: {
+  category: Category;
+  drawnGroups: BracketGroup[] | null;
+  onFindMatches: (team: Team) => void;
+  onRegisterClick?: () => void;
+}) {
+  const [searchQuery, setSearchQuery] = useState("");
+
+  const filteredTeams = useMemo(() => {
+    if (!category.teams) return [];
+    if (!searchQuery.trim()) return category.teams;
+    const q = searchQuery.toLowerCase().trim();
+    return category.teams.filter((t) => {
+      const nameMatch = t.name.toLowerCase().includes(q);
+      const playerMatch = t.players.some((p) => p.toLowerCase().includes(q));
+      const clubMatch = t.club?.toLowerCase().includes(q) ?? false;
+      return nameMatch || playerMatch || clubMatch;
+    });
+  }, [category.teams, searchQuery]);
+
+  // Helper to find bracket letter for a team
+  const getBracketLetter = (teamId: string, teamNameStr: string) => {
+    if (!drawnGroups) return null;
+    for (const grp of drawnGroups) {
+      if (
+        grp.slots.some(
+          (s) =>
+            s.team?.id === teamId ||
+            s.team?.name.toLowerCase() === teamNameStr.toLowerCase(),
+        )
+      ) {
+        return grp.letter;
+      }
+    }
+    return null;
+  };
+
   if (!category.teams || category.teams.length === 0) {
     return (
-      <div className="surface-card p-10 text-center border border-border space-y-3">
-        <span className="text-xs uppercase tracking-[0.28em] font-bold text-pickle block">
+      <div className="surface-card p-10 text-center border border-border space-y-4">
+        <span className="text-xs uppercase tracking-[0.28em] font-bold text-pickle block font-mono">
           Roster Standby
         </span>
         <h3 className="font-display text-2xl text-foreground">No Teams Registered Yet</h3>
         <p className="text-sm text-muted-foreground max-w-md mx-auto">
-          Teams and player rosters will appear here once registered. Organizers can add, auto-populate, or delete teams in the Admin Console.
+          Be the first team to enter this division. Public registration is open.
         </p>
-        <Link
-          to="/admin"
-          className="inline-block mt-2 px-4 py-2 bg-pickle text-sand text-xs font-bold uppercase tracking-widest hover:opacity-90 transition-opacity"
-        >
-          Open Organizer Console &rarr;
-        </Link>
+        {onRegisterClick && (
+          <button
+            onClick={onRegisterClick}
+            className="inline-block mt-2 px-5 py-2.5 bg-pickle text-sand text-xs font-bold uppercase tracking-widest hover:opacity-90 transition-opacity rounded cursor-pointer"
+          >
+            Register Team +
+          </button>
+        )}
       </div>
     );
   }
 
   return (
-    <div className="space-y-4">
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-b border-border pb-3">
-        <span className="text-xs uppercase tracking-widest text-muted-foreground font-bold">
-          {category.teams.length} Registered Teams
-        </span>
-        <Link
-          to="/admin"
-          className="text-xs text-pickle font-bold uppercase tracking-wider hover:underline"
-        >
-          Organizer Console: Manage &amp; Delete Players &rarr;
-        </Link>
+    <div className="space-y-6">
+      {/* Search & Action Bar */}
+      <div className="surface-card p-4 sm:p-5 border border-border space-y-3">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <div>
+            <span className="text-[0.65rem] font-bold uppercase tracking-[0.24em] text-pickle font-mono block">
+              Division Roster Directory
+            </span>
+            <h3 className="font-display text-xl sm:text-2xl text-foreground mt-0.5">
+              Player &amp; Team Search
+            </h3>
+          </div>
+
+          {onRegisterClick && (
+            <button
+              onClick={onRegisterClick}
+              className="px-4 py-2 bg-pickle text-sand text-xs font-bold uppercase tracking-widest hover:opacity-90 transition-opacity rounded cursor-pointer self-start sm:self-auto shrink-0 flex items-center gap-1.5"
+            >
+              <span>Register Team</span>
+              <span>+</span>
+            </button>
+          )}
+        </div>
+
+        {/* Search input with live filter */}
+        <div className="relative">
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search by player name, team, or club..."
+            className="w-full bg-charcoal border border-border px-3.5 py-2.5 text-xs text-sand rounded focus:border-pickle focus:outline-none placeholder:text-sand/50 font-mono"
+          />
+          {searchQuery && (
+            <button
+              onClick={() => setSearchQuery("")}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-sand/60 hover:text-sand text-xs font-mono px-1 cursor-pointer"
+              aria-label="Clear search"
+            >
+              &times;
+            </button>
+          )}
+        </div>
+
+        <div className="flex items-center justify-between text-[0.65rem] font-mono text-muted-foreground uppercase tracking-widest">
+          <span>
+            Showing {filteredTeams.length} of {category.teams.length} teams
+          </span>
+          {searchQuery && (
+            <span className="text-pickle font-bold">
+              Filter: "{searchQuery}"
+            </span>
+          )}
+        </div>
       </div>
 
-      <ul className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        {category.teams.map((t) => {
-          const isPaid = t.paid ?? false;
-          return (
-            <li key={t.id} className="surface-card p-4 flex flex-col justify-between gap-3 border border-border">
-              <div>
-                <div className="flex items-center justify-between gap-2">
-                  <span className="font-display text-xl sm:text-2xl text-foreground truncate">{t.name}</span>
-                  <span
-                    className={`flex-shrink-0 px-2 py-0.5 text-[0.6rem] font-bold uppercase tracking-widest rounded ${
-                      isPaid
-                        ? "bg-pickle/20 text-pickle border border-pickle/40"
-                        : "bg-brick/20 text-brick border border-brick/40"
-                    }`}
-                  >
-                    {isPaid ? "Verified Paid" : "Pending"}
-                  </span>
-                </div>
-                <p className="mt-1 text-xs text-muted-foreground">{t.players.join(" & ")}</p>
-              </div>
+      {/* Teams Grid */}
+      {filteredTeams.length === 0 ? (
+        <div className="surface-card p-8 text-center border border-border">
+          <span className="text-xs uppercase tracking-widest text-muted-foreground font-mono font-bold block">
+            No matching teams found
+          </span>
+          <p className="text-xs text-muted-foreground mt-1">
+            Try adjusting your search query or check spelling.
+          </p>
+          <button
+            onClick={() => setSearchQuery("")}
+            className="mt-3 px-3 py-1.5 border border-border bg-charcoal text-sand text-xs font-mono uppercase tracking-wider rounded hover:border-pickle transition-colors cursor-pointer"
+          >
+            Reset Search
+          </button>
+        </div>
+      ) : (
+        <ul className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {filteredTeams.map((t) => {
+            const isPaid = t.paid ?? false;
+            const bracketLetter = getBracketLetter(t.id, t.name);
 
-              <div className="pt-2 border-t border-border/50 flex items-center justify-between text-[0.65rem] text-muted-foreground uppercase tracking-widest font-mono">
-                <span>Ref: {t.paymentRef ?? "GC-98214309"}</span>
-                {t.paymentProofUrl && (
-                  <span className="text-pickle font-bold flex items-center gap-1">
-                    <span className="h-1.5 w-1.5 rounded-full bg-pickle" /> Photo Attached
-                  </span>
-                )}
-              </div>
-            </li>
-          );
-        })}
-      </ul>
+            // Get player initials for avatar
+            const initials = t.players
+              .map((p) => p.split(" ").map((n) => n[0]).join("").slice(0, 2))
+              .join("/");
+
+            return (
+              <li
+                key={t.id}
+                className="surface-card p-4 sm:p-5 flex flex-col justify-between gap-3 border border-border hover:border-pickle/50 transition-colors rounded"
+              >
+                <div className="space-y-3">
+                  {/* Card top: Avatar + Team name + Badges */}
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="h-10 w-10 rounded bg-charcoal border border-pickle/40 text-pickle flex items-center justify-center font-display text-sm font-bold shrink-0">
+                        {initials || "DV"}
+                      </div>
+                      <div className="min-w-0">
+                        <span className="font-display text-lg sm:text-xl text-foreground truncate block leading-tight">
+                          {t.name}
+                        </span>
+                        {t.club && (
+                          <span className="text-[0.65rem] text-muted-foreground font-mono block truncate">
+                            {t.club}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col items-end gap-1 shrink-0">
+                      {bracketLetter && (
+                        <span className="px-2 py-0.5 text-[0.6rem] font-bold font-mono uppercase tracking-widest bg-pickle/20 text-pickle border border-pickle/40 rounded">
+                          Bracket {bracketLetter}
+                        </span>
+                      )}
+                      <span
+                        className={`px-2 py-0.5 text-[0.6rem] font-bold uppercase tracking-widest rounded ${
+                          isPaid
+                            ? "bg-pickle/20 text-pickle border border-pickle/40"
+                            : "bg-brick/20 text-brick border border-brick/40"
+                        }`}
+                      >
+                        {isPaid ? "Verified" : "Pending"}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Players list */}
+                  <div className="p-2.5 bg-background border border-border/60 rounded">
+                    <div className="text-[0.6rem] uppercase tracking-widest font-mono text-muted-foreground mb-1">
+                      Official Doubles Pair
+                    </div>
+                    <div className="text-xs font-semibold text-foreground">
+                      {t.players.join(" & ")}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Bottom Card Actions: Find My Matches + Reference */}
+                <div className="space-y-2 pt-2 border-t border-border/50">
+                  <button
+                    onClick={() => onFindMatches(t)}
+                    className="w-full py-2 px-3 bg-charcoal border border-border hover:border-pickle hover:bg-pickle/10 text-sand hover:text-pickle text-xs font-bold uppercase tracking-wider rounded transition-colors flex items-center justify-center gap-2 cursor-pointer font-mono"
+                  >
+                    <span>Find My Matches</span>
+                    <span>&rarr;</span>
+                  </button>
+
+                  <div className="flex items-center justify-between text-[0.6rem] text-muted-foreground uppercase tracking-widest font-mono pt-0.5">
+                    <span>Ref: {t.paymentRef ?? "GC-CONFIRMED"}</span>
+                    {t.paymentProofUrl && (
+                      <span className="text-pickle font-bold flex items-center gap-1">
+                        <span className="h-1.5 w-1.5 rounded-full bg-pickle" /> Receipt On File
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </div>
   );
 }

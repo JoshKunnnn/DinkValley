@@ -6,6 +6,11 @@ import {
   slugify,
   type NewTournamentInput,
 } from "@/lib/tournament-store";
+import {
+  exportTournamentTeamsToCsv,
+  exportTournamentGroupedPerCategoryCsv,
+  exportTournamentToExcelWorkbook,
+} from "@/lib/csv-export";
 
 interface TournamentsManagerProps {
   onSelectTournament?: (slug: string) => void;
@@ -796,6 +801,28 @@ export function TournamentsManager({
                       </div>
 
                       <div className="flex items-center gap-2 flex-shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => exportTournamentToExcelWorkbook(t)}
+                          className="px-3 py-1.5 rounded text-xs font-bold uppercase tracking-wider border border-pickle bg-pickle/15 text-pickle hover:bg-pickle hover:text-sand transition-all cursor-pointer shadow-xs inline-flex items-center gap-1.5 font-mono"
+                          title="Export multi-tab Excel workbook with a tab per category"
+                        >
+                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                          </svg>
+                          Export Excel
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => exportTournamentGroupedPerCategoryCsv(t, "all")}
+                          className="px-3 py-1.5 rounded text-xs font-bold uppercase tracking-wider border border-border bg-charcoal text-sand hover:border-pickle hover:text-pickle transition-all cursor-pointer shadow-xs inline-flex items-center gap-1.5 font-mono"
+                          title="Export whole tournament grouped per category to CSV"
+                        >
+                          <svg className="w-3.5 h-3.5 text-pickle" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                          </svg>
+                          CSV
+                        </button>
                         {onSelectTournament && (
                           <button
                             onClick={() => onSelectTournament(t.slug)}

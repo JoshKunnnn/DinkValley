@@ -7,6 +7,7 @@ import {
   dbClearAllMatches,
   dbSubscribeToLive,
 } from "./supabase-service";
+import { isMatchInSameBracket } from "./bracket-utils";
 
 /* ─────────────────────────────────────────────
    Types
@@ -123,8 +124,31 @@ export function enforceFourCourtCapacity(matches: LiveMatch[]): { sanitized: Liv
       continue;
     }
 
-    // For active/scheduled matches: ensure only 1 match per court
-    if (cleanCourt !== "Queue") {
+    // Validate same-bracket for pool play matches: cross-bracket matches cannot be assigned to facility courts
+    // unless actively dispatched to a court station
+    const isPoolMatch = match.stage && match.stage.includes("Bracket ");
+    if (isPoolMatch && !stationMatchIds.has(match.id) && !isMatchInSameBracket(match.tournamentSlug || "", match.categoryId || "", match.stage, match.teamAName, match.teamBName)) {
+      if (cleanCourt !== "Queue") {
+        cleanCourt = "Queue";
+        modified = true;
+      }
+    }
+
+    // If match is not actively assigned to a court station, ensure court is Queue and not live
+    let updatedStatus = match.status;
+    let updatedStartedAt = match.startedAt;
+    if (!stationMatchIds.has(match.id)) {
+      if (cleanCourt !== "Queue") {
+        cleanCourt = "Queue";
+        modified = true;
+      }
+      if (match.status === "live") {
+        updatedStatus = "scheduled";
+        updatedStartedAt = undefined;
+        modified = true;
+      }
+    } else if (cleanCourt !== "Queue") {
+      // For active/dispatched matches: ensure only 1 match per court
       if (occupiedCourts.has(cleanCourt)) {
         cleanCourt = "Queue";
         modified = true;
@@ -133,11 +157,16 @@ export function enforceFourCourtCapacity(matches: LiveMatch[]): { sanitized: Liv
       }
     }
 
-    if (cleanCourt !== rawCourt) {
+    if (cleanCourt !== rawCourt || updatedStatus !== match.status) {
       modified = true;
     }
 
-    resultMap.set(match.id, { ...match, court: cleanCourt });
+    resultMap.set(match.id, {
+      ...match,
+      court: cleanCourt,
+      status: updatedStatus,
+      startedAt: updatedStartedAt,
+    });
   }
 
   const sanitized = matches.map((m) => resultMap.get(m.id) ?? m);
@@ -265,8 +294,8 @@ function mergeMatchesSafely(cloudMatches: LiveMatch[], localMatches: LiveMatch[]
     return cm;
   });
 
-  const cloudIds = new Set(cloudMatches.map((c) => c.id));
-  return [...mergedCloud, ...localMatches.filter((l) => !cloudIds.has(l.id))];
+  // Cloud is the single source of truth; deleted matches from Supabase are not resurrected
+  return mergedCloud;
 }
 
 /* ─────────────────────────────────────────────
@@ -299,7 +328,7 @@ export function useMatchStore(tournamentSlug?: string) {
     // 1. Initial Cloud Hydration from Supabase
     dbGetMatches(effectiveSlug)
       .then((cloudMatches) => {
-        if (mounted && cloudMatches.length > 0) {
+        if (mounted) {
           const local = getMatches();
           const merged = mergeMatchesSafely(cloudMatches, local);
           saveMatches(merged, false);
@@ -319,7 +348,7 @@ export function useMatchStore(tournamentSlug?: string) {
           // On any match change in database
           dbGetMatches(effectiveSlug)
             .then((cloudMatches) => {
-              if (mounted && cloudMatches.length > 0) {
+              if (mounted) {
                 const local = getMatches();
                 const merged = mergeMatchesSafely(cloudMatches, local);
                 saveMatches(merged, false);
@@ -646,8 +675,7 @@ export function syncDrawnBracketsToLiveMatches(
         const teamA = teams[i]!;
         const teamB = teams[j]!;
         const matchId = `live-${tournamentSlug}-${categoryId}-${group.letter}-${i + 1}v${j + 1}`;
-        const courtName = courtNum <= 4 ? `Court ${courtNum}` : "Queue";
-        courtNum++;
+        const courtName = "Queue";
 
         // Check if a match for these two teams already exists in the store
         const existing = findLiveMatchForTeams(currentMatches, teamA.name, teamB.name);
@@ -697,9 +725,24 @@ export function syncDrawnBracketsToLiveMatches(
       (m.categoryId === categoryId || (!m.categoryId && m.id.includes(categoryId)));
 
     if (isThisTourneyAndCat) {
-      if (m.status === "live" || m.status === "final" || m.id.startsWith("live-ko-")) {
+      if (m.id.startsWith("live-ko-")) {
         return true;
       }
+      if (m.status === "final") {
+        return true;
+      }
+      // If it's a pool play match, only retain if both teams are actually in the same bracket in drawnGroups
+      if (!isMatchInSameBracket(tournamentSlug, categoryId, m.stage, m.teamAName, m.teamBName)) {
+        return false;
+      }
+      if (m.status === "live") {
+        return true;
+      }
+      return false;
+    }
+
+    // Also for other matches, ensure pool play matches don't cross brackets
+    if (m.stage && m.stage.includes("Bracket ") && !isMatchInSameBracket(m.tournamentSlug || "", m.categoryId || "", m.stage, m.teamAName, m.teamBName)) {
       return false;
     }
 

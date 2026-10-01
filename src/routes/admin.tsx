@@ -13,6 +13,8 @@ import {
   updateTeamInTournament,
   bulkSetTeamsInCategory,
   deleteAllTeamsInCategory,
+  approvePendingRegistration,
+  rejectPendingRegistration,
 } from "@/lib/tournament-store";
 import { generate32Teams } from "@/lib/team-generator";
 import {
@@ -27,6 +29,15 @@ import {
   getAuthenticatedStaff,
   logoutStaff,
 } from "@/lib/auth-store";
+import { generateUUID } from "@/lib/utils";
+import {
+  exportCategoryTeamsToCsv,
+  exportTournamentTeamsToCsv,
+  exportTournamentGroupedPerCategoryCsv,
+  exportAllCategoriesSeparately,
+  exportTournamentToExcelWorkbook,
+  type CsvExportFilter,
+} from "@/lib/csv-export";
 
 export const Route = createFileRoute("/admin")({
   head: () => ({
@@ -114,7 +125,7 @@ function AdminErrorComponent({ error, reset }: { error: Error; reset: () => void
 const levels = ["Beginners", "Novice", "Intermediate", "Advance", "Open"];
 const divisions = ["Men's", "Women's", "Mixed"];
 
-type TabKey = "draw" | "dispatch" | "setup";
+type TabKey = "draw" | "dispatch" | "setup" | "teams";
 type DrawSubTab = "bracket-draw" | "brackets";
 type SetupSection = "tournaments" | "teams" | "access-codes";
 
@@ -122,6 +133,7 @@ const tabs: { key: TabKey; label: string }[] = [
   { key: "draw", label: "Draw" },
   { key: "dispatch", label: "Dispatch" },
   { key: "setup", label: "Setup" },
+  { key: "teams", label: "Teams & Payments" },
 ];
 
 function Admin() {
@@ -346,7 +358,7 @@ function Admin() {
   }
 
   return (
-    <div className="flex min-h-[calc(100vh-4rem)] flex-col md:flex-row">
+    <div className="flex flex-1 flex-col md:flex-row items-stretch min-h-full">
       {/* ── Mobile Drawer ── */}
       {mobileMenuOpen && (
         <div
@@ -383,21 +395,34 @@ function Admin() {
 
             {/* Nav links */}
             <nav className="flex flex-col gap-1 px-3 py-4">
-              {tabs.map(({ key, label }) => (
-                <button
-                  key={key}
-                  onClick={() => {
-                    setActiveTab(key);
-                    setMobileMenuOpen(false);
-                  }}
-                  className={`flex items-center rounded px-4 py-3 text-left text-sm font-semibold uppercase tracking-widest transition-colors cursor-pointer ${activeTab === key
-                      ? "bg-brick text-sand"
-                      : "text-sand/80 hover:bg-charcoal/60 hover:text-sand"
+              {tabs.map(({ key, label }) => {
+                const totalPendingForTab =
+                  key === "teams"
+                    ? tournament?.categories?.reduce((acc, c) => acc + (c.pendingTeams?.length || 0), 0) || 0
+                    : 0;
+
+                return (
+                  <button
+                    key={key}
+                    onClick={() => {
+                      setActiveTab(key);
+                      setMobileMenuOpen(false);
+                    }}
+                    className={`flex items-center justify-between rounded px-4 py-3 text-left text-sm font-semibold uppercase tracking-widest transition-colors cursor-pointer ${
+                      activeTab === key
+                        ? "bg-brick text-sand font-bold"
+                        : "text-sand/80 hover:bg-charcoal/60 hover:text-sand"
                     }`}
-                >
-                  {label}
-                </button>
-              ))}
+                  >
+                    <span>{label}</span>
+                    {totalPendingForTab > 0 && (
+                      <span className="px-2 py-0.5 text-[0.65rem] font-bold font-mono bg-brick text-sand rounded-full animate-pulse">
+                        {totalPendingForTab}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
             </nav>
 
             <div className="flex-1" />
@@ -422,7 +447,7 @@ function Admin() {
       )}
 
       {/* ── Desktop Sidebar ── */}
-      <aside className="hidden md:flex w-64 flex-shrink-0 flex-col border-r border-border bg-charcoal">
+      <aside className="hidden md:flex w-64 flex-shrink-0 flex-col border-r border-border bg-charcoal min-h-full">
         {/* Logo/Brand area */}
         <div className="flex items-center gap-3 border-b border-border px-6 py-5">
           <img
@@ -440,18 +465,31 @@ function Admin() {
 
         {/* Nav links */}
         <nav className="flex flex-col gap-1 px-3 py-4">
-          {tabs.map(({ key, label }) => (
-            <button
-              key={key}
-              onClick={() => setActiveTab(key)}
-              className={`flex items-center rounded px-4 py-3 text-left text-sm font-semibold uppercase tracking-widest transition-colors cursor-pointer ${activeTab === key
-                  ? "bg-brick text-sand"
-                  : "text-sand/80 hover:bg-charcoal/60 hover:text-sand"
+          {tabs.map(({ key, label }) => {
+            const totalPendingForTab =
+              key === "teams"
+                ? tournament?.categories?.reduce((acc, c) => acc + (c.pendingTeams?.length || 0), 0) || 0
+                : 0;
+
+            return (
+              <button
+                key={key}
+                onClick={() => setActiveTab(key)}
+                className={`flex items-center justify-between rounded px-4 py-3 text-left text-sm font-semibold uppercase tracking-widest transition-colors cursor-pointer ${
+                  activeTab === key
+                    ? "bg-brick text-sand font-bold"
+                    : "text-sand/80 hover:bg-charcoal/60 hover:text-sand"
                 }`}
-            >
-              {label}
-            </button>
-          ))}
+              >
+                <span>{label}</span>
+                {totalPendingForTab > 0 && (
+                  <span className="px-2 py-0.5 text-[0.65rem] font-bold font-mono bg-brick text-sand rounded-full animate-pulse">
+                    {totalPendingForTab}
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </nav>
 
         {/* Spacer */}
@@ -475,7 +513,7 @@ function Admin() {
       </aside>
 
       {/* ── Main content ── */}
-      <div className="flex flex-1 flex-col bg-background min-w-0">
+      <div className="flex flex-1 flex-col bg-background min-w-0 border-b border-border">
         {/* Topbar */}
         <header className="flex items-center justify-between gap-2 border-b border-border bg-charcoal/30 px-3 py-3 sm:px-8 sm:py-4">
           <div className="flex min-w-0 items-center gap-2 sm:gap-3">
@@ -506,7 +544,7 @@ function Admin() {
         </header>
 
         {/* Content */}
-        <main className="flex-1 overflow-y-auto p-4 sm:p-6 md:p-8">
+        <div className="flex-1 overflow-y-auto p-4 sm:p-6 md:p-8">
 
           {/* ── DRAW TAB ── */}
           {activeTab === "draw" && (
@@ -681,9 +719,23 @@ function Admin() {
                     <span className="text-sm font-bold uppercase tracking-widest text-sand">Teams & Payments</span>
                     {tournament && category && (
                       <span className="text-[0.65rem] font-mono text-sand/60 border border-border px-2 py-0.5">
-                        {category.teams?.length ?? 0} teams
+                        {category.teams?.length ?? 0} verified
                       </span>
                     )}
+                    {tournament && (() => {
+                      const totalPending = tournament.categories.reduce(
+                        (sum, c) => sum + (c.pendingTeams?.length ?? 0),
+                        0
+                      );
+                      if (totalPending > 0) {
+                        return (
+                          <span className="text-[0.65rem] font-mono font-bold bg-brick text-sand px-2 py-0.5 rounded animate-pulse">
+                            {totalPending} Pending Review
+                          </span>
+                        );
+                      }
+                      return null;
+                    })()}
                   </div>
                   <svg
                     className={`w-4 h-4 text-sand/70 transition-transform duration-200 ${openSetupSections.has("teams") ? "rotate-180" : ""}`}
@@ -740,7 +792,60 @@ function Admin() {
             </div>
           )}
 
-        </main>
+          {/* ── TEAMS & PAYMENTS TAB ── */}
+          {activeTab === "teams" && (
+            <div className="max-w-4xl space-y-4">
+              {tournaments.length === 0 && (
+                <div className="surface-card p-10 sm:p-14 text-center max-w-xl mx-auto border border-border mt-8">
+                  <span className="text-xs uppercase tracking-[0.28em] text-pickle font-bold">Setup Required</span>
+                  <h3 className="font-display text-3xl text-foreground mt-2">No Tournaments Created Yet</h3>
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    Create your first tournament in the Setup tab before managing teams.
+                  </p>
+                  <button
+                    onClick={() => { setActiveTab("setup"); setOpenSetupSections(new Set(["tournaments"])); }}
+                    className="mt-6 bg-brick px-6 py-2.5 font-display text-xl tracking-wider text-sand hover:bg-brick-deep transition-colors cursor-pointer"
+                  >
+                    Go to Setup
+                  </button>
+                </div>
+              )}
+
+              {tournaments.length > 0 && (!tournament || !category) && (
+                <div className="surface-card p-10 sm:p-14 text-center max-w-xl mx-auto border border-border mt-8">
+                  <span className="text-xs uppercase tracking-[0.28em] text-pickle font-bold">Divisions Required</span>
+                  <h3 className="font-display text-3xl text-foreground mt-2">No Divisions Configured</h3>
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    The selected tournament has no categories or divisions configured yet.
+                  </p>
+                  <button
+                    onClick={() => { setActiveTab("setup"); setOpenSetupSections(new Set(["tournaments"])); }}
+                    className="mt-6 bg-brick px-6 py-2.5 font-display text-xl tracking-wider text-sand hover:bg-brick-deep transition-colors cursor-pointer"
+                  >
+                    Configure Divisions
+                  </button>
+                </div>
+              )}
+
+              {tournament && category && (
+                <TeamsTab
+                  tournament={tournament}
+                  category={category}
+                  tournaments={tournaments}
+                  tournamentSlug={tournamentSlug}
+                  setTournamentSlug={(slug) => {
+                    setTournamentSlug(slug);
+                    const next = tournaments.find((t) => t.slug === slug);
+                    if (next?.categories?.[0]) setCategoryId(next.categories[0].id);
+                  }}
+                  categoryId={categoryId}
+                  setCategoryId={setCategoryId}
+                />
+              )}
+            </div>
+          )}
+
+        </div>
       </div>
     </div>
   );
@@ -841,7 +946,7 @@ function PaymentProofModal({
                   : "bg-pickle text-sand hover:opacity-90"
               }`}
             >
-              {isPaid ? "Mark Unpaid" : "Verify & Mark Paid"}
+              {isPaid ? "Mark as Pending" : "Verify & Mark Paid"}
             </button>
 
             <label className="flex-shrink-0 px-4 py-3 border border-border bg-charcoal text-sand text-xs font-bold uppercase tracking-widest hover:border-sand cursor-pointer inline-flex items-center justify-center">
@@ -890,7 +995,9 @@ function TeamsTab({
   );
 
   const [selectedModalTeam, setSelectedModalTeam] = useState<Team | null>(null);
-  const [filter, setFilter] = useState<"all" | "paid" | "unpaid">("all");
+  const [filter, setFilter] = useState<"all" | "paid" | "pending">("all");
+  const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
+  const [exportNotification, setExportNotification] = useState<string | null>(null);
 
   const [newTeamName, setNewTeamName] = useState("");
   const [newPlayers, setNewPlayers] = useState("");
@@ -929,10 +1036,7 @@ function TeamsTab({
     const playersList = newPlayers.trim()
       ? newPlayers.split("/").map((p) => p.trim()).filter(Boolean)
       : ["Player 1", "Player 2"];
-    const id =
-      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-        ? crypto.randomUUID()
-        : `team-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    const id = generateUUID();
     const newTeam: Team = {
       id,
       name: newTeamName.trim(),
@@ -1015,34 +1119,379 @@ function TeamsTab({
     setUndoRoster(null);
   };
 
+  const pendingTeams = category.pendingTeams || [];
+
+  const handleApprovePending = (teamId: string) => {
+    approvePendingRegistration(tournament.slug, category.id, teamId);
+    if (selectedModalTeam?.id === teamId) {
+      setSelectedModalTeam(null);
+    }
+  };
+
+  const handleRejectPending = (teamId: string, teamName: string) => {
+    if (window.confirm(`Decline and reject registration for "${teamName}"?`)) {
+      rejectPendingRegistration(tournament.slug, category.id, teamId);
+      if (selectedModalTeam?.id === teamId) {
+        setSelectedModalTeam(null);
+      }
+    }
+  };
+
   const currentTeams = category.teams || [];
   const paidCount = currentTeams.filter((t) => resolvedMap[t.id]).length;
-  const unpaidCount = currentTeams.length - paidCount;
+  const pendingCount = (category.pendingTeams?.length ?? 0) + (currentTeams.length - paidCount);
+  const categoryTotal = currentTeams.length + (category.pendingTeams?.length ?? 0);
+
+  const totalTournTeams = (tournament.categories || []).reduce(
+    (sum, c) => sum + (c.teams?.length || 0) + (c.pendingTeams?.length || 0),
+    0
+  );
+  const totalTournPending = (tournament.categories || []).reduce(
+    (sum, c) =>
+      sum +
+      (c.pendingTeams?.length || 0) +
+      (c.teams || []).filter((t) => !t.paid && t.paymentStatus !== "Verified").length,
+    0
+  );
+  const totalTournVerified = Math.max(0, totalTournTeams - totalTournPending);
+
+  const handleExportCategory = (filterType: CsvExportFilter = "all") => {
+    try {
+      const res = exportCategoryTeamsToCsv(
+        tournament,
+        category,
+        filterType,
+        resolvedMap,
+        resolvedProofs
+      );
+      setExportNotification(`Exported ${res.count} entries from ${category.label} to ${res.filename}`);
+      setIsExportMenuOpen(false);
+      setTimeout(() => setExportNotification(null), 5000);
+    } catch (err: any) {
+      alert("Failed to export CSV: " + (err?.message || "Unknown error"));
+    }
+  };
+
+  const handleExportTournament = (filterType: CsvExportFilter = "all") => {
+    try {
+      const res = exportTournamentTeamsToCsv(
+        tournament,
+        filterType,
+        resolvedMap,
+        resolvedProofs
+      );
+      setExportNotification(`Exported master roster table (${res.count} entries) to ${res.filename}`);
+      setIsExportMenuOpen(false);
+      setTimeout(() => setExportNotification(null), 5000);
+    } catch (err: any) {
+      alert("Failed to export CSV: " + (err?.message || "Unknown error"));
+    }
+  };
+
+  const handleExportWholeGrouped = (filterType: CsvExportFilter = "all") => {
+    try {
+      const res = exportTournamentGroupedPerCategoryCsv(
+        tournament,
+        filterType,
+        resolvedMap,
+        resolvedProofs,
+        true
+      );
+      setExportNotification(
+        `Exported whole tournament (${res.count} teams across ${res.categoryCount} categories) to ${res.filename}`
+      );
+      setIsExportMenuOpen(false);
+      setTimeout(() => setExportNotification(null), 5000);
+    } catch (err: any) {
+      alert("Failed to export CSV: " + (err?.message || "Unknown error"));
+    }
+  };
+
+  const handleExportBatchSeparately = async (filterType: CsvExportFilter = "all") => {
+    try {
+      setExportNotification(`Preparing individual CSV files for all ${tournament.categories?.length || 0} categories...`);
+      const res = await exportAllCategoriesSeparately(
+        tournament,
+        filterType,
+        resolvedMap,
+        resolvedProofs
+      );
+      setExportNotification(
+        `Downloaded ${res.totalCategories} separate category files (${res.totalTeams} total teams).`
+      );
+      setIsExportMenuOpen(false);
+      setTimeout(() => setExportNotification(null), 6000);
+    } catch (err: any) {
+      alert("Failed to export category files: " + (err?.message || "Unknown error"));
+    }
+  };
+
+  const handleExportExcelWorkbook = () => {
+    try {
+      const res = exportTournamentToExcelWorkbook(
+        tournament,
+        resolvedMap,
+        resolvedProofs
+      );
+      setExportNotification(
+        `Generated multi-tab Excel workbook (${res.sheetCount} sheets, ${res.totalTeams} teams) to ${res.filename}`
+      );
+      setIsExportMenuOpen(false);
+      setTimeout(() => setExportNotification(null), 6000);
+    } catch (err: any) {
+      alert("Failed to export Excel workbook: " + (err?.message || "Unknown error"));
+    }
+  };
 
   const visibleTeams = currentTeams.filter((t) => {
     if (filter === "paid") return resolvedMap[t.id];
-    if (filter === "unpaid") return !resolvedMap[t.id];
+    if (filter === "pending") return !resolvedMap[t.id];
     return true;
   });
 
   return (
-    <div className="max-w-3xl space-y-6">
+    <div className="max-w-4xl space-y-6">
       {/* Modal for viewing attachment photo */}
       {selectedModalTeam && (
         <PaymentProofModal
           team={selectedModalTeam}
           isPaid={resolvedMap[selectedModalTeam.id] ?? false}
-          proofUrl={resolvedProofs[selectedModalTeam.id] ?? ""}
+          proofUrl={resolvedProofs[selectedModalTeam.id] || selectedModalTeam.paymentProofUrl || ""}
           onClose={() => setSelectedModalTeam(null)}
-          onTogglePaid={() => togglePaid(selectedModalTeam.id)}
+          onTogglePaid={() => {
+            const isPending = pendingTeams.some((pt) => pt.id === selectedModalTeam.id);
+            if (isPending) {
+              handleApprovePending(selectedModalTeam.id);
+            } else {
+              togglePaid(selectedModalTeam.id);
+            }
+          }}
           onUpdateProof={(url) => updateProof(selectedModalTeam.id, url)}
         />
       )}
 
-      <div>
-        <span className="text-xs uppercase tracking-[0.28em] text-pickle">Roster management</span>
-        <h2 className="mt-1 font-display text-3xl text-foreground">Teams &amp; Payment Verification</h2>
+      {/* Header and Export Toolbar */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div>
+          <span className="text-xs uppercase tracking-[0.28em] text-pickle font-bold">Roster management</span>
+          <h2 className="mt-1 font-display text-3xl text-foreground">Teams &amp; Payment Verification</h2>
+        </div>
+
+        {/* Export Controls (Excel Multi-Tab + Whole Tournament CSV + Options) */}
+        <div className="flex items-center gap-2 flex-wrap self-start sm:self-auto">
+          {/* Main Primary Button: Excel Multi-Tab (.xlsx) with Tab Per Category */}
+          <button
+            type="button"
+            onClick={handleExportExcelWorkbook}
+            className="inline-flex items-center gap-2 px-4 py-2 bg-pickle hover:opacity-90 text-sand text-xs font-mono font-bold uppercase tracking-wider rounded transition-all cursor-pointer shadow-sm"
+            title="Download presentable Excel workbook with a dedicated tab for each category"
+          >
+            <svg className="w-4 h-4 text-sand" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+            <span>Export Excel (.xlsx)</span>
+            <span className="bg-black/25 text-sand px-1.5 py-0.5 rounded text-[0.65rem] font-bold">
+              Tab per Category
+            </span>
+          </button>
+
+          {/* Quick Whole CSV Action */}
+          <button
+            type="button"
+            onClick={() => handleExportWholeGrouped("all")}
+            className="inline-flex items-center gap-1.5 px-3 py-2 bg-charcoal border border-border hover:border-pickle text-sand text-xs font-mono uppercase tracking-wider rounded transition-all cursor-pointer shadow-sm"
+            title="Download whole tournament CSV grouped per category"
+          >
+            <svg className="w-3.5 h-3.5 text-pickle" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+            <span>Whole CSV</span>
+          </button>
+
+          {/* Options Dropdown */}
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => setIsExportMenuOpen(!isExportMenuOpen)}
+              className="inline-flex items-center gap-1.5 px-3 py-2 bg-charcoal border border-border hover:border-pickle text-sand text-xs font-mono uppercase tracking-wider rounded transition-all cursor-pointer shadow-sm"
+              title="More export formats"
+            >
+              <span>Options</span>
+              <svg
+                className={`w-3.5 h-3.5 text-muted-foreground transition-transform ${isExportMenuOpen ? "rotate-180" : ""}`}
+                fill="none" stroke="currentColor" viewBox="0 0 24 24"
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+
+            {isExportMenuOpen && (
+              <>
+                <div
+                  className="fixed inset-0 z-30"
+                  onClick={() => setIsExportMenuOpen(false)}
+                />
+                <div className="absolute right-0 mt-2 w-80 sm:w-88 bg-charcoal border border-border rounded-lg shadow-2xl p-2 z-40 animate-in fade-in zoom-in-95 space-y-1">
+                  <div className="px-3 py-2 border-b border-border/60">
+                    <span className="text-[0.65rem] uppercase font-mono tracking-wider text-pickle font-bold block">
+                      Spreadsheet Exports
+                    </span>
+                    <span className="text-[0.7rem] text-muted-foreground">
+                      Multi-tab Excel workbooks &amp; CSV files
+                    </span>
+                  </div>
+
+                  {/* Multi-Tab Excel Option */}
+                  <button
+                    type="button"
+                    onClick={handleExportExcelWorkbook}
+                    className="w-full text-left px-3 py-2.5 rounded bg-pickle/10 hover:bg-pickle/20 border border-pickle/30 transition-colors cursor-pointer group"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-sand group-hover:text-pickle transition-colors">
+                        Excel Multi-Tab Workbook (.xlsx)
+                      </span>
+                      <span className="text-[0.65rem] font-mono bg-pickle text-sand font-bold px-1.5 py-0.5 rounded">
+                        Tab per Category
+                      </span>
+                    </div>
+                    <span className="text-[0.65rem] text-muted-foreground block mt-0.5">
+                      Overview sheet + individual sheet tabs for all {tournament.categories?.length || 0} categories
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleExportWholeGrouped("all")}
+                    className="w-full text-left px-3 py-2.5 rounded hover:bg-background/40 transition-colors cursor-pointer group"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-sand group-hover:text-pickle transition-colors">
+                        Whole Tournament CSV (Grouped)
+                      </span>
+                      <span className="text-[0.65rem] font-mono bg-border/60 px-1.5 py-0.5 rounded text-sand/80">
+                        {totalTournTeams} teams
+                      </span>
+                    </div>
+                    <span className="text-[0.65rem] text-muted-foreground block mt-0.5">
+                      Single CSV with category headers &amp; subtotals
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleExportTournament("all")}
+                    className="w-full text-left px-3 py-2.5 rounded hover:bg-background/40 transition-colors cursor-pointer group"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-sand group-hover:text-pickle transition-colors">
+                        Whole Tournament CSV (Flat Table)
+                      </span>
+                      <span className="text-[0.65rem] font-mono bg-border/60 px-1.5 py-0.5 rounded text-sand/80">
+                        Standard Table
+                      </span>
+                    </div>
+                    <span className="text-[0.65rem] text-muted-foreground block mt-0.5">
+                      Continuous rows for Excel auto-filters &amp; pivot tables
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleExportBatchSeparately("all")}
+                    className="w-full text-left px-3 py-2.5 rounded hover:bg-background/40 transition-colors cursor-pointer group border-t border-border/40"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-sand group-hover:text-pickle transition-colors">
+                        Batch Export (Separate CSV per Category)
+                      </span>
+                      <span className="text-[0.65rem] font-mono bg-border/60 px-1.5 py-0.5 rounded text-sand/80">
+                        {tournament.categories?.length || 0} files
+                      </span>
+                    </div>
+                    <span className="text-[0.65rem] text-muted-foreground block mt-0.5">
+                      Downloads individual CSV files for each division in 1 click
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleExportCategory("all")}
+                    className="w-full text-left px-3 py-2.5 rounded hover:bg-background/40 transition-colors cursor-pointer group border-t border-border/40"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-sand group-hover:text-pickle transition-colors">
+                        Export Current Category Only
+                      </span>
+                      <span className="text-[0.65rem] font-mono bg-border/60 px-1.5 py-0.5 rounded text-sand/80">
+                        {categoryTotal} teams
+                      </span>
+                    </div>
+                    <span className="text-[0.65rem] text-muted-foreground block mt-0.5">
+                      {category.label} verified &amp; pending entries
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleExportWholeGrouped("pending-only")}
+                    className="w-full text-left px-3 py-2.5 rounded hover:bg-background/40 transition-colors cursor-pointer group border-t border-border/40"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-brick">
+                        Export Pending Queue Only
+                      </span>
+                      <span className="text-[0.65rem] font-mono bg-brick/20 text-brick px-1.5 py-0.5 rounded font-bold">
+                        {totalTournPending} pending
+                      </span>
+                    </div>
+                    <span className="text-[0.65rem] text-muted-foreground block mt-0.5">
+                      Entries requiring payment verification across all categories
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleExportWholeGrouped("verified-only")}
+                    className="w-full text-left px-3 py-2.5 rounded hover:bg-background/40 transition-colors cursor-pointer group"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-pickle">
+                        Export Verified Rosters Only
+                      </span>
+                      <span className="text-[0.65rem] font-mono bg-pickle/20 text-pickle px-1.5 py-0.5 rounded font-bold">
+                        {totalTournVerified} verified
+                      </span>
+                    </div>
+                    <span className="text-[0.65rem] text-muted-foreground block mt-0.5">
+                      Confirmed teams ready for bracket draws across all categories
+                    </span>
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
       </div>
+
+      {/* Export notification banner */}
+      {exportNotification && (
+        <div className="surface-card flex items-center justify-between p-3.5 bg-pickle/15 border border-pickle/40 rounded text-xs animate-in fade-in duration-300">
+          <div className="flex items-center gap-2.5">
+            <span className="h-2 w-2 rounded-full bg-pickle animate-ping" />
+            <span className="text-foreground font-mono font-medium">
+              {exportNotification}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setExportNotification(null)}
+            className="text-[0.7rem] text-muted-foreground hover:text-foreground uppercase tracking-wider font-semibold cursor-pointer px-1.5 py-1"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {/* Filters */}
       <div className="flex flex-wrap gap-3">
@@ -1073,10 +1522,116 @@ function TeamsTab({
           className="border border-input bg-background px-3 py-2 text-sm focus:border-pickle focus:outline-none font-medium"
         >
           {tournament.categories.map((c) => (
-            <option key={c.id} value={c.id}>{c.label}</option>
+            <option key={c.id} value={c.id}>
+              {c.label} {c.pendingTeams && c.pendingTeams.length > 0 ? `(${c.pendingTeams.length} Pending)` : ""}
+            </option>
           ))}
         </select>
       </div>
+
+      {/* ── Pending Registrations Queue (Awaiting Verification) ── */}
+      {pendingTeams.length > 0 && (
+        <div className="surface-card p-5 border-2 border-brick/40 rounded-lg space-y-4 bg-brick/5 animate-in fade-in">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-b border-brick/20 pb-3">
+            <div className="flex items-center gap-2.5">
+              <span className="h-2.5 w-2.5 rounded-full bg-brick animate-ping shrink-0" />
+              <div>
+                <span className="text-[0.65rem] font-bold uppercase tracking-[0.24em] text-brick block font-mono">
+                  Action Required
+                </span>
+                <h3 className="font-display text-xl sm:text-2xl text-foreground mt-0.5">
+                  Pending Registrations ({pendingTeams.length})
+                </h3>
+              </div>
+            </div>
+            <span className="text-xs font-mono text-muted-foreground">
+              Awaiting admin approval before entering {category.label}
+            </span>
+          </div>
+
+          <div className="space-y-3">
+            {pendingTeams.map((pt) => (
+              <div
+                key={pt.id}
+                className="surface-card bg-card p-4 border border-border rounded flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-sm"
+              >
+                <div className="flex items-start gap-3.5 min-w-0">
+                  {pt.paymentProofUrl ? (
+                    <button
+                      type="button"
+                      onClick={() => setSelectedModalTeam(pt)}
+                      className="relative group shrink-0 h-16 w-16 rounded overflow-hidden border border-border bg-charcoal cursor-pointer"
+                      title="Click to zoom receipt"
+                    >
+                      <img
+                        src={pt.paymentProofUrl}
+                        alt="Receipt"
+                        className="h-full w-full object-cover group-hover:scale-110 transition-transform"
+                      />
+                      <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-[0.6rem] font-mono text-sand font-bold">
+                        View
+                      </div>
+                    </button>
+                  ) : (
+                    <div className="h-16 w-16 rounded border border-border/60 bg-muted/30 flex items-center justify-center text-[0.6rem] font-mono text-muted-foreground text-center p-1 shrink-0">
+                      No receipt
+                    </div>
+                  )}
+
+                  <div className="min-w-0 space-y-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-display text-lg text-foreground font-bold leading-tight">
+                        {pt.name}
+                      </span>
+                      <span className="px-2 py-0.5 text-[0.6rem] font-mono bg-brick/15 text-brick border border-brick/40 rounded font-bold uppercase tracking-wider">
+                        Pending Verification
+                      </span>
+                    </div>
+                    <div className="text-xs text-foreground/80 font-medium">
+                      {pt.players.join(" & ")}
+                    </div>
+                    {pt.club && (
+                      <div className="text-[0.65rem] text-muted-foreground font-mono">
+                        Club: {pt.club}
+                      </div>
+                    )}
+                    <div className="text-[0.65rem] text-muted-foreground font-mono">
+                      Ref: <span className="text-pickle font-bold">{pt.paymentRef || "None"}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Actions */}
+                <div className="flex items-center gap-2 shrink-0 self-end md:self-center">
+                  {pt.paymentProofUrl && (
+                    <button
+                      type="button"
+                      onClick={() => setSelectedModalTeam(pt)}
+                      className="px-3 py-2 border border-border bg-charcoal text-sand text-xs font-mono uppercase tracking-wider rounded hover:border-pickle transition-colors cursor-pointer"
+                    >
+                      View Receipt
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => handleRejectPending(pt.id, pt.name)}
+                    className="px-3 py-2 border border-brick/40 text-brick hover:bg-brick/10 text-xs font-mono uppercase tracking-wider rounded transition-colors cursor-pointer"
+                  >
+                    Decline
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleApprovePending(pt.id)}
+                    className="px-4 py-2 bg-pickle text-sand text-xs font-bold uppercase tracking-widest hover:opacity-90 transition-opacity rounded cursor-pointer shadow-sm"
+                  >
+                    Approve &amp; Add to Category
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Undo Banner if an action just occurred */}
       {undoRoster && (
@@ -1112,10 +1667,10 @@ function TeamsTab({
       <div className="surface-card flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 border border-border">
         <div>
           <span className="text-xs font-bold uppercase tracking-widest text-foreground block">
-            Roster Actions
+            Roster Actions &amp; Export
           </span>
           <span className="text-[0.7rem] text-muted-foreground">
-            Auto-populate 32 verified doubles teams or delete all players to start fresh.
+            Auto-populate 32 verified doubles teams, clear rosters, or export to Excel and Google Sheets.
           </span>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -1128,6 +1683,36 @@ function TeamsTab({
               Undo ({undoRoster.action === "populate" ? "Revert Roster" : "Restore Players"})
             </button>
           )}
+          <button
+            type="button"
+            onClick={handleExportExcelWorkbook}
+            className="px-3.5 py-2 border border-pickle bg-pickle/15 text-pickle hover:bg-pickle hover:text-sand font-mono font-bold text-xs tracking-wider uppercase rounded transition-all cursor-pointer shadow-xs inline-flex items-center gap-1.5"
+            title="Download multi-tab Excel file with a sheet per category"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+            Export Excel (.xlsx)
+          </button>
+          <button
+            type="button"
+            onClick={() => handleExportWholeGrouped("all")}
+            className="px-3.5 py-2 border border-border bg-charcoal text-sand hover:border-pickle hover:text-pickle font-mono font-semibold text-xs tracking-wider uppercase rounded transition-all cursor-pointer shadow-xs inline-flex items-center gap-1.5"
+            title="Download whole tournament CSV grouped by category"
+          >
+            <svg className="w-3.5 h-3.5 text-pickle" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+            Whole CSV
+          </button>
+          <button
+            type="button"
+            onClick={() => handleExportCategory("all")}
+            className="px-3 py-2 border border-border/70 bg-background text-foreground/80 hover:text-foreground hover:border-pickle font-mono text-xs tracking-wider uppercase rounded transition-all cursor-pointer shadow-xs"
+            title={`Download CSV for ${category.label} only`}
+          >
+            Export {category.label}
+          </button>
           <button
             type="button"
             onClick={handleAutoPopulate32Teams}
@@ -1159,12 +1744,12 @@ function TeamsTab({
         <div className="h-10 w-px bg-border" />
         <div className="text-center">
           <p className="font-display text-4xl text-pickle">{paidCount}</p>
-          <p className="text-xs uppercase tracking-widest text-muted-foreground">Paid</p>
+          <p className="text-xs uppercase tracking-widest text-muted-foreground">Verified</p>
         </div>
         <div className="h-10 w-px bg-border" />
         <div className="text-center">
-          <p className="font-display text-4xl text-brick">{unpaidCount}</p>
-          <p className="text-xs uppercase tracking-widest text-muted-foreground">Unpaid</p>
+          <p className="font-display text-4xl text-brick">{pendingCount}</p>
+          <p className="text-xs uppercase tracking-widest text-muted-foreground">Pending</p>
         </div>
         {/* Progress bar */}
         <div className="flex-1">
@@ -1210,7 +1795,7 @@ function TeamsTab({
 
       {/* Filter tabs */}
       <div className="flex gap-1 border-b border-border">
-        {(["all", "paid", "unpaid"] as const).map((f) => (
+        {(["all", "paid", "pending"] as const).map((f) => (
           <button
             key={f}
             onClick={() => setFilter(f)}
@@ -1219,7 +1804,7 @@ function TeamsTab({
                 : "text-muted-foreground hover:text-foreground"
               }`}
           >
-            {f === "all" ? `All (${category.teams.length})` : f === "paid" ? `Verified Paid (${paidCount})` : `Unpaid (${unpaidCount})`}
+            {f === "all" ? `All (${category.teams.length})` : f === "paid" ? `Verified (${paidCount})` : `Pending (${pendingCount})`}
           </button>
         ))}
       </div>
@@ -1240,13 +1825,13 @@ function TeamsTab({
                     {/* Payment toggle badge */}
                     <button
                       onClick={() => togglePaid(t.id)}
-                      title={isPaid ? "Click to mark unpaid" : "Click to mark paid"}
+                      title={isPaid ? "Click to set pending" : "Click to mark verified"}
                       className={`flex-shrink-0 rounded-full px-3 py-1 text-xs font-bold uppercase tracking-widest transition-colors cursor-pointer ${isPaid
                           ? "bg-pickle/20 text-pickle hover:bg-pickle/30 border border-pickle/40"
                           : "bg-brick/20 text-brick hover:bg-brick/30 border border-brick/40"
                         }`}
                     >
-                      {isPaid ? "Paid" : "Unpaid"}
+                      {isPaid ? "Verified" : "Pending"}
                     </button>
 
                     {/* Team info */}
