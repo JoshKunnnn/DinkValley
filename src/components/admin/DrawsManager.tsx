@@ -970,31 +970,31 @@ export function DrawsManager({
       ) : (
         <>
           {/* ── Stage Switcher Navigation ── */}
-          <div className="flex flex-wrap items-center justify-between gap-4 border-b border-border pb-4">
-            <div className="flex flex-wrap gap-2">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b-2 border-border pb-4">
+            <div className="grid grid-cols-2 p-1 bg-card rounded-lg border-2 border-border sm:flex sm:bg-transparent sm:border-0 sm:p-0 sm:gap-2">
               <button
                 onClick={() => setStageView("round_robin")}
-                className={`flex items-center gap-2 px-4 py-2.5 text-xs font-bold uppercase tracking-widest transition-all ${
+                className={`flex items-center justify-center gap-2 px-3 sm:px-4 py-2.5 text-xs font-bold uppercase tracking-widest rounded transition-all cursor-pointer ${
                   stageView === "round_robin"
-                    ? "bg-brick text-sand shadow"
-                    : "bg-charcoal/40 text-sand/70 hover:bg-charcoal/70 hover:text-sand"
+                    ? "bg-brick text-white shadow-sm font-bold"
+                    : "text-foreground hover:text-pickle hover:bg-card font-bold"
                 }`}
               >
-                <span>1. Round Robin Pools</span>
-                <span className="rounded-full bg-sand/20 px-2 py-0.5 text-[0.65rem]">
+                <span>1. Pools</span>
+                <span className="rounded-full bg-sand/30 text-foreground font-bold px-2 py-0.5 text-[0.65rem]">
                   {completedMatchesCount}/{totalMatchesCount}
                 </span>
               </button>
 
               <button
                 onClick={() => setStageView("main_draw")}
-                className={`flex items-center gap-2 px-4 py-2.5 text-xs font-bold uppercase tracking-widest transition-all ${
+                className={`flex items-center justify-center gap-2 px-3 sm:px-4 py-2.5 text-xs font-bold uppercase tracking-widest rounded transition-all cursor-pointer ${
                   stageView === "main_draw"
-                    ? "bg-brick text-sand shadow"
-                    : "bg-charcoal/40 text-sand/70 hover:bg-charcoal/70 hover:text-sand"
+                    ? "bg-brick text-white shadow-sm font-bold"
+                    : "text-foreground hover:text-pickle hover:bg-card font-bold"
                 }`}
               >
-                <span>2. Main Draw (Knockout)</span>
+                <span>2. Playoffs</span>
                 {mainDrawGenerated ? (
                   <span className="rounded-full bg-pickle/30 text-pickle px-2 py-0.5 text-[0.65rem] font-bold">
                     Seeded
@@ -1043,12 +1043,12 @@ export function DrawsManager({
           {stageView === "round_robin" && (
             <div className="space-y-8">
               {/* Status banner */}
-              <div className="surface-card flex flex-col md:flex-row items-start md:items-center justify-between gap-4 p-5 bg-charcoal/20 border-l-4 border-l-pickle">
+              <div className="surface-card flex flex-col md:flex-row items-start md:items-center justify-between gap-4 p-5 bg-card border-2 border-border border-l-4 border-l-pickle rounded-xl shadow-xs">
                 <div>
                   <h3 className="font-display text-2xl text-foreground">
                     Round Robin Stage ({brackets.length} Pools, {category.teams.length} Teams)
                   </h3>
-                  <p className="text-xs text-muted-foreground mt-0.5">
+                  <p className="text-xs text-foreground/80 font-medium mt-0.5">
                     Top 2 teams from each bracket qualify for the Main Draw playoffs. Standings and playoff seeds are ranked automatically by <strong>Point Differential (+/-)</strong>.
                   </p>
                 </div>
@@ -1058,19 +1058,19 @@ export function DrawsManager({
                     <span className="block font-display text-2xl text-foreground">
                       {completedMatchesCount} / {totalMatchesCount}
                     </span>
-                    <span className="text-[0.65rem] uppercase tracking-widest text-muted-foreground">
+                    <span className="text-[0.65rem] uppercase tracking-widest text-foreground font-bold">
                       Matches Completed
                     </span>
                   </div>
                   <button
                     onClick={handleGenerateMainDraw}
                     disabled={completedMatchesCount === 0}
-                    className={`px-5 py-2.5 text-xs font-bold uppercase tracking-widest transition-all ${
+                    className={`px-5 py-2.5 text-xs font-bold uppercase tracking-widest transition-all rounded ${
                       isRoundRobinFinished
-                        ? "bg-pickle text-sand animate-pulse hover:opacity-90 cursor-pointer shadow-lg"
+                        ? "bg-pickle text-white animate-pulse hover:opacity-90 cursor-pointer shadow-lg font-bold"
                         : completedMatchesCount > 0
-                          ? "bg-brick text-sand hover:bg-brick-deep cursor-pointer"
-                          : "bg-muted text-muted-foreground cursor-not-allowed opacity-50"
+                          ? "bg-brick text-white hover:bg-brick-deep cursor-pointer font-bold"
+                          : "border-2 border-border bg-card text-foreground/40 cursor-not-allowed font-bold"
                     }`}
                   >
                     Seed Main Draw &rarr;
@@ -1085,26 +1085,26 @@ export function DrawsManager({
                   return (
                     <div
                       key={group.id}
-                      className="surface-card p-0 overflow-hidden border border-border shadow-sm flex flex-col"
+                      className="surface-card p-0 overflow-hidden border-2 border-border shadow-xs rounded-xl flex flex-col"
                     >
                       {/* Bracket header */}
-                      <div className="bg-charcoal px-6 py-4 flex items-center justify-between border-b border-border">
+                      <div className="bg-card px-6 py-4 flex items-center justify-between border-b-2 border-border">
                         <div className="flex items-center gap-3">
-                          <span className="font-display text-2xl text-sand tracking-wide">
+                          <span className="font-display text-2xl text-foreground tracking-wide font-bold">
                             {group.name}
                           </span>
-                          <span className="text-xs font-bold uppercase tracking-widest text-pickle bg-pickle/15 px-2.5 py-0.5 rounded">
+                          <span className="text-xs font-bold uppercase tracking-widest text-pickle bg-pickle/15 px-2.5 py-0.5 rounded border border-pickle/40">
                             {group.teams.length} Teams
                           </span>
                         </div>
-                        <span className="text-xs text-sand/60 font-mono">
+                        <span className="text-xs text-foreground font-mono font-bold">
                           {group.matches.filter((m) => m.status === "completed").length}/
                           {group.matches.length} Finished
                         </span>
                       </div>
 
                       {/* ── Standings Table (with Point Differential Highlight) ── */}
-                      <div className="p-4 border-b border-border bg-charcoal/10">
+                      <div className="p-4 border-b-2 border-border bg-card">
                         <div className="flex items-center justify-between mb-2">
                           <span className="text-[0.68rem] uppercase tracking-[0.2em] font-bold text-muted-foreground">
                             Group Standings
@@ -1113,7 +1113,8 @@ export function DrawsManager({
                             Top 2 Advance to Playoffs
                           </span>
                         </div>
-                        <div className="overflow-x-auto">
+                        {/* Desktop Table */}
+                        <div className="hidden sm:block overflow-x-auto">
                           <table className="w-full text-xs">
                             <thead>
                               <tr className="border-b border-border text-muted-foreground text-left font-bold uppercase tracking-wider">
@@ -1131,7 +1132,7 @@ export function DrawsManager({
                                 <tr
                                   key={row.team.id}
                                   className={`transition-colors ${
-                                    row.isQualified ? "bg-pickle/10 font-semibold" : "hover:bg-charcoal/20"
+                                    row.isQualified ? "bg-pickle/10 font-semibold" : "hover:bg-pickle/5"
                                   }`}
                                 >
                                   <td className="py-2 px-2 font-display text-sm">
@@ -1175,6 +1176,67 @@ export function DrawsManager({
                             </tbody>
                           </table>
                         </div>
+
+                        {/* Mobile Standings Cards (Zero Horizontal Scroll) */}
+                        <div className="sm:hidden space-y-2 pt-1">
+                          {standings.map((row) => (
+                            <div
+                              key={row.team.id}
+                              className={`p-2.5 rounded border transition-colors ${
+                                row.isQualified
+                                  ? "border-pickle/50 bg-pickle/10"
+                                  : "border-2 border-border bg-card"
+                              }`}
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <span className={`inline-flex items-center justify-center w-6 h-6 rounded-full font-display text-sm shrink-0 ${
+                                    row.isQualified ? "bg-pickle text-sand font-bold" : "bg-charcoal text-sand/70 border border-border"
+                                  }`}>
+                                    {row.rank}
+                                  </span>
+                                  <div className="min-w-0">
+                                    <div className="font-semibold text-xs text-foreground truncate">
+                                      {row.team.name}
+                                    </div>
+                                    <div className="text-[0.62rem] text-muted-foreground truncate">
+                                      {row.team.players.join(" & ")}
+                                    </div>
+                                  </div>
+                                </div>
+                                <span className={`text-[0.62rem] font-bold uppercase tracking-wider px-2 py-0.5 rounded shrink-0 ${
+                                  row.isQualified
+                                    ? "bg-pickle text-sand font-black"
+                                    : "text-muted-foreground border border-border/60"
+                                }`}>
+                                  {row.isQualified ? "Advances" : `Rank ${row.rank}`}
+                                </span>
+                              </div>
+
+                              {/* Stats Row */}
+                              <div className="mt-2 pt-2 border-t-2 border-border grid grid-cols-4 gap-1 text-center font-mono text-[0.65rem]">
+                                <div className="bg-card border-2 border-border rounded py-1">
+                                  <span className="text-foreground/80 font-bold block text-[0.55rem]">PLAYED</span>
+                                  <span className="font-bold text-foreground">{row.played}</span>
+                                </div>
+                                <div className="bg-card border-2 border-border rounded py-1">
+                                  <span className="text-foreground/80 font-bold block text-[0.55rem]">WON</span>
+                                  <span className="font-bold text-pickle">{row.won}</span>
+                                </div>
+                                <div className="bg-card border-2 border-border rounded py-1">
+                                  <span className="text-foreground/80 font-bold block text-[0.55rem]">LOST</span>
+                                  <span className="font-bold text-brick">{row.lost}</span>
+                                </div>
+                                <div className="bg-pickle/15 rounded py-1 border-2 border-pickle/30">
+                                  <span className="text-pickle block text-[0.55rem] font-bold">DIFF</span>
+                                  <span className={`font-bold ${row.pointDiff > 0 ? "text-pickle" : row.pointDiff < 0 ? "text-brick" : "text-foreground"}`}>
+                                    {row.pointDiff > 0 ? `+${row.pointDiff}` : row.pointDiff}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
                       </div>
 
                       {/* ── Match Fixtures List ── */}
@@ -1197,7 +1259,7 @@ export function DrawsManager({
                                   key={m.id}
                                   className={`border p-3 transition-colors ${
                                     isFinished
-                                      ? "border-border bg-charcoal/5"
+                                      ? "border-2 border-border bg-card"
                                       : m.status === "in_progress"
                                         ? "border-pickle/50 bg-pickle/5"
                                         : "border-border/60 bg-background"
@@ -1258,15 +1320,15 @@ export function DrawsManager({
                                       onChange={(e) =>
                                         handleScoreChange(group.id, m.id, "scoreA", e.target.value)
                                       }
-                                      className={`w-12 h-9 text-center font-display text-xl border focus:border-pickle focus:outline-none transition-colors ${
+                                      className={`w-12 h-9 text-center font-display text-xl border-2 focus:border-pickle focus:outline-none transition-colors rounded ${
                                         winnerA
                                           ? "border-pickle bg-pickle/20 text-pickle font-bold"
-                                          : "border-input bg-charcoal/20 text-foreground"
+                                          : "border-border bg-card text-foreground font-bold"
                                       }`}
                                     />
 
                                     {/* VS Divider */}
-                                    <span className="font-display text-sm text-brick px-1">VS</span>
+                                    <span className="font-display text-sm text-brick px-1 font-bold">VS</span>
 
                                     {/* Score B Input */}
                                     <input
@@ -1277,10 +1339,10 @@ export function DrawsManager({
                                       onChange={(e) =>
                                         handleScoreChange(group.id, m.id, "scoreB", e.target.value)
                                       }
-                                      className={`w-12 h-9 text-center font-display text-xl border focus:border-pickle focus:outline-none transition-colors ${
+                                      className={`w-12 h-9 text-center font-display text-xl border-2 focus:border-pickle focus:outline-none transition-colors rounded ${
                                         winnerB
                                           ? "border-pickle bg-pickle/20 text-pickle font-bold"
-                                          : "border-input bg-charcoal/20 text-foreground"
+                                          : "border-border bg-card text-foreground font-bold"
                                       }`}
                                     />
 
@@ -1338,7 +1400,7 @@ export function DrawsManager({
           {stageView === "main_draw" && (
             <div className="space-y-8">
               {/* ── Playoff Seeding Board (Point Differential Engine) ── */}
-              <div className="surface-card p-5 bg-charcoal/20 border-l-4 border-l-pickle">
+              <div className="surface-card p-5 bg-card border-2 border-border border-l-4 border-l-pickle rounded-xl shadow-xs">
                 <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
                   <div>
                     <div className="flex items-center gap-2">
@@ -1350,7 +1412,7 @@ export function DrawsManager({
                     <h3 className="font-display text-2xl sm:text-3xl text-foreground mt-0.5">
                       Playoff Seeding Standings ({qualifiers.length} Teams)
                     </h3>
-                    <p className="text-xs text-muted-foreground mt-1 max-w-2xl">
+                    <p className="text-xs text-foreground/80 font-medium mt-1 max-w-2xl">
                       Qualifiers are seeded strictly by <strong>Wins</strong> and <strong>Point Differential (+/-)</strong>.
                       Pool winners claim the top seeds (1 to {qualifiers.length / 2 || 1}); pool runners-up claim seeds ({qualifiers.length / 2 + 1 || 2} to {qualifiers.length}). First-round group rematches are automatically avoided.
                     </p>
@@ -1374,8 +1436,8 @@ export function DrawsManager({
                   </div>
                 </div>
 
-                {/* Seeding Table with Point Differential Column Highlight */}
-                <div className="mt-5 border-t border-border pt-4 overflow-x-auto">
+                {/* Desktop Seeding Table */}
+                <div className="mt-5 border-t border-border pt-4 hidden sm:block overflow-x-auto">
                   <table className="w-full text-xs">
                     <thead>
                       <tr className="border-b border-border text-muted-foreground text-left font-bold uppercase tracking-wider">
@@ -1412,7 +1474,7 @@ export function DrawsManager({
                         return (
                           <tr
                             key={q.team.id}
-                            className="hover:bg-charcoal/20 transition-colors"
+                            className="hover:bg-pickle/5 transition-colors"
                           >
                             <td className="py-2 px-2 text-center">
                               <span className={`inline-block px-2 py-0.5 font-display text-sm rounded ${
@@ -1467,6 +1529,93 @@ export function DrawsManager({
                       })}
                     </tbody>
                   </table>
+                </div>
+
+                {/* Mobile View: Vertical Seeding Cards (Zero horizontal scrolling) */}
+                <div className="sm:hidden space-y-2.5 mt-4 border-t border-border pt-4">
+                  {qualifiers.map((q) => {
+                    let oppSeed = qualifiers.length + 1 - q.overallSeed;
+                    if (qualifiers.length === 16) {
+                      const pairMap: Record<number, number> = {
+                        1: 16, 16: 1, 8: 9, 9: 8, 4: 13, 13: 4, 5: 12, 12: 5,
+                        2: 15, 15: 2, 7: 10, 10: 7, 3: 14, 14: 3, 6: 11, 11: 6,
+                      };
+                      oppSeed = pairMap[q.overallSeed] ?? oppSeed;
+                    } else if (qualifiers.length === 8) {
+                      const pairMap: Record<number, number> = {
+                        1: 8, 8: 1, 4: 5, 5: 4, 2: 7, 7: 2, 3: 6, 6: 3,
+                      };
+                      oppSeed = pairMap[q.overallSeed] ?? oppSeed;
+                    }
+                    const opp = qualifiers.find((x) => x.overallSeed === oppSeed);
+                    const isTopHalf = q.overallSeed <= (qualifiers.length / 2 || 1);
+
+                    return (
+                      <div
+                        key={`m-seed-${q.team.id}`}
+                        className="bg-card border-2 border-border rounded-xl p-3.5 space-y-2 shadow-xs"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span
+                              className={`shrink-0 px-2 py-0.5 font-display text-sm rounded ${
+                                isTopHalf
+                                  ? "bg-pickle text-white font-bold"
+                                  : "bg-card text-foreground font-bold border-2 border-border"
+                              }`}
+                            >
+                              #{q.overallSeed}
+                            </span>
+                            <div className="min-w-0">
+                              <span className="font-semibold text-foreground text-xs block truncate">
+                                {q.team.name}
+                              </span>
+                              <span className="text-[0.65rem] text-foreground/80 font-bold truncate block">
+                                {q.team.players.join(" & ")}
+                              </span>
+                            </div>
+                          </div>
+                          <span className="shrink-0 text-[0.65rem] font-mono px-2 py-0.5 rounded bg-card border-2 border-border text-foreground font-bold">
+                            {q.bracketName} ({q.bracketRank === 1 ? "1st" : "2nd"})
+                          </span>
+                        </div>
+
+                        {/* Mini stat pills */}
+                        <div className="grid grid-cols-3 gap-1.5 pt-1 border-t-2 border-border text-center font-mono">
+                          <div className="bg-card px-1.5 py-1 rounded border-2 border-border">
+                            <span className="block text-[0.55rem] uppercase text-foreground/80 font-bold">Record</span>
+                            <span className="text-xs text-foreground font-bold">{q.won}W - {q.lost}L</span>
+                          </div>
+                          <div className="bg-card px-1.5 py-1 rounded border-2 border-border">
+                            <span className="block text-[0.55rem] uppercase text-foreground/80 font-bold">PF / PA</span>
+                            <span className="text-xs text-foreground font-bold">{q.pointsFor} / {q.pointsAgainst}</span>
+                          </div>
+                          <div className={`px-1.5 py-1 rounded border-2 ${
+                            q.pointDiff > 0
+                              ? "bg-pickle/15 border-pickle/40 text-pickle font-bold"
+                              : q.pointDiff < 0
+                                ? "bg-brick/15 border-brick/40 text-brick font-bold"
+                                : "bg-card border-border text-foreground font-bold"
+                          }`}>
+                            <span className="block text-[0.55rem] uppercase font-bold">Point Diff</span>
+                            <span className="text-xs font-bold">{q.pointDiff > 0 ? `+${q.pointDiff}` : q.pointDiff}</span>
+                          </div>
+                        </div>
+
+                        {/* Projected Matchup */}
+                        <div className="text-[0.65rem] font-mono text-muted-foreground flex items-center justify-between pt-1">
+                          <span className="uppercase text-[0.55rem] tracking-wider text-muted-foreground/70">Projected:</span>
+                          {opp ? (
+                            <span className="text-sand/90 truncate ml-2">
+                              vs #{opp.overallSeed} {opp.team.name} ({opp.pointDiff > 0 ? "+" : ""}{opp.pointDiff})
+                            </span>
+                          ) : (
+                            <span>-</span>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
 
@@ -1676,8 +1825,8 @@ function KnockoutMatchCard({
       <div className="p-3 space-y-2">
         {/* Team A Row */}
         <div
-          className={`flex items-center justify-between p-2 rounded transition-colors ${
-            winnerA ? "bg-pickle/20" : "bg-charcoal/10"
+          className={`flex items-center justify-between p-2 rounded border-2 transition-colors ${
+            winnerA ? "border-pickle/60 bg-pickle/20" : "border-border bg-card"
           }`}
         >
           <div className="truncate mr-2">
@@ -1719,8 +1868,8 @@ function KnockoutMatchCard({
 
         {/* Team B Row */}
         <div
-          className={`flex items-center justify-between p-2 rounded transition-colors ${
-            winnerB ? "bg-pickle/20" : "bg-charcoal/10"
+          className={`flex items-center justify-between p-2 rounded border-2 transition-colors ${
+            winnerB ? "border-pickle/60 bg-pickle/20" : "border-border bg-card"
           }`}
         >
           <div className="truncate mr-2">

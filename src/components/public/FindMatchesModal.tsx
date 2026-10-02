@@ -140,7 +140,7 @@ export function FindMatchesModal({
         </div>
 
         {/* Quick Performance & Standing Bar */}
-        <div className="grid grid-cols-4 border-b border-border bg-charcoal/50 text-center py-3 text-xs">
+        <div className="grid grid-cols-4 border-b-2 border-border bg-card text-center py-3 text-xs">
           <div>
             <div className="text-[0.65rem] uppercase tracking-wider text-muted-foreground">Played</div>
             <div className="font-display text-lg text-foreground font-bold">{completed.length}</div>
@@ -276,7 +276,7 @@ export function FindMatchesModal({
         </div>
 
         {/* Modal Footer */}
-        <div className="p-3 sm:p-4 border-t border-border bg-charcoal/30 flex items-center justify-between text-xs">
+        <div className="p-3 sm:p-4 border-t-2 border-border bg-card flex items-center justify-between text-xs">
           <span className="text-[0.65rem] text-muted-foreground uppercase tracking-widest font-mono">
             Dink Valley Tournament Desk
           </span>

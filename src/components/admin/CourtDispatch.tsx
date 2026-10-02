@@ -1753,18 +1753,18 @@ export function CourtDispatch({
                       {/* Teams & Scores */}
                       <div className="space-y-3">
                         {/* Team A */}
-                        <div className="flex items-center justify-between p-2.5 rounded bg-charcoal/30 border border-border">
+                        <div className="flex items-center justify-between p-2.5 rounded bg-card border-2 border-border">
                           <div className="min-w-0 mr-3">
                             <div className="flex items-center gap-1.5">
                               {activeMatch.score.servingTeam === "A" && activeMatch.status === "live" && (
                                 <span className="h-2 w-2 rounded-full bg-pickle shrink-0" />
                               )}
-                              <span className={`font-semibold text-sm truncate ${activeMatch.score.servingTeam === "A" ? "text-foreground" : "text-foreground/80"}`}>
+                              <span className={`font-semibold text-sm truncate ${activeMatch.score.servingTeam === "A" ? "text-foreground font-bold" : "text-foreground"}`}>
                                 {activeMatch.teamAName}
                               </span>
                             </div>
                             {activeMatch.teamAPlayers.length > 0 && (
-                              <span className="block text-[0.65rem] text-muted-foreground truncate">
+                              <span className="block text-[0.65rem] text-muted-foreground truncate font-mono">
                                 {activeMatch.teamAPlayers.join(" / ")}
                               </span>
                             )}
@@ -1784,7 +1784,7 @@ export function CourtDispatch({
                         </div>
 
                         {/* Team B */}
-                        <div className="flex items-center justify-between p-2.5 rounded bg-charcoal/30 border border-border">
+                        <div className="flex items-center justify-between p-2.5 rounded bg-card border-2 border-border">
                           <div className="min-w-0 mr-3">
                             <div className="flex items-center gap-1.5">
                               {activeMatch.score.servingTeam === "B" && activeMatch.status === "live" && (
@@ -1933,12 +1933,12 @@ export function CourtDispatch({
                         </button>
 
                         {nextInQueue ? (
-                          <div className="p-2.5 bg-charcoal/40 border border-border text-left space-y-1.5">
-                            <div className="flex items-center justify-between text-[0.65rem] uppercase tracking-wider text-muted-foreground">
+                          <div className="p-2.5 bg-card border-2 border-border rounded text-left space-y-1.5">
+                            <div className="flex items-center justify-between text-[0.65rem] uppercase tracking-wider text-muted-foreground font-bold">
                               <span>Next in Queue (#1)</span>
                               <span className="text-pickle font-bold">{nextInQueue.stage}</span>
                             </div>
-                            <div className="font-semibold text-xs text-sand truncate">
+                            <div className="font-bold text-xs text-foreground truncate">
                               {nextInQueue.teamAName} vs {nextInQueue.teamBName}
                             </div>
                             <button
@@ -2153,24 +2153,24 @@ export function CourtDispatch({
 
                     {/* Micro-metrics strip */}
                     <div className="mt-2.5 grid grid-cols-3 gap-1 text-center text-[0.65rem] pt-2 border-t border-border/40">
-                      <div className="bg-charcoal/40 p-1 border border-border/30">
-                        <span className="text-muted-foreground block text-[0.55rem] uppercase">
+                      <div className="bg-card p-1 border-2 border-border rounded">
+                        <span className="text-muted-foreground block text-[0.55rem] uppercase font-bold">
                           On Court
                         </span>
                         <span className="font-bold text-foreground">
                           {stats?.onCourtCount ?? 0}
                         </span>
                       </div>
-                      <div className="bg-charcoal/40 p-1 border border-border/30">
-                        <span className="text-muted-foreground block text-[0.55rem] uppercase">
+                      <div className="bg-card p-1 border-2 border-border rounded">
+                        <span className="text-muted-foreground block text-[0.55rem] uppercase font-bold">
                           Queued
                         </span>
                         <span className="font-bold text-foreground">
                           {stats?.queuedCount ?? 0}
                         </span>
                       </div>
-                      <div className="bg-charcoal/40 p-1 border border-border/30">
-                        <span className="text-muted-foreground block text-[0.55rem] uppercase">
+                      <div className="bg-card p-1 border-2 border-border rounded">
+                        <span className="text-muted-foreground block text-[0.55rem] uppercase font-bold">
                           Unassigned
                         </span>
                         <span className="font-bold text-foreground">
@@ -2343,7 +2343,7 @@ export function CourtDispatch({
 
           {/* ── Category Navigation Bar & Add Ready Matchups Action ── */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-1 pb-0.5">
-            <div className="flex items-center gap-1.5 overflow-x-auto text-xs no-scrollbar">
+            <div className="flex flex-wrap items-center gap-1.5 text-xs">
               <span className="text-[0.65rem] font-bold uppercase tracking-wider text-muted-foreground shrink-0 mr-1">
                 Category:
               </span>
@@ -2466,7 +2466,7 @@ export function CourtDispatch({
                   return (
                     <div
                       key={item.id}
-                      className="flex items-center gap-2 py-2 px-3 hover:bg-charcoal/30 transition-colors border-l-2 border-l-pickle"
+                      className="flex items-center gap-2 py-2 px-3 hover:bg-pickle/5 transition-colors border-l-2 border-l-pickle"
                     >
                       <span className="h-6 w-6 flex items-center justify-center font-display text-xs shrink-0 text-sand/60 border border-border bg-charcoal">
                         {idx + 1}
@@ -2804,14 +2804,14 @@ export function CourtDispatch({
                           return (
                             <div
                               key={m.id}
-                              className="flex items-center justify-between gap-2 px-4 py-2 hover:bg-charcoal/20 transition-colors"
+                              className="flex items-center justify-between gap-2 px-4 py-2 hover:bg-pickle/5 transition-colors"
                             >
                               <div className="min-w-0">
                                 <span className="text-sm text-foreground font-semibold truncate block">
                                   {m.teamAName} <span className="text-foreground/40 font-normal">vs</span> {m.teamBName}
                                 </span>
                                 {(m.teamAPlayers.length > 0 || m.teamBPlayers.length > 0) && (
-                                  <span className="text-[0.6rem] text-muted-foreground truncate block">
+                                  <span className="text-[0.6rem] text-muted-foreground truncate block font-mono">
                                     {[...m.teamAPlayers, ...m.teamBPlayers].join(" / ")}
                                   </span>
                                 )}
@@ -2837,7 +2837,7 @@ export function CourtDispatch({
                       </div>
 
                       {/* Card footer — Queue all CTA */}
-                      <div className="px-4 py-3 bg-charcoal/40 border-t border-border">
+                      <div className="px-4 py-3 bg-card border-t-2 border-border">
                         <button
                           onClick={() => handleQueueStageGroup(stageMatches)}
                           className="w-full py-2 text-[0.65rem] font-bold uppercase tracking-widest bg-pickle text-sand hover:opacity-90 transition-opacity cursor-pointer"
@@ -3044,8 +3044,8 @@ export function CourtDispatch({
 
             {/* Division Switcher (if multiple categories) */}
             {tournament.categories.length > 1 && (
-              <div className="flex items-center gap-1.5 px-4 py-2 bg-charcoal/40 border-b border-border overflow-x-auto scrollbar-thin">
-                <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground mr-1 shrink-0">
+              <div className="flex flex-wrap items-center gap-1.5 px-4 py-2 bg-card border-b-2 border-border">
+                <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground mr-1 shrink-0 font-bold">
                   Division:
                 </span>
                 {tournament.categories.map((c) => {
@@ -3054,10 +3054,10 @@ export function CourtDispatch({
                     <button
                       key={c.id}
                       onClick={() => setBracketModalCategory(c.id)}
-                      className={`px-2.5 py-1 text-xs font-semibold tracking-wide border transition-colors shrink-0 cursor-pointer ${
+                      className={`px-2.5 py-1 text-xs font-semibold tracking-wide border-2 transition-colors shrink-0 cursor-pointer ${
                         isCurrent
-                          ? "bg-pickle text-sand border-pickle"
-                          : "bg-charcoal text-sand/70 border-border hover:border-sand/50"
+                          ? "bg-brick text-sand border-brick font-bold"
+                          : "bg-card text-foreground border-border hover:border-pickle hover:text-pickle"
                       }`}
                     >
                       {c.label}
@@ -3067,10 +3067,10 @@ export function CourtDispatch({
               </div>
             )}
 
-            {/* Bracket Tabs Strip */}
-            <div className="flex items-center gap-2 p-3 bg-charcoal/20 border-b border-border overflow-x-auto scrollbar-thin">
+            {/* Bracket Tabs Strip — 4-column responsive grid on mobile, flex-wrap on desktop */}
+            <div className="grid grid-cols-4 sm:flex sm:flex-wrap items-center gap-1.5 p-3 bg-card border-b-2 border-border">
               {bracketModalData.groups.length === 0 ? (
-                <span className="text-xs text-muted-foreground italic px-2">
+                <span className="text-xs text-muted-foreground italic px-2 col-span-4">
                   No brackets found for this division.
                 </span>
               ) : (
@@ -3081,9 +3081,9 @@ export function CourtDispatch({
                     <button
                       key={group.letter}
                       onClick={() => setBracketModalSelectedLetter(group.letter)}
-                      className={`px-3 py-1.5 text-xs font-display tracking-wider uppercase border transition-all flex items-center gap-2 shrink-0 cursor-pointer ${
+                      className={`p-1.5 sm:px-3 sm:py-1.5 text-[0.65rem] sm:text-xs font-display tracking-wider uppercase border transition-all flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 cursor-pointer ${
                         isActive
-                          ? "bg-pickle text-sand border-pickle shadow-sm"
+                          ? "bg-pickle text-sand border-pickle shadow-sm font-bold"
                           : "bg-charcoal text-sand/80 border-border hover:border-sand/60"
                       }`}
                     >
@@ -3149,11 +3149,11 @@ export function CourtDispatch({
 
                     {/* Unplayed Games List */}
                     {unplayed.length === 0 ? (
-                      <div className="p-6 text-center border border-border bg-charcoal/30 space-y-2">
-                        <span className="text-xs uppercase tracking-widest text-emerald-400 font-bold block">
+                      <div className="p-6 text-center border-2 border-border bg-card rounded-xl shadow-xs space-y-2">
+                        <span className="text-xs uppercase tracking-widest text-pickle font-bold block">
                           Bracket Completed
                         </span>
-                        <p className="text-xs sm:text-sm text-foreground/80">
+                        <p className="text-xs sm:text-sm text-foreground font-semibold">
                           All pool play matches for {currentGroup.label} have concluded.
                         </p>
                       </div>
@@ -3218,23 +3218,23 @@ export function CourtDispatch({
 
                                 {/* Teams & Rosters */}
                                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
-                                  <div className="min-w-0 p-2 bg-charcoal/30 border border-border/60 rounded-sm">
+                                  <div className="min-w-0 p-2.5 bg-card border-2 border-border rounded-md shadow-xs">
                                     <span className="font-bold text-sm text-foreground block truncate">
                                       {match.teamAName}
                                     </span>
                                     {match.teamAPlayers.length > 0 && (
-                                      <span className="text-[0.65rem] text-muted-foreground block truncate">
+                                      <span className="text-[0.65rem] text-foreground/80 font-bold block truncate">
                                         {match.teamAPlayers.join(" / ")}
                                       </span>
                                     )}
                                   </div>
 
-                                  <div className="min-w-0 p-2 bg-charcoal/30 border border-border/60 rounded-sm">
+                                  <div className="min-w-0 p-2.5 bg-card border-2 border-border rounded-md shadow-xs">
                                     <span className="font-bold text-sm text-foreground block truncate">
                                       {match.teamBName}
                                     </span>
                                     {match.teamBPlayers.length > 0 && (
-                                      <span className="text-[0.65rem] text-muted-foreground block truncate">
+                                      <span className="text-[0.65rem] text-foreground/80 font-bold block truncate">
                                         {match.teamBPlayers.join(" / ")}
                                       </span>
                                     )}
@@ -3270,7 +3270,7 @@ export function CourtDispatch({
                                   }
                                   className={`w-full sm:w-auto px-4 py-2.5 text-xs font-bold uppercase tracking-wider border transition-all ${
                                     isActionDisabled
-                                      ? "border-border/40 text-muted-foreground/40 bg-charcoal/20 cursor-not-allowed"
+                                      ? "border-2 border-border text-muted-foreground bg-card cursor-not-allowed opacity-60"
                                       : "bg-pickle text-sand border-pickle hover:bg-pickle/90 cursor-pointer shadow-sm"
                                   }`}
                                 >
@@ -3306,17 +3306,17 @@ export function CourtDispatch({
                             {completed.map((cm) => (
                               <div
                                 key={cm.id}
-                                className="p-2.5 border border-border/60 bg-charcoal/20 flex items-center justify-between text-xs"
+                                className="p-2.5 border-2 border-border bg-card rounded-md shadow-xs flex items-center justify-between text-xs"
                               >
                                 <div className="flex items-center gap-2">
-                                  <span className="font-semibold text-foreground/80">
+                                  <span className="font-bold text-foreground">
                                     {cm.teamAName} vs {cm.teamBName}
                                   </span>
-                                  <span className="text-[0.65rem] text-muted-foreground">
+                                  <span className="text-[0.65rem] text-foreground/80 font-bold">
                                     {cm.stage}
                                   </span>
                                 </div>
-                                <div className="font-mono text-sand font-bold">
+                                <div className="font-mono text-pickle font-bold">
                                   {cm.liveScore ? `${cm.liveScore.teamAScore} - ${cm.liveScore.teamBScore}` : "Final"}
                                 </div>
                               </div>

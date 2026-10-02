@@ -1,5 +1,6 @@
 import { createFileRoute, redirect, useNavigate } from "@tanstack/react-router";
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { UmpireMobileNav } from "@/components/admin/UmpireMobileNav";
 
 import {
   useMatchStore,
@@ -138,7 +139,7 @@ function Umpire() {
   ];
 
   return (
-    <div className="min-h-[calc(100vh-4rem)] bg-background">
+    <div className="min-h-[calc(100vh-4rem)] bg-background pb-20 sm:pb-0">
       {/* Top bar */}
       <div className="sticky top-16 z-40 border-b border-border bg-charcoal/95 backdrop-blur">
         <div className="mx-auto max-w-6xl px-4 py-3">
@@ -354,6 +355,14 @@ function Umpire() {
           </div>
         </div>
       )}
+
+      {/* ── Mobile bottom nav (sm and below only) ── */}
+      <UmpireMobileNav
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
+        selectedMatchCourt={selectedMatch?.court ?? null}
+        onLogout={handleLogout}
+      />
     </div>
   );
 }
@@ -1703,14 +1712,14 @@ function UmpireConsole({
             <button
               onClick={() => handleStartTimeout("A")}
               disabled={needsToss || timeoutActive}
-              className="flex-1 py-2 text-[0.65rem] font-bold uppercase tracking-wider border border-border bg-muted/40 text-foreground hover:border-foreground/50 transition-colors cursor-pointer"
+              className="flex-1 py-2 text-[0.65rem] font-bold uppercase tracking-wider border-2 border-border bg-card text-foreground hover:border-pickle hover:text-pickle transition-colors cursor-pointer rounded"
             >
               Timeout {match.teamAName} (60s)
             </button>
             <button
               onClick={() => handleStartTimeout("B")}
               disabled={needsToss || timeoutActive}
-              className="flex-1 py-2 text-[0.65rem] font-bold uppercase tracking-wider border border-border bg-muted/40 text-foreground hover:border-foreground/50 transition-colors cursor-pointer"
+              className="flex-1 py-2 text-[0.65rem] font-bold uppercase tracking-wider border-2 border-border bg-card text-foreground hover:border-pickle hover:text-pickle transition-colors cursor-pointer rounded"
             >
               Timeout {match.teamBName} (60s)
             </button>
@@ -2211,7 +2220,7 @@ function QuickMatchModal({
           </div>
 
           {/* Team A */}
-          <div className="space-y-2 p-3 bg-charcoal/40 border border-border/80">
+          <div className="space-y-2 p-3 bg-card border-2 border-border rounded">
             <div className="flex items-center justify-between">
               <label className="block text-[0.65rem] uppercase tracking-wider text-pickle font-bold">
                 Team A
@@ -2249,7 +2258,7 @@ function QuickMatchModal({
           </div>
 
           {/* Team B */}
-          <div className="space-y-2 p-3 bg-charcoal/40 border border-border/80">
+          <div className="space-y-2 p-3 bg-card border-2 border-border rounded">
             <div className="flex items-center justify-between">
               <label className="block text-[0.65rem] uppercase tracking-wider text-brick font-bold">
                 Team B
@@ -2447,29 +2456,29 @@ function CoinTossOverlay({
         {/* Single Streamlined Prompt: Which team will choose tails or heads? */}
         {phase === "idle" && (
           <div className="space-y-3.5 pt-1">
-            <div className="text-left space-y-2.5 border border-border bg-charcoal/50 p-3">
+            <div className="text-left space-y-2.5 border-2 border-border bg-card p-3 rounded-lg">
               <div>
-                <span className="block text-xs sm:text-sm font-bold uppercase tracking-wider text-sand">
+                <span className="block text-xs sm:text-sm font-bold uppercase tracking-wider text-foreground">
                   Which team will choose tails or heads?
                 </span>
-                <span className="block text-[0.65rem] text-sand/60 mt-0.5">
+                <span className="block text-[0.65rem] text-muted-foreground mt-0.5">
                   Select the calling team and their call before flipping.
                 </span>
               </div>
 
               {/* Team Calling Selection */}
               <div className="space-y-1 pt-1">
-                <span className="block text-[0.6rem] uppercase tracking-wider text-sand/50 font-mono">
+                <span className="block text-[0.6rem] uppercase tracking-wider text-muted-foreground font-mono font-bold">
                   Calling Team
                 </span>
                 <div className="grid grid-cols-2 gap-2">
                   <button
                     type="button"
                     onClick={() => setCallingTeam("A")}
-                    className={`p-2.5 text-xs font-bold uppercase tracking-wider border transition-all text-center cursor-pointer truncate ${
+                    className={`p-2.5 text-xs font-bold uppercase tracking-wider border-2 transition-all text-center cursor-pointer truncate rounded ${
                       callingTeam === "A"
                         ? "bg-pickle text-sand border-pickle shadow-sm"
-                        : "bg-charcoal text-sand/70 border-border hover:border-sand/40"
+                        : "bg-card text-foreground border-border hover:border-pickle hover:text-pickle"
                     }`}
                   >
                     {teamAName}
@@ -2477,10 +2486,10 @@ function CoinTossOverlay({
                   <button
                     type="button"
                     onClick={() => setCallingTeam("B")}
-                    className={`p-2.5 text-xs font-bold uppercase tracking-wider border transition-all text-center cursor-pointer truncate ${
+                    className={`p-2.5 text-xs font-bold uppercase tracking-wider border-2 transition-all text-center cursor-pointer truncate rounded ${
                       callingTeam === "B"
                         ? "bg-pickle text-sand border-pickle shadow-sm"
-                        : "bg-charcoal text-sand/70 border-border hover:border-sand/40"
+                        : "bg-card text-foreground border-border hover:border-pickle hover:text-pickle"
                     }`}
                   >
                     {teamBName}
@@ -2490,17 +2499,17 @@ function CoinTossOverlay({
 
               {/* Call Choice (Heads or Tails) */}
               <div className="space-y-1">
-                <span className="block text-[0.6rem] uppercase tracking-wider text-sand/50 font-mono">
+                <span className="block text-[0.6rem] uppercase tracking-wider text-muted-foreground font-mono font-bold">
                   {callingTeamName}&apos;s Call
                 </span>
                 <div className="grid grid-cols-2 gap-2">
                   <button
                     type="button"
                     onClick={() => setCallingChoice("heads")}
-                    className={`p-2.5 text-xs font-bold uppercase tracking-wider border transition-all text-center cursor-pointer ${
+                    className={`p-2.5 text-xs font-bold uppercase tracking-wider border-2 transition-all text-center cursor-pointer rounded ${
                       callingChoice === "heads"
                         ? "bg-pickle text-sand border-pickle shadow-sm"
-                        : "bg-charcoal text-sand/70 border-border hover:border-sand/40"
+                        : "bg-card text-foreground border-border hover:border-pickle hover:text-pickle"
                     }`}
                   >
                     Heads
@@ -2508,10 +2517,10 @@ function CoinTossOverlay({
                   <button
                     type="button"
                     onClick={() => setCallingChoice("tails")}
-                    className={`p-2.5 text-xs font-bold uppercase tracking-wider border transition-all text-center cursor-pointer ${
+                    className={`p-2.5 text-xs font-bold uppercase tracking-wider border-2 transition-all text-center cursor-pointer rounded ${
                       callingChoice === "tails"
                         ? "bg-pickle text-sand border-pickle shadow-sm"
-                        : "bg-charcoal text-sand/70 border-border hover:border-sand/40"
+                        : "bg-card text-foreground border-border hover:border-pickle hover:text-pickle"
                     }`}
                   >
                     Tails
@@ -2520,10 +2529,10 @@ function CoinTossOverlay({
               </div>
 
               {/* Call Summary Pill */}
-              <div className="p-2 bg-charcoal border border-border text-[0.65rem] text-center text-sand/80 font-mono leading-relaxed mt-1">
+              <div className="p-2 bg-card border-2 border-border text-[0.65rem] text-center text-foreground font-mono leading-relaxed mt-1 rounded">
                 <span className="text-pickle font-bold">{callingTeamName}</span> chose{" "}
-                <span className="text-sand font-bold uppercase tracking-wide">{callingChoice}</span>.{" "}
-                <span className="text-sand/60">({otherTeamName} has {otherChoice})</span>
+                <span className="text-foreground font-bold uppercase tracking-wide">{callingChoice}</span>.{" "}
+                <span className="text-muted-foreground">({otherTeamName} has {otherChoice})</span>
               </div>
             </div>
 
@@ -2758,7 +2767,7 @@ function MatchStatusBadge({ status }: { status: LiveMatch["status"] }) {
     );
   }
   return (
-    <span className="text-[0.6rem] font-bold uppercase tracking-widest text-foreground bg-muted/60 px-1.5 py-0.5 border border-border">
+    <span className="text-[0.6rem] font-bold uppercase tracking-widest text-foreground bg-card px-1.5 py-0.5 border-2 border-border rounded">
       Scheduled
     </span>
   );

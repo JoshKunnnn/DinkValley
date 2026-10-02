@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import type { Tournament, Category, Team } from "@/data/tournaments";
-import { addPendingRegistration } from "@/lib/tournament-store";
+import { addPendingRegistration, getUniqueClubTeams, type ExistingClubTeam } from "@/lib/tournament-store";
 import { dbSaveTournament } from "@/lib/supabase-service";
 import { generateUUID, fileToOptimizedDataUrl } from "@/lib/utils";
 
@@ -29,6 +29,11 @@ export function PublicRegistrationModal({
     }
   }, [initialCategory]);
 
+  const [teamMode, setTeamMode] = useState<"existing" | "new">("existing");
+  const [existingTeams, setExistingTeams] = useState<ExistingClubTeam[]>([]);
+  const [selectedExistingTeam, setSelectedExistingTeam] = useState<string>("");
+  const [teamSearchQuery, setTeamSearchQuery] = useState<string>("");
+
   const [teamName, setTeamName] = useState("");
   const [player1Name, setPlayer1Name] = useState("");
   const [player2Name, setPlayer2Name] = useState("");
@@ -55,12 +60,57 @@ export function PublicRegistrationModal({
 
   useEffect(() => {
     if (isOpen) {
+      const allTeams = getUniqueClubTeams();
+      setExistingTeams(allTeams);
+      setTeamMode(allTeams.length > 0 ? "existing" : "new");
+      setSelectedExistingTeam("");
+      setTeamSearchQuery("");
       setSubmittedTeam(null);
       setError(null);
       setReceiptDataUrl(null);
       setReceiptFileName(null);
     }
   }, [isOpen]);
+
+  const handleSelectExistingTeam = (tName: string) => {
+    setSelectedExistingTeam(tName);
+    const found = existingTeams.find((t) => t.name === tName);
+    if (found) {
+      setTeamName(found.name);
+      setClub(found.club || "Dink Valley");
+      if (found.players && found.players.length > 0) {
+        setPlayer1Name(found.players[0] || "");
+      }
+      if (found.players && found.players.length > 1) {
+        setPlayer2Name(found.players[1] || "");
+      }
+    }
+  };
+
+  const handleSwitchToNewTeam = () => {
+    setTeamMode("new");
+    setSelectedExistingTeam("");
+    setTeamName("");
+    setClub("");
+    setPlayer1Name("");
+    setPlayer2Name("");
+  };
+
+  const handleSwitchToExistingTeam = () => {
+    setTeamMode("existing");
+    if (existingTeams.length > 0 && !selectedExistingTeam && existingTeams[0]) {
+      handleSelectExistingTeam(existingTeams[0].name);
+    }
+  };
+
+  const filteredExistingTeams = existingTeams.filter((t) => {
+    if (!teamSearchQuery.trim()) return true;
+    const q = teamSearchQuery.toLowerCase();
+    const nameMatch = t.name.toLowerCase().includes(q);
+    const clubMatch = (t.club || "").toLowerCase().includes(q);
+    const playerMatch = t.players.some((p) => p.toLowerCase().includes(q));
+    return nameMatch || clubMatch || playerMatch;
+  });
 
   const handleReceiptFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -122,6 +172,18 @@ export function PublicRegistrationModal({
     }
     if (!receiptDataUrl) {
       setError("Please upload your payment receipt or proof of payment screenshot.");
+      return;
+    }
+
+    const isAlreadyRegistered =
+      activeCategory.teams?.some(
+        (t) => t.name.trim().toLowerCase() === cleanTeam.toLowerCase()
+      ) ||
+      (activeCategory.pendingTeams || []).some(
+        (t) => t.name.trim().toLowerCase() === cleanTeam.toLowerCase()
+      );
+    if (isAlreadyRegistered) {
+      setError(`"${cleanTeam}" is already registered (or pending approval) in ${activeCategory.label}.`);
       return;
     }
 
@@ -275,63 +337,168 @@ export function PublicRegistrationModal({
               )}
             </div>
 
-            {/* Team Details */}
-            <div className="space-y-3">
-              <div>
-                <label className="text-xs font-bold uppercase tracking-wider text-foreground block mb-1">
-                  Team Name *
+            {/* Team Details & Existing Team Fetcher */}
+            <div className="space-y-3.5 pt-1">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <label className="text-xs font-bold uppercase tracking-wider text-foreground block">
+                  Team Information
                 </label>
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. Metro Dinkers, Kitchen Krushers"
-                  value={teamName}
-                  onChange={(e) => setTeamName(e.target.value)}
-                  className="w-full bg-charcoal border border-border p-2 text-xs text-sand rounded focus:border-pickle focus:outline-none"
-                />
+                {existingTeams.length > 0 && (
+                  <div className="grid grid-cols-2 p-0.5 bg-charcoal rounded border border-border text-[0.65rem] font-bold uppercase tracking-wider">
+                    <button
+                      type="button"
+                      onClick={handleSwitchToExistingTeam}
+                      className={`px-3 py-1 rounded transition-all cursor-pointer ${
+                        teamMode === "existing"
+                          ? "bg-pickle text-sand font-bold shadow-xs"
+                          : "text-muted-foreground hover:text-sand"
+                      }`}
+                    >
+                      Existing Team
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSwitchToNewTeam}
+                      className={`px-3 py-1 rounded transition-all cursor-pointer ${
+                        teamMode === "new"
+                          ? "bg-pickle text-sand font-bold shadow-xs"
+                          : "text-muted-foreground hover:text-sand"
+                      }`}
+                    >
+                      Create New Team
+                    </button>
+                  </div>
+                )}
               </div>
 
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div>
-                  <label className="text-xs font-bold uppercase tracking-wider text-foreground block mb-1">
-                    Player 1 Full Name *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="e.g. Marcus Vance"
-                    value={player1Name}
-                    onChange={(e) => setPlayer1Name(e.target.value)}
-                    className="w-full bg-charcoal border border-border p-2 text-xs text-sand rounded focus:border-pickle focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs font-bold uppercase tracking-wider text-foreground block mb-1">
-                    Player 2 Full Name *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="e.g. Elena Rostova"
-                    value={player2Name}
-                    onChange={(e) => setPlayer2Name(e.target.value)}
-                    className="w-full bg-charcoal border border-border p-2 text-xs text-sand rounded focus:border-pickle focus:outline-none"
-                  />
-                </div>
-              </div>
+              {/* Existing Team Selector with Search Filter */}
+              {teamMode === "existing" && existingTeams.length > 0 ? (
+                <div className="space-y-2.5 bg-card p-3.5 rounded-lg border-2 border-border">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[0.65rem] font-bold uppercase tracking-wider text-pickle">
+                      Select Registered Club Team
+                    </span>
+                    <span className="text-[0.6rem] font-mono text-muted-foreground">
+                      {existingTeams.length} teams available
+                    </span>
+                  </div>
 
-              <div>
-                <label className="text-xs font-bold uppercase tracking-wider text-foreground block mb-1">
-                  Club or Academy (Optional)
-                </label>
-                <input
-                  type="text"
-                  placeholder="e.g. Santiago Pickleball Club, Apex Paddle Academy"
-                  value={club}
-                  onChange={(e) => setClub(e.target.value)}
-                  className="w-full bg-charcoal border border-border p-2 text-xs text-sand rounded focus:border-pickle focus:outline-none"
-                />
+                  {/* Search query input */}
+                  <input
+                    type="text"
+                    placeholder="Search by team, club, or player name..."
+                    value={teamSearchQuery}
+                    onChange={(e) => setTeamSearchQuery(e.target.value)}
+                    className="w-full bg-charcoal border border-border p-2 text-xs text-sand rounded focus:border-pickle focus:outline-none placeholder:text-muted-foreground/60"
+                  />
+
+                  {/* Select team dropdown */}
+                  <select
+                    value={selectedExistingTeam}
+                    onChange={(e) => handleSelectExistingTeam(e.target.value)}
+                    className="w-full bg-charcoal border border-border p-2.5 text-xs text-sand rounded focus:border-pickle focus:outline-none font-medium cursor-pointer"
+                  >
+                    <option value="" disabled>
+                      -- Choose a team from directory ({filteredExistingTeams.length} matches) --
+                    </option>
+                    {filteredExistingTeams.map((t) => (
+                      <option key={t.name} value={t.name}>
+                        {t.name} ({t.club || "Dink Valley"}) &mdash; {t.players.join(" & ")}
+                      </option>
+                    ))}
+                  </select>
+
+                  {selectedExistingTeam && (
+                    <div className="text-[0.65rem] text-pickle font-mono bg-pickle/10 p-2 rounded border border-pickle/30 flex flex-col sm:flex-row sm:items-center justify-between gap-1">
+                      <span>Connected: <strong>{teamName}</strong> ({club || "Dink Valley"})</span>
+                      <span className="text-muted-foreground">Roster pre-filled below &mdash; confirm or edit</span>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                /* New Team Custom Fields */
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div>
+                    <label className="text-xs font-bold uppercase tracking-wider text-foreground block mb-1">
+                      Team Name *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g. Metro Dinkers, Kitchen Krushers"
+                      value={teamName}
+                      onChange={(e) => setTeamName(e.target.value)}
+                      className="w-full bg-charcoal border border-border p-2 text-xs text-sand rounded focus:border-pickle focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-bold uppercase tracking-wider text-foreground block mb-1">
+                      Club or Academy (Optional)
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. Dink Valley, Apex Paddle Club"
+                      value={club}
+                      onChange={(e) => setClub(e.target.value)}
+                      className="w-full bg-charcoal border border-border p-2 text-xs text-sand rounded focus:border-pickle focus:outline-none"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* Players Under Team */}
+              <div className="space-y-2.5 pt-2 border-t border-border/50">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold uppercase tracking-wider text-foreground block">
+                    Players Under Team
+                  </span>
+                  <span className="text-[0.65rem] text-muted-foreground">
+                    Both doubles partners required
+                  </span>
+                </div>
+
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="p-3 bg-card border-2 border-border rounded space-y-1.5">
+                    <div className="flex items-center gap-1.5">
+                      <span className="h-5 w-5 rounded-full bg-pickle/20 border border-pickle/40 text-pickle font-mono text-[0.65rem] font-bold flex items-center justify-center shrink-0">
+                        P1
+                      </span>
+                      <label className="text-xs font-bold uppercase tracking-wider text-foreground block">
+                        Player 1 Full Name *
+                      </label>
+                    </div>
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g. Marcus Vance"
+                      value={player1Name}
+                      onChange={(e) => setPlayer1Name(e.target.value)}
+                      className="w-full bg-charcoal border border-border p-2 text-xs text-sand rounded focus:border-pickle focus:outline-none"
+                    />
+                  </div>
+
+                  <div className="p-3 bg-card border-2 border-border rounded space-y-1.5">
+                    <div className="flex items-center gap-1.5">
+                      <span className="h-5 w-5 rounded-full bg-pickle/20 border border-pickle/40 text-pickle font-mono text-xs font-bold flex items-center justify-center shrink-0">
+                        P2
+                      </span>
+                      <label className="text-xs font-bold uppercase tracking-wider text-foreground block">
+                        Player 2 Full Name *
+                      </label>
+                    </div>
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g. Elena Rostova"
+                      value={player2Name}
+                      onChange={(e) => setPlayer2Name(e.target.value)}
+                      className="w-full bg-charcoal border border-border p-2 text-xs text-sand rounded focus:border-pickle focus:outline-none"
+                    />
+                  </div>
+                </div>
               </div>
+            </div>
 
               <div className="grid gap-3 sm:grid-cols-2">
                 <div>
@@ -359,7 +526,6 @@ export function PublicRegistrationModal({
                   />
                 </div>
               </div>
-            </div>
 
             {/* Payment & Receipt Upload Section */}
             <div className="surface-card p-3.5 border border-border rounded space-y-3 text-xs">
@@ -407,7 +573,7 @@ export function PublicRegistrationModal({
                   </div>
                 ) : (
                   <div>
-                    <label className="relative flex flex-col items-center justify-center border-2 border-dashed border-border hover:border-pickle/70 rounded-lg p-4 bg-charcoal/40 hover:bg-charcoal/70 transition-colors cursor-pointer text-center group">
+                    <label className="relative flex flex-col items-center justify-center border-2 border-dashed border-border hover:border-pickle/70 rounded-lg p-4 bg-card hover:bg-pickle/5 transition-colors cursor-pointer text-center group">
                       <input
                         type="file"
                         accept="image/*"

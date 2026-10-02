@@ -72,6 +72,73 @@ export function slugify(text: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
+export type ExistingClubTeam = {
+  name: string;
+  club?: string;
+  players: string[];
+  appearancesCount: number;
+};
+
+/**
+ * Extract unique existing teams across all tournaments and categories.
+ */
+export function getUniqueClubTeams(): ExistingClubTeam[] {
+  const tournaments = getTournaments();
+  const map = new Map<string, ExistingClubTeam>();
+
+  tournaments.forEach((tourn) => {
+    tourn.categories?.forEach((cat) => {
+      // Collect from verified teams
+      cat.teams?.forEach((team) => {
+        const key = team.name.trim().toLowerCase();
+        if (!key) return;
+        const existing = map.get(key);
+        if (!existing) {
+          map.set(key, {
+            name: team.name.trim(),
+            club: team.club || "Dink Valley",
+            players: team.players ? [...team.players] : [],
+            appearancesCount: 1,
+          });
+        } else {
+          existing.appearancesCount += 1;
+          if (team.club && (!existing.club || existing.club === "Dink Valley")) {
+            existing.club = team.club;
+          }
+          team.players?.forEach((p) => {
+            if (p && !existing.players.includes(p)) {
+              existing.players.push(p);
+            }
+          });
+        }
+      });
+
+      // Collect from pending teams
+      cat.pendingTeams?.forEach((team) => {
+        const key = team.name.trim().toLowerCase();
+        if (!key) return;
+        const existing = map.get(key);
+        if (!existing) {
+          map.set(key, {
+            name: team.name.trim(),
+            club: team.club || "Dink Valley",
+            players: team.players ? [...team.players] : [],
+            appearancesCount: 1,
+          });
+        } else {
+          team.players?.forEach((p) => {
+            if (p && !existing.players.includes(p)) {
+              existing.players.push(p);
+            }
+          });
+        }
+      });
+    });
+  });
+
+  return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
+}
+
 export type NewTournamentInput = {
   name: string;
   slug?: string;

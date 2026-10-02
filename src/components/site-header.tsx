@@ -1,7 +1,9 @@
 import { Link, useRouterState } from "@tanstack/react-router";
 import { useState, useEffect, useRef } from "react";
+import { Download } from "lucide-react";
 import { getAuthenticatedStaff, logoutStaff, type StaffRole } from "@/lib/auth-store";
 import { StaffPortalModal } from "./admin/StaffPortalModal";
+import { triggerPwaInstall } from "./PwaInstallPrompt";
 
 export function SiteHeader() {
   const [authRole, setAuthRole] = useState<StaffRole | null>(null);
@@ -101,6 +103,15 @@ export function SiteHeader() {
               Tournaments
             </Link>
 
+            <button
+              onClick={() => triggerPwaInstall()}
+              className="flex items-center gap-1.5 rounded border border-border bg-charcoal/80 px-3 py-1.5 text-xs font-semibold uppercase tracking-wider text-sand hover:border-pickle hover:text-pickle transition-colors cursor-pointer"
+              title="Install Dink Valley App to your device"
+            >
+              <Download size={13} className="text-pickle" />
+              <span>Install App</span>
+            </button>
+
             {/* Authenticated Staff Badge (Only appears once official logs in via hidden portal) */}
             {authRole && (
               <div className="flex items-center gap-2 pl-2 border-l border-border/60">
@@ -123,35 +134,24 @@ export function SiteHeader() {
             )}
           </nav>
 
-          {/* Mobile nav - Cleaned of public sign-in/register buttons */}
-          <div className="flex items-center gap-2 sm:hidden">
-            <Link
-              to="/"
-              activeOptions={{ exact: true }}
-              className="rounded px-2.5 py-1.5 text-xs font-bold uppercase tracking-wider text-sand/80 transition-colors hover:text-sand"
-              activeProps={{ className: "text-sand" }}
-            >
-              Tournaments
-            </Link>
-
-            {authRole && (
-              <div className="flex items-center gap-1.5">
-                <Link
-                  to={authRole === "admin" ? "/admin" : "/umpire"}
-                  className="flex items-center gap-1.5 rounded bg-primary px-2.5 py-1.5 text-xs font-bold uppercase tracking-wider text-primary-foreground transition-colors hover:bg-brick-deep"
-                >
-                  <span className="h-1.5 w-1.5 rounded-full bg-pickle animate-pulse" />
-                  <span>{authRole === "admin" ? "Admin" : "Umpire"}</span>
-                </Link>
-                <button
-                  onClick={handleLogout}
-                  className="px-1.5 py-1.5 text-[0.65rem] font-bold uppercase tracking-wider text-sand/50 hover:text-sand transition-colors cursor-pointer"
-                >
-                  Exit
-                </button>
-              </div>
-            )}
-          </div>
+          {/* Staff badge — visible on mobile only when logged in */}
+          {authRole && (
+            <div className="flex items-center gap-1.5 sm:hidden">
+              <Link
+                to={authRole === "admin" ? "/admin" : "/umpire"}
+                className="flex items-center gap-1.5 rounded bg-primary px-2.5 py-1.5 text-xs font-bold uppercase tracking-wider text-primary-foreground transition-colors hover:bg-brick-deep"
+              >
+                <span className="h-1.5 w-1.5 rounded-full bg-pickle animate-pulse" />
+                <span>{authRole === "admin" ? "Admin" : "Umpire"}</span>
+              </Link>
+              <button
+                onClick={handleLogout}
+                className="px-1.5 py-1.5 text-[0.65rem] font-bold uppercase tracking-wider text-sand/50 hover:text-sand transition-colors cursor-pointer"
+              >
+                Exit
+              </button>
+            </div>
+          )}
         </div>
       </header>
 
@@ -181,8 +181,18 @@ export function SiteFooter() {
           <span className="font-display text-xl text-sand block">Dink Valley Pickleball Club</span>
           <span>Santiago City, Philippines &middot; Courts open daily 6AM - 10PM</span>
         </div>
-        <div className="text-xs text-sand/40 font-mono">
-          Tournament Official System &middot; Santiago City
+        <div className="flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-5 text-xs text-sand/60">
+          <button
+            onClick={() => triggerPwaInstall()}
+            className="flex items-center gap-1.5 font-bold uppercase tracking-wider text-sand/80 hover:text-pickle transition-colors cursor-pointer text-left"
+          >
+            <Download size={13} className="text-pickle shrink-0" />
+            <span>Install App (PWA)</span>
+          </button>
+          <span className="hidden sm:inline text-sand/30">&middot;</span>
+          <span className="font-mono text-sand/40">
+            Tournament Official System &middot; Santiago City
+          </span>
         </div>
       </div>
     </footer>

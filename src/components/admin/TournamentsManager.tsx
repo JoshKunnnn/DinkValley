@@ -504,7 +504,7 @@ export function TournamentsManager({
               </div>
 
               {/* Add Custom Category */}
-              <div className="p-4 rounded-lg border border-border bg-muted/40 space-y-3">
+              <div className="p-4 rounded-xl border-2 border-border bg-card space-y-3 shadow-xs">
                 <span className="block text-xs uppercase tracking-wider text-foreground font-bold">
                   + Add Custom Division &amp; Pricing
                 </span>
@@ -736,38 +736,38 @@ export function TournamentsManager({
                           <span
                             className={`px-2.5 py-0.5 rounded text-[0.65rem] font-bold uppercase tracking-widest ${
                               t.status === "Live"
-                                ? "bg-pickle/15 text-pickle border border-pickle/40"
+                                ? "bg-pickle/15 text-pickle border-2 border-pickle/40"
                                 : t.status === "Registration open"
-                                ? "bg-muted text-foreground/80 border border-border"
-                                : "bg-muted text-muted-foreground"
+                                ? "bg-pickle/10 text-pickle border-2 border-pickle/30"
+                                : "bg-card text-foreground font-bold border-2 border-border"
                             }`}
                           >
                             {t.status}
                           </span>
                           {isSelected && (
-                            <span className="px-2.5 py-0.5 rounded text-[0.65rem] font-bold uppercase tracking-widest bg-brick/15 text-brick border border-brick/40">
+                            <span className="px-2.5 py-0.5 rounded text-[0.65rem] font-bold uppercase tracking-widest bg-brick/15 text-brick border-2 border-brick/40">
                               Active in Console
                             </span>
                           )}
                         </div>
-                        <p className="text-sm text-muted-foreground">{t.tagline}</p>
+                        <p className="text-sm text-foreground/80 font-medium">{t.tagline}</p>
 
-                        <div className="flex flex-wrap gap-x-5 gap-y-1.5 text-xs text-muted-foreground pt-1.5">
+                        <div className="flex flex-wrap gap-x-5 gap-y-1.5 text-xs text-foreground/80 font-medium pt-1.5">
                           <span>
-                            <strong className="text-foreground font-semibold">Dates:</strong> {t.date}
+                            <strong className="text-foreground font-bold">Dates:</strong> {t.date}
                           </span>
                           <span>
-                            <strong className="text-foreground font-semibold">Venue:</strong> {t.venue}
+                            <strong className="text-foreground font-bold">Venue:</strong> {t.venue}
                           </span>
                           <span>
-                            <strong className="text-foreground font-semibold">Pricing:</strong> Category-based (Internal)
+                            <strong className="text-foreground font-bold">Pricing:</strong> Category-based (Internal)
                           </span>
                         </div>
                       </div>
 
                       {/* Quick Status Control */}
                       <div className="flex items-center gap-2 flex-shrink-0">
-                        <label className="text-[0.65rem] uppercase tracking-wider text-muted-foreground font-bold">
+                        <label className="text-[0.65rem] uppercase tracking-wider text-foreground font-bold">
                           Status:
                         </label>
                         <select
@@ -775,7 +775,7 @@ export function TournamentsManager({
                           onChange={(e) =>
                             handleStatusChange(t.slug, e.target.value as Tournament["status"])
                           }
-                          className="rounded border border-border bg-background px-3 py-1.5 text-xs text-foreground focus:border-pickle focus:outline-none font-medium shadow-xs"
+                          className="rounded-md border-2 border-border bg-card px-3 py-1.5 text-xs text-foreground focus:border-pickle focus:outline-none font-bold shadow-xs"
                         >
                           <option value="Registration open">Registration open</option>
                           <option value="Live">Live</option>
@@ -785,7 +785,7 @@ export function TournamentsManager({
                     </div>
 
                     {/* Categories Bar */}
-                    <div className="mt-5 pt-3.5 border-t border-border flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                    <div className="mt-5 pt-3.5 border-t-2 border-border flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
                       <div className="flex items-center gap-2 flex-wrap">
                         <span className="text-[0.65rem] uppercase tracking-wider text-pickle font-bold">
                           Categories ({t.categories?.length || 0}):
@@ -793,7 +793,7 @@ export function TournamentsManager({
                         {t.categories?.map((c) => (
                           <span
                             key={c.id}
-                            className="bg-muted/50 border border-border px-2.5 py-1 rounded text-[0.7rem] text-foreground/80 font-medium"
+                            className="bg-card border-2 border-border px-2.5 py-1 rounded-md text-[0.7rem] text-foreground font-bold shadow-xs"
                           >
                             {c.label} {c.fee ? `· ${c.fee}` : ""} ({c.teams?.length || 0} teams)
                           </span>

@@ -1456,7 +1456,7 @@ function MainDrawKnockoutMatchCard({
         <div className="flex items-center gap-2 min-w-0 pr-2">
           {isAServing && <span className="h-2 w-2 rounded-full bg-pickle shrink-0 animate-pulse" />}
           {match.seedA && (
-            <span className="text-[0.6rem] font-bold font-mono px-1.5 py-0.5 bg-muted text-foreground rounded shrink-0">
+            <span className="text-[0.6rem] font-bold font-mono px-1.5 py-0.5 bg-card border border-border text-foreground rounded shrink-0">
               {match.seedA}
             </span>
           )}
@@ -1472,7 +1472,7 @@ function MainDrawKnockoutMatchCard({
         <div className="flex items-center gap-2 min-w-0 pr-2">
           {isBServing && <span className="h-2 w-2 rounded-full bg-pickle shrink-0 animate-pulse" />}
           {match.seedB && (
-            <span className="text-[0.6rem] font-bold font-mono px-1.5 py-0.5 bg-muted text-foreground rounded shrink-0">
+            <span className="text-[0.6rem] font-bold font-mono px-1.5 py-0.5 bg-card border border-border text-foreground rounded shrink-0">
               {match.seedB}
             </span>
           )}
@@ -1768,7 +1768,7 @@ function BracketCard({
       {/* Bracket header — always visible */}
       <button
         onClick={() => setOpen((o) => !o)}
-        className="w-full flex items-center justify-between px-4 py-4 sm:px-5 sm:py-5 hover:bg-charcoal/30 transition-colors text-left"
+        className="w-full flex items-center justify-between px-4 py-4 sm:px-5 sm:py-5 hover:bg-pickle/5 transition-colors text-left"
         aria-expanded={open}
       >
         <div className="flex items-center gap-3">
@@ -1978,7 +1978,7 @@ function BracketCard({
                         </span>
                       )}
                       {isFinal && (
-                        <span className="font-bold text-foreground font-mono text-[0.6rem] bg-muted/40 px-2 py-0.5 rounded border border-border">
+                        <span className="font-bold text-foreground font-mono text-[0.6rem] bg-card px-2 py-0.5 rounded border-2 border-border">
                           FINAL
                         </span>
                       )}

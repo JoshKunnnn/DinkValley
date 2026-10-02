@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Offline | Dink Valley Pickleball Club</title>
+  <meta name="theme-color" content="#121212" />
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      background-color: #121212;
+      color: #f4f1ea;
+      font-family: 'Barlow', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 1.5rem;
+      text-align: center;
+    }
+    .card {
+      max-width: 440px;
+      width: 100%;
+      background: #18181b;
+      border: 2px solid #708a42;
+      border-radius: 12px;
+      padding: 2.25rem 1.75rem;
+      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.7);
+    }
+    .logo {
+      width: 72px;
+      height: 72px;
+      border-radius: 50%;
+      object-fit: cover;
+      border: 3px solid #b93723;
+      margin-bottom: 1.25rem;
+    }
+    .badge {
+      display: inline-block;
+      font-size: 0.65rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.28em;
+      color: #708a42;
+      margin-bottom: 0.5rem;
+    }
+    h1 {
+      font-size: 1.75rem;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      margin-bottom: 0.75rem;
+      color: #f4f1ea;
+    }
+    p {
+      font-size: 0.875rem;
+      line-height: 1.5;
+      color: rgba(244, 241, 234, 0.7);
+      margin-bottom: 1.75rem;
+    }
+    .actions {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+    .btn-primary {
+      background-color: #b93723;
+      color: #f4f1ea;
+      border: none;
+      padding: 0.75rem 1.5rem;
+      font-size: 0.85rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.15em;
+      border-radius: 6px;
+      cursor: pointer;
+      text-decoration: none;
+      transition: background-color 0.2s ease;
+    }
+    .btn-primary:hover {
+      background-color: #982c1b;
+    }
+    .btn-secondary {
+      background: transparent;
+      color: rgba(244, 241, 234, 0.7);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      padding: 0.65rem 1.25rem;
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.15em;
+      border-radius: 6px;
+      cursor: pointer;
+      text-decoration: none;
+      transition: all 0.2s ease;
+    }
+    .btn-secondary:hover {
+      color: #f4f1ea;
+      border-color: rgba(255, 255, 255, 0.4);
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <img src="/DinkValley.jpg" alt="Dink Valley" class="logo" />
+    <div>
+      <span class="badge">Offline Mode</span>
+      <h1>Connection Unavailable</h1>
+      <p>
+        You are currently offline. Dink Valley requires an internet connection to sync live tournament brackets and matches. Your local device cache will reconnect as soon as signal is restored.
+      </p>
+    </div>
+    <div class="actions">
+      <button onclick="window.location.reload()" class="btn-primary">
+        Retry Connection
+      </button>
+      <a href="/" class="btn-secondary">
+        Return to Home
+      </a>
+    </div>
+  </div>
+</body>
+</html>

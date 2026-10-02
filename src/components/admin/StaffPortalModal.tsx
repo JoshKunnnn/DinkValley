@@ -176,13 +176,13 @@ export function StaffPortalModal({ isOpen, onClose }: StaffPortalModalProps) {
         </div>
 
         {/* Tab Switcher */}
-        <div className="flex border-b border-border bg-charcoal/50 text-xs font-bold uppercase tracking-wider">
+        <div className="flex border-b-2 border-border bg-card text-xs font-bold uppercase tracking-wider">
           <button
             onClick={() => setTab("signin")}
             className={`flex-1 py-3 text-center transition-colors cursor-pointer border-b-2 ${
               tab === "signin"
-                ? "border-pickle text-sand bg-card font-bold"
-                : "border-transparent text-sand/60 hover:text-sand"
+                ? "border-pickle text-pickle bg-pickle/10 font-bold"
+                : "border-transparent text-foreground/70 hover:text-foreground hover:bg-pickle/5"
             }`}
           >
             Staff Sign In
@@ -191,8 +191,8 @@ export function StaffPortalModal({ isOpen, onClose }: StaffPortalModalProps) {
             onClick={() => setTab("register")}
             className={`flex-1 py-3 text-center transition-colors cursor-pointer border-b-2 ${
               tab === "register"
-                ? "border-pickle text-sand bg-card font-bold"
-                : "border-transparent text-sand/60 hover:text-sand"
+                ? "border-pickle text-pickle bg-pickle/10 font-bold"
+                : "border-transparent text-foreground/70 hover:text-foreground hover:bg-pickle/5"
             }`}
           >
             Register Official

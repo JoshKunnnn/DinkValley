@@ -698,11 +698,18 @@ export function BracketDraw({
 
       {/* ── Interactive Bracket Step Navigator ───────────────── */}
       {hasTeams && groups.length > 0 && (
-        <div className="flex items-center gap-2 overflow-x-auto pb-2 border-b border-border/60">
-          <span className="text-[0.65rem] uppercase tracking-widest text-muted-foreground font-bold mr-2 whitespace-nowrap">
-            Ceremony Sequence:
-          </span>
-          <div className="flex items-center gap-1.5 flex-nowrap">
+        <div className="border-2 border-border bg-card rounded-xl p-3.5 space-y-2.5 shadow-xs">
+          <div className="flex items-center justify-between">
+            <span className="text-[0.65rem] uppercase tracking-widest text-foreground font-bold">
+              Ceremony Sequence ({drawnCount}/{groups.length} Drawn)
+            </span>
+            <span className="text-[0.65rem] font-mono text-pickle font-bold">
+              {isAllDone ? "Ceremony Complete" : nextBracketLetter ? `Next: Bracket ${nextBracketLetter}` : ""}
+            </span>
+          </div>
+
+          {/* Responsive grid — wraps cleanly on mobile into 4 columns without horizontal scrolling */}
+          <div className="grid grid-cols-4 sm:flex sm:flex-wrap gap-1.5">
             {groups.map((grp, idx) => {
               const isCurrentDrawing = drawingBracketIdx === idx;
               const isGroupDrawn = grp.isDrawn;
@@ -713,17 +720,17 @@ export function BracketDraw({
                   key={grp.letter}
                   onClick={() => !isGroupDrawn && !isAnimating && drawSingleBracket(idx)}
                   disabled={isAnimating || isGroupDrawn}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-sm border transition-all select-none ${isCurrentDrawing
-                      ? "border-pickle bg-pickle text-sand shadow-md shadow-pickle/25 animate-pulse"
+                  className={`flex flex-col sm:flex-row items-center justify-center gap-0.5 sm:gap-1.5 py-2 px-1 sm:px-3 text-xs font-bold rounded border-2 transition-all select-none ${isCurrentDrawing
+                      ? "border-pickle bg-pickle text-white shadow-md shadow-pickle/25 animate-pulse"
                       : isGroupDrawn
                         ? "border-pickle/40 bg-pickle/15 text-pickle cursor-default"
                         : isNext
-                          ? "border-brick bg-brick text-sand shadow-sm hover:bg-brick-deep cursor-pointer scale-105"
-                          : "border-border bg-charcoal/40 text-muted-foreground/70 hover:border-border hover:text-foreground cursor-pointer"
+                          ? "border-brick bg-brick text-white shadow-sm hover:bg-brick-deep cursor-pointer scale-[1.02]"
+                          : "border-border bg-card text-foreground font-bold hover:border-pickle hover:text-pickle cursor-pointer"
                     }`}
                 >
-                  <span className="font-display text-sm leading-none">{grp.letter}</span>
-                  <span className="text-[0.65rem] uppercase">
+                  <span className="font-display text-base sm:text-sm leading-none">{grp.letter}</span>
+                  <span className="text-[0.6rem] sm:text-[0.65rem] uppercase font-sans tracking-tight truncate">
                     {isCurrentDrawing ? "Drawing…" : isGroupDrawn ? "Ready" : isNext ? "Next" : "Pending"}
                   </span>
                 </button>
@@ -929,10 +936,10 @@ function BracketCard({
 
   return (
     <div
-      className={`flex flex-col overflow-hidden border transition-all duration-300 rounded-sm ${isActive
+      className={`flex flex-col overflow-hidden border-2 transition-all duration-300 rounded-xl shadow-xs ${isActive
           ? "border-pickle shadow-xl shadow-pickle/20 scale-[1.02] ring-2 ring-pickle"
           : isDrawn
-            ? "border-pickle/50 bg-charcoal/20"
+            ? "border-pickle/50 bg-card"
             : isNext
               ? "border-brick/80 shadow-md shadow-brick/10 scale-[1.01]"
               : "border-border/80 opacity-70 hover:opacity-100"
@@ -1007,7 +1014,7 @@ function BracketCard({
       </div>
 
       {/* ── Team Slots List ── */}
-      <div className="flex flex-col divide-y divide-border/60 bg-background min-h-[140px]">
+      <div className="flex flex-col divide-y divide-border/60 bg-card min-h-[140px]">
         {group.slots.length === 0 ? (
           Array.from({ length: 4 }, (_, i) => (
             <div key={i} className="flex items-center gap-3 px-4 py-3 opacity-20">
@@ -1043,8 +1050,8 @@ function TeamSlot({
         } ${slot.revealed && isGroupActive
           ? "bg-pickle/10 border-l-2 border-l-pickle"
           : slot.revealed
-            ? "border-l-2 border-l-transparent bg-background"
-            : "bg-background/50"
+            ? "border-l-2 border-l-transparent bg-card"
+            : "bg-card/50"
         }`}
     >
       {/* Seed number */}
@@ -1062,7 +1069,7 @@ function TeamSlot({
             <span className="block font-semibold text-foreground truncate text-xs sm:text-sm">
               {slot.team.name}
             </span>
-            <span className="block text-[0.65rem] text-muted-foreground truncate">
+            <span className="block text-[0.65rem] text-foreground/80 font-bold truncate">
               {slot.team.players.join(" & ")}
             </span>
           </>
