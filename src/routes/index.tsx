@@ -1,7 +1,10 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
-import { useState, useEffect } from "react";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { useState, useEffect, useMemo } from "react";
 import { useTournamentStore } from "@/lib/tournament-store";
+import { useMatchStore } from "@/lib/match-store";
 import { dbGetTournaments } from "@/lib/supabase-service";
+import type { Tournament } from "@/data/tournaments";
+import { CategorySheet } from "@/components/public/CategorySheet";
 import {
   ChevronDown,
   ChevronUp,
@@ -14,6 +17,7 @@ import {
   MonitorPlay,
 } from "lucide-react";
 import { FacilityCarousel } from "@/components/FacilityCarousel";
+import { QualificationsCarousel } from "@/components/public/QualificationsCarousel";
 
 export const Route = createFileRoute("/")({
   loader: async () => {
@@ -41,117 +45,30 @@ export const Route = createFileRoute("/")({
   component: Index,
 });
 
-const statusStyles: Record<string, string> = {
-  Live: "bg-primary text-primary-foreground",
-  "Registration open": "bg-accent text-accent-foreground",
-  Completed: "bg-muted text-muted-foreground",
-};
+function getTournamentStatusDisplay(status: string) {
+  const s = (status || "").toLowerCase();
+  if (s.includes("live") || s.includes("play")) {
+    return {
+      label: "Playing Now",
+      style: "bg-pickle text-sand border-pickle",
+      dot: true,
+    };
+  }
+  if (s.includes("complete") || s.includes("finish")) {
+    return {
+      label: "Finished",
+      style: "bg-charcoal text-sand/75 border-border",
+      dot: false,
+    };
+  }
+  return {
+    label: "Open for Sign-up",
+    style: "bg-brick text-sand border-brick",
+    dot: false,
+  };
+}
 
-/* ── Classification data ── */
-const CLASSIFICATIONS = [
-  {
-    key: "beginner",
-    label: "Beginner",
-    borderColor: "border-l-[#6bbb6b]",
-    textColor: "text-[#6bbb6b]",
-    badgeBorder: "border-[#6bbb6b]",
-    badgeBg: "bg-[#6bbb6b]/10",
-    dot: "bg-[#6bbb6b]",
-    rating: "DUPR 1.0 – 2.5",
-    criteria: [
-      "Has just started playing pickleball (less than 6 months).",
-      "Still learning dinking, serving, and basic rally consistency.",
-      "Has little to no competitive match experience.",
-      "Relies on power over placement with inconsistent shots.",
-    ],
-    tip: "This is your welcome level. Come learn, enjoy, and grow your game.",
-  },
-  {
-    key: "novice",
-    label: "Novice",
-    borderColor: "border-l-[#7ecb7e]",
-    textColor: "text-[#7ecb7e]",
-    badgeBorder: "border-[#7ecb7e]",
-    badgeBg: "bg-[#7ecb7e]/10",
-    dot: "bg-[#7ecb7e]",
-    rating: "DUPR 2.5 – 3.5",
-    criteria: [
-      "Can maintain a rally with moderate consistency.",
-      "Understands basic pickleball rules, scoring, and court zones.",
-      "Can serve with some accuracy and return with control.",
-      "Aware of the non-volley zone (kitchen) rules and dink shots.",
-    ],
-    tip: "You are past the learning curve and developing a real game.",
-  },
-  {
-    key: "intermediate",
-    label: "Intermediate",
-    borderColor: "border-l-pickle",
-    textColor: "text-pickle",
-    badgeBorder: "border-pickle",
-    badgeBg: "bg-pickle/10",
-    dot: "bg-pickle",
-    rating: "DUPR 3.5 – 4.5",
-    criteria: [
-      "Demonstrates consistent third-shot drops and transition play.",
-      "Applies strategic positioning, stacking, and court awareness.",
-      "Capable of sustained dink exchanges and net play.",
-      "Has participated in local or club-level competitive play.",
-    ],
-    tip: "You are a well-rounded player with tactical awareness.",
-  },
-  {
-    key: "advance",
-    label: "Advance",
-    borderColor: "border-l-sand",
-    textColor: "text-sand",
-    badgeBorder: "border-sand",
-    badgeBg: "bg-sand/10",
-    dot: "bg-sand",
-    rating: "DUPR 4.5 – 5.5+",
-    criteria: [
-      "Executes high-level shot selection and spin variations.",
-      "Dominates the NVZ line and controls pace of play.",
-      "Competes regularly at regional or national-level events.",
-      "Reads opponent patterns and adjusts strategy mid-match.",
-    ],
-    tip: "Elite competitive play at the highest club and regional tiers.",
-  },
-  {
-    key: "40plus",
-    label: "40+",
-    borderColor: "border-l-brick",
-    textColor: "text-brick",
-    badgeBorder: "border-brick",
-    badgeBg: "bg-brick/10",
-    dot: "bg-brick",
-    rating: "Age 40 and above",
-    criteria: [
-      "Open to all skill levels — experience is not the qualifier.",
-      "Participants must be 40 years of age or older at time of event.",
-      "Valid government ID verifying age required at registration.",
-      "Play style and category pairing adjusted for age bracket.",
-    ],
-    tip: "Celebrate experience on the court. Every decade counts.",
-  },
-  {
-    key: "50plus",
-    label: "50+",
-    borderColor: "border-l-[#c97a3c]",
-    textColor: "text-[#c97a3c]",
-    badgeBorder: "border-[#c97a3c]",
-    badgeBg: "bg-[#c97a3c]/10",
-    dot: "bg-[#c97a3c]",
-    rating: "Age 50 and above",
-    criteria: [
-      "Open to all skill levels — experience is not the qualifier.",
-      "Participants must be 50 years of age or older at time of event.",
-      "Valid government ID verifying age required at registration.",
-      "Matches are structured for comfort, sport, and camaraderie.",
-    ],
-    tip: "The best competitors get better with age. This is your court.",
-  },
-];
+
 
 /* ── FAQ data ── */
 const FAQS = [
@@ -195,6 +112,20 @@ function Index() {
   const displayTournaments =
     tournaments.length > 0 ? tournaments : (loaderTournaments ?? []);
   const [openFaq, setOpenFaq] = useState<number | null>(null);
+
+  const navigate = useNavigate();
+  const { matches } = useMatchStore();
+  const [selectedTournament, setSelectedTournament] = useState<Tournament | null>(null);
+
+  const liveCategoryIds = useMemo(() => {
+    const set = new Set<string>();
+    matches.forEach((m) => {
+      if (m.status === "live" && m.categoryId) {
+        set.add(m.categoryId);
+      }
+    });
+    return set;
+  }, [matches]);
 
   useEffect(() => {
     let timer: NodeJS.Timeout | null = null;
@@ -320,103 +251,55 @@ function Index() {
             </p>
           </div>
         ) : (
-          <div className="mt-6 grid gap-4 sm:mt-8 sm:gap-5 md:grid-cols-2 lg:grid-cols-3">
-            {displayTournaments.map((t) => (
-              <Link
-                key={t.slug}
-                to="/tournaments/$slug"
-                params={{ slug: t.slug }}
-                className="surface-card group flex flex-col p-5 transition-transform hover:-translate-y-1 sm:p-6"
-              >
-                <span
-                  className={`self-start px-2 py-1 text-[0.65rem] font-bold uppercase tracking-widest ${statusStyles[t.status]}`}
+          <div className="mt-6 grid grid-cols-1 gap-4 sm:mt-8 sm:gap-5 md:grid-cols-2 lg:grid-cols-3 w-full">
+            {displayTournaments.map((t) => {
+              const statusInfo = getTournamentStatusDisplay(t.status);
+              return (
+                <button
+                  key={t.slug}
+                  type="button"
+                  onClick={() => setSelectedTournament(t)}
+                  className="surface-card group w-full p-5 sm:p-6 text-left transition-all hover:border-pickle hover:shadow-md rounded-2xl border-2 border-border cursor-pointer flex flex-col justify-between min-h-[10rem] sm:min-h-[11rem]"
                 >
-                  {t.status}
-                </span>
-                <h3 className="mt-3 text-2xl leading-tight group-hover:text-primary sm:mt-4 sm:text-3xl">
-                  {t.name}
-                </h3>
-                <p className="mt-2 flex-1 text-sm text-muted-foreground">{t.tagline}</p>
-                <dl className="mt-4 space-y-1 border-t border-border pt-3 text-sm sm:mt-5 sm:pt-4">
-                  <div className="flex justify-between gap-2">
-                    <dt className="text-muted-foreground">Dates</dt>
-                    <dd className="font-semibold text-right">{t.date}</dd>
+                  <div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span
+                        className={`inline-flex items-center gap-1.5 px-3 py-1 text-xs font-bold uppercase tracking-wider rounded-full border ${statusInfo.style}`}
+                      >
+                        {statusInfo.dot && (
+                          <span className="h-2 w-2 rounded-full bg-sand animate-pulse" />
+                        )}
+                        <span>{statusInfo.label}</span>
+                      </span>
+                      <span className="text-xs font-mono font-bold uppercase tracking-wider text-pickle sm:opacity-0 group-hover:opacity-100 transition-opacity">
+                        Pick Category &rsaquo;
+                      </span>
+                    </div>
+
+                    <h3 className="mt-3 font-display text-2xl sm:text-3xl text-foreground leading-tight group-hover:text-pickle transition-colors">
+                      {t.name}
+                    </h3>
                   </div>
-                  <div className="flex justify-between gap-2">
-                    <dt className="text-muted-foreground">Categories</dt>
-                    <dd className="font-semibold">{t.categories?.length || 0}</dd>
+
+                  <div className="mt-4 pt-3 border-t border-border flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1 text-sm sm:text-base text-foreground/75 font-sans">
+                    <div className="font-semibold text-foreground">
+                      {t.date}
+                    </div>
+                    <div className="text-xs sm:text-sm text-foreground/60 truncate">
+                      {t.venue}, {t.city}
+                    </div>
                   </div>
-                  <div className="flex justify-between gap-2">
-                    <dt className="text-muted-foreground">Teams</dt>
-                    <dd className="font-semibold">{t.teamsCount || 0}</dd>
-                  </div>
-                </dl>
-              </Link>
-            ))}
+                </button>
+              );
+            })}
           </div>
         )}
       </section>
 
-      {/* ── Player Classification Guidelines ── */}
-      <section id="guidelines" className="relative bg-charcoal overflow-hidden scroll-mt-16 sm:scroll-mt-20">
-        <div className="absolute inset-0 court-lines opacity-20 pointer-events-none" />
+      {/* ── Official Category Qualifications Carousel ── */}
+      <QualificationsCarousel />
 
-        <div className="relative mx-auto max-w-6xl px-4 py-14 sm:px-5 sm:py-16">
-          <div className="text-center mb-10 sm:mb-14">
-            <span className="inline-block border border-pickle px-3 py-1 text-xs font-bold uppercase tracking-[0.28em] text-pickle">
-              Know Your Level
-            </span>
-            <h2 className="mt-3 font-display text-4xl text-sand sm:text-5xl lg:text-6xl">
-              Player Classifications
-            </h2>
-            <p className="mt-3 max-w-2xl mx-auto text-sm text-sand/70 sm:text-base">
-              Choose the right category when you register. Classifications are based on skill, DUPR
-              rating, and age bracket. Our committee reserves the right to adjust placement.
-            </p>
-          </div>
 
-          <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
-            {CLASSIFICATIONS.map((cls) => (
-              <div
-                key={cls.key}
-                className={`relative rounded-xl border-l-4 ${cls.borderColor} border-t border-r border-b border-border bg-charcoal/60 p-5 flex flex-col gap-3 transition-all hover:bg-charcoal/80`}
-              >
-                <div className="flex items-start justify-between gap-2">
-                  <h3 className={`font-display text-3xl sm:text-4xl ${cls.textColor}`}>
-                    {cls.label}
-                  </h3>
-                  <span
-                    className={`text-[0.65rem] font-bold font-mono uppercase tracking-wider px-2 py-1 rounded border ${cls.badgeBorder} ${cls.badgeBg} ${cls.textColor} whitespace-nowrap`}
-                  >
-                    {cls.rating}
-                  </span>
-                </div>
-
-                <ul className="space-y-1.5 text-xs text-sand/80 leading-relaxed">
-                  {cls.criteria.map((c, i) => (
-                    <li key={i} className="flex items-start gap-2">
-                      <span
-                        className={`h-1.5 w-1.5 rounded-full ${cls.dot} flex-shrink-0 mt-1.5`}
-                      />
-                      {c}
-                    </li>
-                  ))}
-                </ul>
-
-                <div className="mt-auto pt-3 border-t border-border text-[0.72rem] italic text-sand/60">
-                  &ldquo;{cls.tip}&rdquo;
-                </div>
-              </div>
-            ))}
-          </div>
-
-          <p className="mt-8 text-center text-xs text-sand/50 max-w-2xl mx-auto">
-            DUPR (Dynamic Universal Pickleball Rating) scores are self-reported or pulled from
-            official match records. Players without a DUPR rating may self-classify, subject to
-            tournament committee review.
-          </p>
-        </div>
-      </section>
 
       {/* ── FAQ ── */}
       <section id="faq" className="mx-auto max-w-3xl px-4 py-14 sm:px-5 sm:py-16 scroll-mt-16 sm:scroll-mt-20">
@@ -435,11 +318,10 @@ function Index() {
             return (
               <div
                 key={idx}
-                className={`border-2 rounded-xl overflow-hidden transition-all ${
-                  isOpen
+                className={`border-2 rounded-xl overflow-hidden transition-all ${isOpen
                     ? "border-pickle bg-card shadow-sm"
                     : "border-border bg-card hover:border-pickle/50"
-                }`}
+                  }`}
               >
                 <button
                   id={`faq-${idx}`}
@@ -466,6 +348,26 @@ function Index() {
           })}
         </div>
       </section>
+
+      {/* Step 2 – Categories bottom sheet */}
+      {selectedTournament && (
+        <CategorySheet
+          open={Boolean(selectedTournament)}
+          onClose={() => setSelectedTournament(null)}
+          tournamentName={selectedTournament.name}
+          categories={selectedTournament.categories ?? []}
+          liveCategoryIds={liveCategoryIds}
+          onSelect={(categoryId) => {
+            const slug = selectedTournament.slug;
+            setSelectedTournament(null);
+            navigate({
+              to: "/tournaments/$slug",
+              params: { slug },
+              search: { category: categoryId },
+            });
+          }}
+        />
+      )}
     </div>
   );
 }

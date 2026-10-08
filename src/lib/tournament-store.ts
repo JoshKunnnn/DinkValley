@@ -209,6 +209,7 @@ export function updateTournament(slug: string, updates: Partial<Tournament>): To
   const index = current.findIndex((t) => t.slug === slug);
   if (index === -1) return undefined;
 
+  const oldSlug = current[index]!.slug;
   const updatedItem: Tournament = {
     ...current[index]!,
     ...updates,
@@ -219,6 +220,12 @@ export function updateTournament(slug: string, updates: Partial<Tournament>): To
 
   current[index] = updatedItem;
   saveTournaments(current);
+
+  // If slug was changed, delete the old slug record from Supabase
+  if (updates.slug && updates.slug !== oldSlug) {
+    dbDeleteTournament(oldSlug).catch(() => {});
+  }
+
   // Async sync to Supabase
   dbSaveTournament(updatedItem).catch((err) =>
     console.warn("[Supabase] Failed to persist updated tournament:", err)

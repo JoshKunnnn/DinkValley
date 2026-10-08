@@ -160,7 +160,10 @@
     font-family: var(--font-sans);
   }
 
-  h1, h2, h3, .font-display {
+  h1,
+  h2,
+  h3,
+  .font-display {
     font-family: var(--font-display);
     letter-spacing: 0.01em;
   }
@@ -180,28 +183,65 @@
 }
 
 @keyframes scan-line {
-  0%   { transform: translateX(-100%); }
-  100% { transform: translateX(100%); }
+  0% {
+    transform: translateX(-100%);
+  }
+
+  100% {
+    transform: translateX(100%);
+  }
 }
 
 @keyframes slot-in {
-  from { opacity: 0; transform: translateY(10px); }
-  to   { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 /* ── Coin flip animation ── */
 @keyframes coin-flip {
-  0%   { transform: perspective(400px) rotateY(0deg) scaleY(1); }
-  25%  { transform: perspective(400px) rotateY(90deg) scaleY(0.6); }
-  50%  { transform: perspective(400px) rotateY(180deg) scaleY(1); }
-  75%  { transform: perspective(400px) rotateY(270deg) scaleY(0.6); }
-  100% { transform: perspective(400px) rotateY(360deg) scaleY(1); }
+  0% {
+    transform: perspective(400px) rotateY(0deg) scaleY(1);
+  }
+
+  25% {
+    transform: perspective(400px) rotateY(90deg) scaleY(0.6);
+  }
+
+  50% {
+    transform: perspective(400px) rotateY(180deg) scaleY(1);
+  }
+
+  75% {
+    transform: perspective(400px) rotateY(270deg) scaleY(0.6);
+  }
+
+  100% {
+    transform: perspective(400px) rotateY(360deg) scaleY(1);
+  }
 }
 
 @keyframes coin-land {
-  0%   { transform: perspective(400px) rotateY(0deg) scale(1.15); box-shadow: 0 0 0 0 oklch(0.75 0.18 90 / 0.6); }
-  60%  { transform: perspective(400px) rotateY(0deg) scale(1.18); box-shadow: 0 0 28px 8px oklch(0.75 0.18 90 / 0.4); }
-  100% { transform: perspective(400px) rotateY(0deg) scale(1.1);  box-shadow: 0 0 16px 4px oklch(0.75 0.18 90 / 0.25); }
+  0% {
+    transform: perspective(400px) rotateY(0deg) scale(1.15);
+    box-shadow: 0 0 0 0 oklch(0.75 0.18 90 / 0.6);
+  }
+
+  60% {
+    transform: perspective(400px) rotateY(0deg) scale(1.18);
+    box-shadow: 0 0 28px 8px oklch(0.75 0.18 90 / 0.4);
+  }
+
+  100% {
+    transform: perspective(400px) rotateY(0deg) scale(1.1);
+    box-shadow: 0 0 16px 4px oklch(0.75 0.18 90 / 0.25);
+  }
 }
 
 .coin-flip {
@@ -222,4 +262,47 @@
 .no-scrollbar {
   -ms-overflow-style: none !important;
   scrollbar-width: none !important;
+}
+
+/* ── Accessible text size scale for elders & kids ── */
+html.dv-large-text {
+  font-size: 118.75%;
+}
+
+/* ── Mobile sheet slide-up animation ── */
+@keyframes sheet-up {
+  from {
+    transform: translateY(100%);
+    opacity: 0.9;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.sheet-up {
+  animation: sheet-up 0.28s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes fade-in-soft {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.fade-in-soft {
+  animation: fade-in-soft 0.2s ease-out forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sheet-up,
+  .fade-in-soft {
+    animation: none !important;
+  }
 }

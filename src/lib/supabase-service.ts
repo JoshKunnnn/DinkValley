@@ -278,7 +278,24 @@ export async function dbSaveTournament(t: Tournament): Promise<boolean> {
 
     const tournamentId = tourneyRow.id;
 
-    // 2. Upsert categories
+    // 2. Clean up any categories that were deleted/removed
+    const { data: existingCats } = await supabase
+      .from("categories")
+      .select("id, category_slug")
+      .eq("tournament_id", tournamentId);
+
+    if (existingCats && existingCats.length > 0) {
+      const activeSlugsSet = new Set(t.categories.map((c) => c.id));
+      const toDeleteIds = existingCats
+        .filter((ec) => !activeSlugsSet.has(ec.category_slug))
+        .map((ec) => ec.id);
+      if (toDeleteIds.length > 0) {
+        await supabase.from("teams").delete().in("category_id", toDeleteIds);
+        await supabase.from("categories").delete().in("id", toDeleteIds);
+      }
+    }
+
+    // 3. Upsert categories
     for (const cat of t.categories) {
       const { data: catRow, error: cErr } = await supabase
         .from("categories")

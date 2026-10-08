@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import type { Team, Tournament, Category } from "@/data/tournaments";
 import { syncDrawnBracketsToLiveMatches, purgeMatchesForCategory } from "@/lib/match-store";
-import { bulkSetTeamsInCategory, deleteAllTeamsInCategory } from "@/lib/tournament-store";
+import { bulkSetTeamsInCategory, deleteAllTeamsInCategory, getTournaments } from "@/lib/tournament-store";
 import { generate32Teams } from "@/lib/team-generator";
 import { addMatchesToQueue, purgeQueueForCategory, getDispatchQueue } from "@/lib/court-dispatch";
 import {
@@ -23,7 +23,13 @@ export type BracketGroup = {
   isDrawn: boolean;
 };
 
-export function saveDrawnGroups(tournamentSlug: string, categoryId: string, groups: BracketGroup[], allTeams?: Team[]) {
+export function saveDrawnGroups(
+  tournamentSlug: string,
+  categoryId: string,
+  groups: BracketGroup[],
+  allTeams?: Team[],
+  isSilent = false
+) {
   try {
     // Save directly to Supabase
     dbSaveDrawnGroups(tournamentSlug, categoryId, groups).catch((err) => {
@@ -36,7 +42,12 @@ export function saveDrawnGroups(tournamentSlug: string, categoryId: string, grou
       // ignore
     }
 
-    // Sync the full roster into tournament category teams store and Supabase.
+    // In silent mode (intermediate auto-draw step), skip store thrashing and event broadcasts
+    if (isSilent) {
+      return;
+    }
+
+    // Sync the full roster into tournament category teams store and Supabase only if needed.
     // Use allTeams when provided (full roster) so a mid-draw save never
     // overwrites the category with only the partial set of revealed teams.
     const drawnTeams = groups
@@ -46,7 +57,20 @@ export function saveDrawnGroups(tournamentSlug: string, categoryId: string, grou
 
     if (teamsToSync.length > 0) {
       try {
-        bulkSetTeamsInCategory(tournamentSlug, categoryId, teamsToSync);
+        const currentTournaments = getTournaments();
+        const currentTourn = currentTournaments.find((t) => t.slug === tournamentSlug);
+        const currentCat = currentTourn?.categories.find(
+          (c) => c.id === categoryId || (c as any).category_slug === categoryId
+        );
+        const existingTeams = currentCat?.teams || [];
+        const existingIds = new Set(existingTeams.map((t) => t.id));
+        const hasChange =
+          existingTeams.length !== teamsToSync.length ||
+          teamsToSync.some((t) => !existingIds.has(t.id));
+
+        if (hasChange) {
+          bulkSetTeamsInCategory(tournamentSlug, currentCat?.id || categoryId, teamsToSync);
+        }
       } catch {
         // ignore
       }
@@ -255,15 +279,62 @@ export function BracketDraw({
   const [drawnCount, setDrawnCount] = useState(0);
   const [drawingBracketIdx, setDrawingBracketIdx] = useState(-1);
   const [isAutoPlaying, setIsAutoPlaying] = useState(false);
+
+  // Synchronous refs to prevent race conditions and mid-animation aborts
   const animCancelRef = useRef(false);
-  // Guards against stale useEffect runs when state updates arrive out of order
+  const isDrawingRef = useRef(false);
+  const isAutoPlayingRef = useRef(false);
+  const groupsRef = useRef<BracketGroup[]>([]);
+  const teamsByGroupRef = useRef<Team[][]>([]);
+  const drawnCountRef = useRef(0);
   const skipEffectRef = useRef(false);
+  const lastAutoDrawStartTimeRef = useRef(0);
+
+  // Normalize effective category ID to handle mismatch between categoryId prop and category.id / category_slug
+  const matchedCategory = tournament?.categories?.find(
+    (c) => c.id === categoryId || (c as any).category_slug === categoryId || c.id === category?.id
+  ) || category;
+  const effectiveCategoryId = (matchedCategory as any)?.category_slug || matchedCategory?.id || categoryId;
+  const currentCategoryKey = `${tournamentSlug}_${effectiveCategoryId}`;
+  const loadedCategoryKeyRef = useRef(currentCategoryKey);
+
+  // Keep refs synchronized with state
+  useEffect(() => {
+    groupsRef.current = groups;
+  }, [groups]);
+
+  useEffect(() => {
+    teamsByGroupRef.current = teamsByGroup;
+  }, [teamsByGroup]);
+
+  useEffect(() => {
+    drawnCountRef.current = drawnCount;
+  }, [drawnCount]);
+
+  // Cleanly abort on unmount only
+  useEffect(() => {
+    return () => {
+      animCancelRef.current = true;
+      isDrawingRef.current = false;
+      isAutoPlayingRef.current = false;
+    };
+  }, []);
 
   // Restore previously drawn groups or prepare initial empty standby groups
   useEffect(() => {
-    animCancelRef.current = true;
-    setDrawingBracketIdx(-1);
-    setIsAutoPlaying(false);
+    // If an animation or auto-draw is actively running, NEVER abort or wipe state!
+    if (isDrawingRef.current || isAutoPlayingRef.current) {
+      return;
+    }
+
+    // Only cancel and reset if the user genuinely switched to a different tournament or category
+    const isNewCategory = loadedCategoryKeyRef.current !== currentCategoryKey;
+    if (isNewCategory) {
+      loadedCategoryKeyRef.current = currentCategoryKey;
+      animCancelRef.current = true;
+      setDrawingBracketIdx(-1);
+      setIsAutoPlaying(false);
+    }
 
     // Skip if a direct populate already set the correct state
     if (skipEffectRef.current) {
@@ -276,12 +347,11 @@ export function BracketDraw({
     const n = Math.max(1, Math.min(numBrackets, Math.ceil(safeTeams.length / 2) || 1));
 
     // Check if brackets were already drawn for this tournament & category
-    const existingDrawn = getDrawnGroups(tournamentSlug, categoryId);
+    const existingDrawn = getDrawnGroups(tournamentSlug, effectiveCategoryId);
     if (existingDrawn && existingDrawn.length > 0) {
       const drawnNum = existingDrawn.filter((g) => g.isDrawn).length;
       if (drawnNum > 0) {
-        // Use IDs (not names) so teams with duplicate names (e.g. same club entry)
-        // are tracked individually — name-based Sets collapse duplicates incorrectly.
+        // Use IDs (not names) so teams with duplicate names are tracked individually
         const _cachedIds = new Set<string>(
           existingDrawn.flatMap((g) =>
             g.slots.map((s) => s.team?.id).filter((id): id is string => !!id)
@@ -289,39 +359,37 @@ export function BracketDraw({
         );
         const _currentIds = new Set(safeTeams.map((t) => t.id));
         const _rosterMatch =
-          existingDrawn.length === n &&
-          _cachedIds.size <= _currentIds.size &&
-          [..._cachedIds].every((id) => _currentIds.has(id));
+          safeTeams.length === 0 ||
+          (_cachedIds.size <= _currentIds.size && [..._cachedIds].every((id) => _currentIds.has(id)));
 
         if (_rosterMatch) {
           setGroups(existingDrawn);
+          groupsRef.current = existingDrawn;
           setDrawnCount(drawnNum);
+          drawnCountRef.current = drawnNum;
 
           // Rebuild teamsByGroup: drawn brackets keep their revealed teams;
           // undrawn brackets use balancedDistribute so the seeding constraint
           // (one seeded team per bracket) is maintained mid-draw.
-          // Sequential slicing clusters seeded teams into the same bracket.
           const _undrawnPool = safeTeams.filter((t) => !_cachedIds.has(t.id));
-          const _undrawnCount = existingDrawn.filter(
-            (g) => !g.isDrawn && g.slots.every((s) => s.team === null)
-          ).length;
+          const _undrawnCount = existingDrawn.filter((g) => !g.isDrawn).length;
           const _undrawnBuckets =
             _undrawnCount > 0 ? balancedDistribute(_undrawnPool, _undrawnCount) : [];
           let _ubIdx = 0;
           const buckets: Team[][] = existingDrawn.map((g) => {
-            const revealed = g.slots.map((s) => s.team).filter((t): t is Team => t !== null);
-            if (revealed.length > 0 || g.isDrawn) {
-              return revealed;
+            if (g.isDrawn) {
+              return g.slots.map((s) => s.team).filter((t): t is Team => t !== null);
             }
             return _undrawnBuckets[_ubIdx++] ?? [];
           });
 
           setTeamsByGroup(buckets);
+          teamsByGroupRef.current = buckets;
           if (existingDrawn.length !== numBrackets) {
             setNumBrackets(existingDrawn.length);
           }
           // Ensure live matches are synced into match store
-          syncDrawnBracketsToLiveMatches(tournamentSlug, categoryId, existingDrawn);
+          syncDrawnBracketsToLiveMatches(tournamentSlug, effectiveCategoryId, existingDrawn);
 
           // If category.teams was empty, auto-sync teams into tournament category store
           const recoveredTeams: Team[] = [];
@@ -336,7 +404,7 @@ export function BracketDraw({
           });
           if (category && (!category.teams || category.teams.length === 0) && recoveredTeams.length > 0) {
             try {
-              bulkSetTeamsInCategory(tournamentSlug, categoryId, recoveredTeams);
+              bulkSetTeamsInCategory(tournamentSlug, effectiveCategoryId, recoveredTeams);
             } catch {
               // ignore
             }
@@ -347,10 +415,12 @@ export function BracketDraw({
     }
 
     setDrawnCount(0);
+    drawnCountRef.current = 0;
 
     // Distribute teams into buckets with balanced seeding
     const buckets = balancedDistribute(safeTeams, n);
     setTeamsByGroup(buckets);
+    teamsByGroupRef.current = buckets;
 
     // Setup initial standby groups
     const initial: BracketGroup[] = buckets.map((bucketTeams, i) => ({
@@ -362,7 +432,8 @@ export function BracketDraw({
     }));
 
     setGroups(initial);
-  }, [category, numBrackets, tournamentSlug, categoryId]);
+    groupsRef.current = initial;
+  }, [category, numBrackets, tournamentSlug, effectiveCategoryId]);
 
   // Total teams and stats
   const totalTeams = teams.length > 0 ? teams.length : teamsInGroups.length;
@@ -370,98 +441,145 @@ export function BracketDraw({
     totalTeams > 0 ||
     groups.some((g) => g.isDrawn || g.slots.some((s) => s.team !== null));
   const isAllDone = groups.length > 0 && drawnCount >= groups.length;
-  const isAnimating = drawingBracketIdx !== -1;
+  const isAnimating = drawingBracketIdx !== -1 || isAutoPlaying;
   const nextBracketIdx = drawnCount < groups.length ? drawnCount : -1;
   const nextBracketLetter = nextBracketIdx >= 0 ? (LETTERS[nextBracketIdx] ?? String(nextBracketIdx + 1)) : "";
 
   // ── Draw ONE single bracket at a time ────────────────────────────────────
-  const drawSingleBracket = async (bracketIndex: number) => {
-    if (isAnimating || bracketIndex < 0 || bracketIndex >= groups.length) return;
-    if (groups[bracketIndex]?.isDrawn) return;
+  const drawSingleBracket = async (bracketIndex: number, isSilent = false) => {
+    if (isDrawingRef.current || bracketIndex < 0 || bracketIndex >= groupsRef.current.length) return;
+    if (groupsRef.current[bracketIndex]?.isDrawn) return;
 
+    isDrawingRef.current = true;
     animCancelRef.current = false;
     setDrawingBracketIdx(bracketIndex);
 
-    const targetTeams = teamsByGroup[bracketIndex] ?? [];
+    try {
+      let targetTeams = teamsByGroupRef.current[bracketIndex] ?? [];
+      if (!targetTeams || targetTeams.length === 0) {
+        const safeTeams = (category?.teams && category.teams.length > 0) ? category.teams : teamsInGroups;
+        const drawnTeamIds = new Set(
+          groupsRef.current.flatMap((g) => (g.isDrawn ? g.slots.map((s) => s.team?.id).filter((id): id is string => !!id) : []))
+        );
+        const remaining = safeTeams.filter((t) => !drawnTeamIds.has(t.id));
+        const expectedPerBracket = Math.max(1, Math.floor(safeTeams.length / (groupsRef.current.length || numBrackets)) || 4);
+        targetTeams = remaining.slice(0, expectedPerBracket);
+        if (targetTeams.length > 0) {
+          teamsByGroupRef.current[bracketIndex] = targetTeams;
+        }
+      }
 
-    // 1. Reveal Header with active highlight
-    setGroups((prev) =>
-      prev.map((g, idx) => (idx === bracketIndex ? { ...g, revealed: true } : g)),
-    );
-    await delay(380);
-    if (animCancelRef.current) {
-      setDrawingBracketIdx(-1);
-      return;
-    }
+      // 1. Reveal Header with active highlight
+      const headerRevealed = groupsRef.current.map((g, idx) =>
+        idx === bracketIndex ? { ...g, revealed: true } : g
+      );
+      groupsRef.current = headerRevealed;
+      setGroups(headerRevealed);
 
-    // 2. Drop in each team in this bracket one by one
-    for (let ti = 0; ti < targetTeams.length; ti++) {
-      if (animCancelRef.current) break;
+      await delay(350);
+      if (animCancelRef.current) return;
 
-      const team = targetTeams[ti]!;
-      setGroups((prev) =>
-        prev.map((g, gidx) => {
+      // 2. Drop in each team in this bracket one by one
+      for (let ti = 0; ti < targetTeams.length; ti++) {
+        if (animCancelRef.current) break;
+
+        const team = targetTeams[ti]!;
+        const teamDropped = groupsRef.current.map((g, gidx) => {
           if (gidx !== bracketIndex) return g;
           return {
             ...g,
             slots: g.slots.map((s, sidx) => (sidx === ti ? { team, revealed: true } : s)),
           };
-        }),
-      );
+        });
+        groupsRef.current = teamDropped;
+        setGroups(teamDropped);
 
-      // Stagger delay between team drops
-      await delay(targetTeams.length > 6 ? 160 : 250);
+        // Stagger delay between team drops
+        await delay(targetTeams.length > 6 ? 140 : 220);
+      }
+
+      if (!animCancelRef.current) {
+        // 3. Mark this bracket as completed and save
+        const safeTeams = (category?.teams && category.teams.length > 0) ? category.teams : teamsInGroups;
+        const fullRoster = safeTeams.length > 0 ? safeTeams : teamsByGroupRef.current.flat();
+        const completedGroups = groupsRef.current.map((g, idx) =>
+          idx === bracketIndex ? { ...g, isDrawn: true, revealed: true } : g
+        );
+        groupsRef.current = completedGroups;
+        setGroups(completedGroups);
+
+        const nextCount = Math.max(drawnCountRef.current, bracketIndex + 1);
+        drawnCountRef.current = nextCount;
+        setDrawnCount(nextCount);
+
+        saveDrawnGroups(tournamentSlug, effectiveCategoryId, completedGroups, fullRoster, isSilent);
+      }
+    } finally {
+      setDrawingBracketIdx(-1);
+      isDrawingRef.current = false;
     }
-
-    if (!animCancelRef.current) {
-      // 3. Mark this bracket as completed and save — pass full roster so
-      // bulkSetTeamsInCategory never shrinks the category to only drawn teams.
-      const fullRoster = teams.length > 0 ? teams : teamsByGroup.flat();
-      setGroups((prev) => {
-        const next = prev.map((g, idx) => (idx === bracketIndex ? { ...g, isDrawn: true, revealed: true } : g));
-        saveDrawnGroups(tournamentSlug, categoryId, next, fullRoster);
-        return next;
-      });
-      setDrawnCount((prev) => {
-        const next = Math.max(prev, bracketIndex + 1);
-        return next;
-      });
-    }
-
-    setDrawingBracketIdx(-1);
   };
 
   // ── Auto-Draw all remaining brackets sequentially ────────────────────────
   const runAutoDrawRemaining = async () => {
-    if (isAnimating || isAllDone) return;
+    if (isDrawingRef.current || isAutoPlayingRef.current || isAllDone) return;
     setIsAutoPlaying(true);
+    isAutoPlayingRef.current = true;
     animCancelRef.current = false;
+    lastAutoDrawStartTimeRef.current = Date.now();
 
-    for (let gi = drawnCount; gi < groups.length; gi++) {
-      if (animCancelRef.current) break;
-      await drawSingleBracket(gi);
-      if (animCancelRef.current) break;
-      await delay(450); // Pause between brackets
+    try {
+      const total = groupsRef.current.length;
+      for (let gi = 0; gi < total; gi++) {
+        if (animCancelRef.current) break;
+        // Skip brackets that are already drawn
+        if (groupsRef.current[gi]?.isDrawn) continue;
+
+        await drawSingleBracket(gi, true /* isSilent during auto draw sequence */);
+
+        if (animCancelRef.current) break;
+        await delay(350); // Pause between brackets
+      }
+    } finally {
+      setIsAutoPlaying(false);
+      isAutoPlayingRef.current = false;
+      // Final comprehensive sync to Supabase, Match Store, and Dispatch Queue
+      const safeTeams = (category?.teams && category.teams.length > 0) ? category.teams : teamsInGroups;
+      const fullRoster = safeTeams.length > 0 ? safeTeams : teamsByGroupRef.current.flat();
+      saveDrawnGroups(tournamentSlug, effectiveCategoryId, groupsRef.current, fullRoster, false /* broadcast */);
     }
+  };
 
+  const handleStopAutoDraw = () => {
+    if (Date.now() - lastAutoDrawStartTimeRef.current < 1000) {
+      // Ignore accidental double clicks within 1000ms of clicking start
+      return;
+    }
+    animCancelRef.current = true;
     setIsAutoPlaying(false);
+    isAutoPlayingRef.current = false;
   };
 
   // ── Reset everything & re-shuffle ─────────────────────────────────────────
   const handleReset = () => {
     animCancelRef.current = true;
+    isDrawingRef.current = false;
+    isAutoPlayingRef.current = false;
     setIsAutoPlaying(false);
     setDrawingBracketIdx(-1);
     setDrawnCount(0);
+    drawnCountRef.current = 0;
 
     // Completely clear drawn groups, main draw, live matches, and queue across system
-    resetDrawnGroups(tournamentSlug, categoryId);
+    resetDrawnGroups(tournamentSlug, effectiveCategoryId);
 
-    const n = Math.max(1, Math.min(numBrackets, Math.ceil(category.teams.length / 2) || 1));
+    const safeTeams = (category?.teams && category.teams.length > 0) ? category.teams : teamsInGroups;
+    const n = Math.max(1, Math.min(numBrackets, Math.ceil(safeTeams.length / 2) || 1));
 
     // Redistribute with balanced seeding on reset
-    const buckets = balancedDistribute(category.teams, n);
+    const buckets = balancedDistribute(safeTeams, n);
     setTeamsByGroup(buckets);
+    teamsByGroupRef.current = buckets;
 
     const initial: BracketGroup[] = buckets.map((bucketTeams, i) => ({
       name: `Bracket ${LETTERS[i] ?? i + 1}`,
@@ -472,6 +590,7 @@ export function BracketDraw({
     }));
 
     setGroups(initial);
+    groupsRef.current = initial;
   };
 
   const [undoRoster, setUndoRoster] = useState<{
@@ -511,8 +630,11 @@ export function BracketDraw({
       isDrawn: false,
     }));
     setTeamsByGroup(_buckets);
+    teamsByGroupRef.current = _buckets;
     setGroups(_initial);
+    groupsRef.current = _initial;
     setDrawnCount(0);
+    drawnCountRef.current = 0;
     // Tell useEffect to skip its next run (triggered by setNumBrackets below)
     skipEffectRef.current = true;
     setNumBrackets(_n);
@@ -531,7 +653,11 @@ export function BracketDraw({
     resetDrawnGroups(tournamentSlug, categoryId);
     deleteAllTeamsInCategory(tournamentSlug, categoryId);
     setGroups([]);
+    groupsRef.current = [];
+    setTeamsByGroup([]);
+    teamsByGroupRef.current = [];
     setDrawnCount(0);
+    drawnCountRef.current = 0;
   };
 
   const handleUndoRoster = () => {
@@ -777,13 +903,26 @@ export function BracketDraw({
           )}
 
           {/* Auto-Play Remaining Button */}
-          {!isAllDone && drawnCount < groups.length - 1 && (
+          {!isAllDone && !isAutoPlaying && drawnCount < groups.length - 1 && (
             <button
+              type="button"
               onClick={runAutoDrawRemaining}
               disabled={isAnimating}
-              className="flex items-center gap-2 border border-pickle/50 bg-charcoal/80 px-4 py-3.5 text-xs font-bold uppercase tracking-widest text-pickle hover:bg-pickle hover:text-sand hover:border-pickle transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              className="flex items-center gap-2 border border-pickle/50 bg-charcoal/80 px-4 py-3.5 text-xs font-bold uppercase tracking-widest text-pickle hover:bg-pickle hover:text-sand hover:border-pickle transition-all disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
             >
               <span>Auto-Draw All Remaining</span>
+            </button>
+          )}
+
+          {/* Active Auto-Play Button with Click to Stop */}
+          {isAutoPlaying && (
+            <button
+              type="button"
+              onClick={handleStopAutoDraw}
+              className="flex items-center gap-2 border border-brick/60 bg-brick/20 px-4 py-3.5 text-xs font-bold uppercase tracking-widest text-brick hover:bg-brick hover:text-sand transition-all cursor-pointer shadow-sm animate-pulse"
+            >
+              <SpinnerIcon />
+              <span>Drawing Brackets… (Click to Stop)</span>
             </button>
           )}
 

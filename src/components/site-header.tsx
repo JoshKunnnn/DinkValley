@@ -4,6 +4,7 @@ import { Download } from "lucide-react";
 import { getAuthenticatedStaff, logoutStaff, type StaffRole } from "@/lib/auth-store";
 import { StaffPortalModal } from "./admin/StaffPortalModal";
 import { triggerPwaInstall } from "./PwaInstallPrompt";
+import { TextSizeToggle } from "./public/TextSizeToggle";
 
 export function SiteHeader() {
   const [authRole, setAuthRole] = useState<StaffRole | null>(null);
@@ -92,66 +93,70 @@ export function SiteHeader() {
             </span>
           </Link>
 
-          {/* Desktop nav - Cleaned of public admin/register buttons */}
-          <nav className="hidden items-center gap-3 text-sm font-semibold uppercase tracking-wide sm:flex">
-            <Link
-              to="/"
-              activeOptions={{ exact: true }}
-              className="rounded px-3 py-2 text-sand/80 transition-colors hover:text-sand"
-              activeProps={{ className: "text-sand font-bold" }}
-            >
-              Tournaments
-            </Link>
+          <div className="flex items-center gap-2">
+            <TextSizeToggle />
 
-            <button
-              onClick={() => triggerPwaInstall()}
-              className="flex items-center gap-1.5 rounded border border-border bg-charcoal/80 px-3 py-1.5 text-xs font-semibold uppercase tracking-wider text-sand hover:border-pickle hover:text-pickle transition-colors cursor-pointer"
-              title="Install Dink Valley App to your device"
-            >
-              <Download size={13} className="text-pickle" />
-              <span>Install App</span>
-            </button>
+            {/* Desktop nav - Cleaned of public admin/register buttons */}
+            <nav className="hidden items-center gap-3 text-sm font-semibold uppercase tracking-wide sm:flex">
+              <Link
+                to="/"
+                activeOptions={{ exact: true }}
+                className="rounded px-3 py-2 text-sand/80 transition-colors hover:text-sand"
+                activeProps={{ className: "text-sand font-bold" }}
+              >
+                Tournaments
+              </Link>
 
-            {/* Authenticated Staff Badge (Only appears once official logs in via hidden portal) */}
+              <button
+                onClick={() => triggerPwaInstall()}
+                className="flex items-center gap-1.5 rounded border border-border bg-charcoal/80 px-3 py-1.5 text-xs font-semibold uppercase tracking-wider text-sand hover:border-pickle hover:text-pickle transition-colors cursor-pointer"
+                title="Install Dink Valley App to your device"
+              >
+                <Download size={13} className="text-pickle" />
+                <span>Install App</span>
+              </button>
+
+              {/* Authenticated Staff Badge (Only appears once official logs in via hidden portal) */}
+              {authRole && (
+                <div className="flex items-center gap-2 pl-2 border-l border-border/60">
+                  <Link
+                    to={authRole === "admin" ? "/admin" : "/umpire"}
+                    className="flex items-center gap-2 rounded bg-primary px-3.5 py-2 text-xs font-bold uppercase tracking-wider text-primary-foreground transition-colors hover:bg-brick-deep shadow-sm"
+                  >
+                    <span className="h-2 w-2 rounded-full bg-pickle animate-pulse" />
+                    <span>{authRole === "admin" ? "Admin Console" : "Umpire Console"}</span>
+                  </Link>
+
+                  <button
+                    onClick={handleLogout}
+                    className="px-2.5 py-2 text-xs font-bold uppercase tracking-wider text-sand/60 hover:text-sand transition-colors cursor-pointer"
+                    title="Sign out of current account"
+                  >
+                    Sign Out
+                  </button>
+                </div>
+              )}
+            </nav>
+
+            {/* Staff badge — visible on mobile only when logged in */}
             {authRole && (
-              <div className="flex items-center gap-2 pl-2 border-l border-border/60">
+              <div className="flex items-center gap-1.5 sm:hidden">
                 <Link
                   to={authRole === "admin" ? "/admin" : "/umpire"}
-                  className="flex items-center gap-2 rounded bg-primary px-3.5 py-2 text-xs font-bold uppercase tracking-wider text-primary-foreground transition-colors hover:bg-brick-deep shadow-sm"
+                  className="flex items-center gap-1.5 rounded bg-primary px-2.5 py-1.5 text-xs font-bold uppercase tracking-wider text-primary-foreground transition-colors hover:bg-brick-deep"
                 >
-                  <span className="h-2 w-2 rounded-full bg-pickle animate-pulse" />
-                  <span>{authRole === "admin" ? "Admin Console" : "Umpire Console"}</span>
+                  <span className="h-1.5 w-1.5 rounded-full bg-pickle animate-pulse" />
+                  <span>{authRole === "admin" ? "Admin" : "Umpire"}</span>
                 </Link>
-
                 <button
                   onClick={handleLogout}
-                  className="px-2.5 py-2 text-xs font-bold uppercase tracking-wider text-sand/60 hover:text-sand transition-colors cursor-pointer"
-                  title="Sign out of current account"
+                  className="px-1.5 py-1.5 text-[0.65rem] font-bold uppercase tracking-wider text-sand/50 hover:text-sand transition-colors cursor-pointer"
                 >
-                  Sign Out
+                  Exit
                 </button>
               </div>
             )}
-          </nav>
-
-          {/* Staff badge — visible on mobile only when logged in */}
-          {authRole && (
-            <div className="flex items-center gap-1.5 sm:hidden">
-              <Link
-                to={authRole === "admin" ? "/admin" : "/umpire"}
-                className="flex items-center gap-1.5 rounded bg-primary px-2.5 py-1.5 text-xs font-bold uppercase tracking-wider text-primary-foreground transition-colors hover:bg-brick-deep"
-              >
-                <span className="h-1.5 w-1.5 rounded-full bg-pickle animate-pulse" />
-                <span>{authRole === "admin" ? "Admin" : "Umpire"}</span>
-              </Link>
-              <button
-                onClick={handleLogout}
-                className="px-1.5 py-1.5 text-[0.65rem] font-bold uppercase tracking-wider text-sand/50 hover:text-sand transition-colors cursor-pointer"
-              >
-                Exit
-              </button>
-            </div>
-          )}
+          </div>
         </div>
       </header>
 
@@ -172,9 +177,8 @@ export function SiteFooter() {
 
   return (
     <footer
-      className={`border-border bg-charcoal py-8 ${
-        isConsole ? "mt-0 border-t-0" : "mt-20 border-t"
-      }`}
+      className={`border-border bg-charcoal py-8 ${isConsole ? "mt-0 border-t-0" : "mt-20 border-t"
+        }`}
     >
       <div className="mx-auto flex max-w-6xl flex-col sm:flex-row sm:items-center sm:justify-between gap-4 px-5 text-sm text-sand/70">
         <div>

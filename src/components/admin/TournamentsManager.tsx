@@ -39,9 +39,10 @@ export function TournamentsManager({
 }: TournamentsManagerProps) {
   const { tournaments, addTournament, updateTournament, deleteTournament } = useTournamentStore();
 
-  const [viewMode, setViewMode] = useState<"create" | "list">(() =>
+  const [viewMode, setViewMode] = useState<"create" | "list" | "edit">(() =>
     tournaments.length === 0 ? "create" : "list"
   );
+  const [editingTournamentSlug, setEditingTournamentSlug] = useState<string | null>(null);
 
   // Form state
   const [name, setName] = useState("");
@@ -148,13 +149,27 @@ export function TournamentsManager({
     setCustomFee("PHP 1,000 per team");
   };
 
-  const handleUpdateCategoryFee = (id: CategoryId, fee: string) => {
+  const handleUpdateCategory = (id: CategoryId, updates: Partial<Category>) => {
     setSelectedCategories((prev) =>
-      prev.map((c) => (c.id === id ? { ...c, fee } : c))
+      prev.map((c) => (c.id === id ? { ...c, ...updates } : c))
     );
   };
 
+  const handleUpdateCategoryFee = (id: CategoryId, fee: string) => {
+    handleUpdateCategory(id, { fee });
+  };
+
   const handleRemoveCategory = (id: CategoryId) => {
+    const cat = selectedCategories.find((c) => c.id === id);
+    if (cat && (cat.teams?.length || 0) > 0) {
+      if (
+        !window.confirm(
+          `Division "${cat.label}" has ${cat.teams?.length} registered team(s). Removing it will detach these teams. Are you sure you want to remove it?`
+        )
+      ) {
+        return;
+      }
+    }
     setSelectedCategories((prev) => prev.filter((c) => c.id !== id));
   };
 
@@ -166,6 +181,88 @@ export function TournamentsManager({
 
   const handleRemoveRule = (index: number) => {
     setRules((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const handleStartCreate = () => {
+    setEditingTournamentSlug(null);
+    setName("");
+    setSlug("");
+    setTagline("");
+    setVenue("");
+    setCity("Santiago City");
+    setStartDate("");
+    setEndDate("");
+    setCustomDate("");
+    setFormat("Round robin pools, top 4 advance to playoffs");
+    setStatus("Registration open");
+    setRules([
+      "Games to 11, win by 2. Playoff finals to 15.",
+      "Facility constraint: strictly 4 courts active at a time. Other matches wait in Queue.",
+      "Players must report courtside within 5 minutes of dispatch call.",
+    ]);
+    setSelectedCategories([
+      {
+        id: "open-champ",
+        label: "Open Championship",
+        level: "Open",
+        division: "Open",
+        fee: "PHP 1,500 per team",
+        teams: [],
+        pools: [],
+        standings: [],
+        playoffs: [],
+      },
+      {
+        id: "nov-mixed",
+        label: "Novice Mixed Doubles",
+        level: "Novice",
+        division: "Mixed",
+        fee: "PHP 800 per team",
+        teams: [],
+        pools: [],
+        standings: [],
+        playoffs: [],
+      },
+    ]);
+    setViewMode("create");
+    setError(null);
+    setNotice(null);
+  };
+
+  const handleStartEdit = (t: Tournament) => {
+    setEditingTournamentSlug(t.slug);
+    setName(t.name);
+    setSlug(t.slug);
+    setTagline(t.tagline || "");
+    setVenue(t.venue || "Santiago City");
+    setCity(t.city || "Santiago City");
+    setCustomDate(t.date || "");
+    setStartDate("");
+    setEndDate("");
+    setFormat(t.format || "Round robin pools, top 4 advance to playoffs");
+    setStatus(t.status || "Registration open");
+    setRules(
+      t.rules && t.rules.length > 0
+        ? [...t.rules]
+        : [
+            "Games to 11, win by 2. Playoff finals to 15.",
+            "Facility constraint: strictly 4 courts active at a time. Other matches wait in Queue.",
+            "Players must report courtside within 5 minutes of dispatch call.",
+          ]
+    );
+    setSelectedCategories(
+      (t.categories || []).map((c) => ({
+        ...c,
+        teams: c.teams || [],
+        pendingTeams: c.pendingTeams || [],
+        pools: c.pools || [],
+        standings: c.standings || [],
+        playoffs: c.playoffs || [],
+      }))
+    );
+    setViewMode("edit");
+    setError(null);
+    setNotice(null);
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -221,6 +318,54 @@ export function TournamentsManager({
     setViewMode("list");
   };
 
+  const handleSaveEdit = (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+
+    if (!editingTournamentSlug) return;
+
+    if (!name.trim()) {
+      setError("Tournament name is required.");
+      return;
+    }
+
+    if (selectedCategories.length === 0) {
+      setError("Please have at least one division/category in the tournament.");
+      return;
+    }
+
+    let dateString = customDate.trim();
+    if (!dateString && startDate) {
+      dateString = endDate && endDate !== startDate ? `${startDate} to ${endDate}` : startDate;
+    }
+    if (!dateString) {
+      dateString = "TBD";
+    }
+
+    const payload: Partial<Tournament> = {
+      name: name.trim(),
+      slug: slug.trim() || slugify(name),
+      tagline: tagline.trim() || `${name.trim()} Tournament at Dink Valley`,
+      status,
+      date: dateString,
+      venue: venue.trim() || "Santiago City",
+      city: city.trim() || "Santiago City",
+      format: format.trim(),
+      categories: selectedCategories,
+      rules,
+    };
+
+    updateTournament(editingTournamentSlug, payload);
+    setNotice(`Tournament "${name.trim()}" updated successfully.`);
+
+    if (onSelectTournament && payload.slug) {
+      onSelectTournament(payload.slug);
+    }
+
+    setViewMode("list");
+    setEditingTournamentSlug(null);
+  };
+
   const handleDelete = (tourneySlug: string, tourneyName: string) => {
     if (window.confirm(`Are you sure you want to delete "${tourneyName}"? This action cannot be undone.`)) {
       deleteTournament(tourneySlug);
@@ -249,9 +394,12 @@ export function TournamentsManager({
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <button
-            onClick={() => setViewMode("list")}
+            onClick={() => {
+              setViewMode("list");
+              setEditingTournamentSlug(null);
+            }}
             className={`px-4 py-2 text-xs font-bold uppercase tracking-widest transition-all cursor-pointer rounded border ${
               viewMode === "list"
                 ? "bg-foreground text-background border-foreground shadow-xs"
@@ -261,7 +409,7 @@ export function TournamentsManager({
             All Tournaments ({tournaments.length})
           </button>
           <button
-            onClick={() => setViewMode("create")}
+            onClick={handleStartCreate}
             className={`px-4 py-2 text-xs font-bold uppercase tracking-widest transition-all cursor-pointer rounded border ${
               viewMode === "create"
                 ? "bg-brick text-sand border-brick shadow-xs hover:bg-brick-deep"
@@ -270,6 +418,11 @@ export function TournamentsManager({
           >
             + Create Tournament
           </button>
+          {viewMode === "edit" && (
+            <span className="px-3.5 py-1.5 text-xs font-bold uppercase tracking-widest bg-pickle/15 text-pickle border border-pickle/40 rounded">
+              Editing: {name || "Tournament"}
+            </span>
+          )}
         </div>
       </div>
 
@@ -298,22 +451,38 @@ export function TournamentsManager({
         </div>
       )}
 
-      {/* ── CREATE TOURNAMENT VIEW ── */}
-      {viewMode === "create" && (
+      {/* ── CREATE / EDIT TOURNAMENT VIEW ── */}
+      {(viewMode === "create" || viewMode === "edit") && (
         <div className="surface-card p-6 sm:p-8 space-y-6 max-w-4xl bg-card border border-border rounded-xl shadow-sm">
-          <div className="border-b border-border pb-4">
-            <span className="text-[0.65rem] uppercase tracking-[0.28em] text-pickle font-bold">
-              New Event Setup
-            </span>
-            <h3 className="font-display text-3xl sm:text-4xl text-foreground mt-0.5">
-              Create Tournament
-            </h3>
-            <p className="text-sm text-muted-foreground mt-1">
-              Configure event details, entry fees, and division brackets. All tournament matches are scheduled strictly across Courts 1 to 4.
-            </p>
+          <div className="border-b border-border pb-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div>
+              <span className="text-[0.65rem] uppercase tracking-[0.28em] text-pickle font-bold">
+                {viewMode === "edit" ? "Event Configuration" : "New Event Setup"}
+              </span>
+              <h3 className="font-display text-3xl sm:text-4xl text-foreground mt-0.5">
+                {viewMode === "edit" ? `Edit Tournament` : "Create Tournament"}
+              </h3>
+              <p className="text-sm text-muted-foreground mt-1">
+                {viewMode === "edit"
+                  ? "Update tournament details, categories, division pricing, and facility play rules."
+                  : "Configure event details, entry fees, and division brackets. All tournament matches are scheduled strictly across Courts 1 to 4."}
+              </p>
+            </div>
+            {viewMode === "edit" && (
+              <button
+                type="button"
+                onClick={() => {
+                  setViewMode("list");
+                  setEditingTournamentSlug(null);
+                }}
+                className="self-start sm:self-auto px-3.5 py-1.5 text-xs font-bold uppercase tracking-wider border border-border bg-background text-foreground hover:border-foreground/40 rounded transition-all cursor-pointer"
+              >
+                Back to List
+              </button>
+            )}
           </div>
 
-          <form onSubmit={handleSubmit} className="space-y-6">
+          <form onSubmit={viewMode === "edit" ? handleSaveEdit : handleSubmit} className="space-y-6">
             {/* Name & Slug */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
               <div>
@@ -574,52 +743,108 @@ export function TournamentsManager({
                 </button>
               </div>
 
-              {/* Selected Categories List with Per-Category Pricing */}
+              {/* Selected Categories List with Per-Category Pricing & In-Place Editing */}
               <div>
                 <div className="flex items-center justify-between mb-2">
                   <span className="block text-xs uppercase tracking-wider text-foreground/80 font-bold">
-                    Categories &amp; Division Fees ({selectedCategories.length}):
+                    Categories &amp; Divisions ({selectedCategories.length}):
                   </span>
                   <span className="text-[0.65rem] text-muted-foreground">
-                    Fees are stored privately for administration
+                    Customize labels, skill levels, gender divisions, and fees below
                   </span>
                 </div>
                 {selectedCategories.length === 0 ? (
                   <p className="text-xs text-brick font-semibold">
-                    No categories selected. Please choose or add at least one category.
+                    No categories selected. Please choose from presets above or add a custom division.
                   </p>
                 ) : (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {selectedCategories.map((c) => (
                       <div
                         key={c.id}
-                        className="flex items-center justify-between gap-3 border border-border bg-background p-2.5 rounded-lg text-xs text-foreground shadow-xs"
+                        className="border-2 border-border bg-background/90 p-3 rounded-lg space-y-2.5 shadow-xs"
                       >
-                        <div className="min-w-0 flex-1">
-                          <span className="font-bold text-foreground block truncate">{c.label}</span>
-                          <span className="text-[0.65rem] font-bold text-pickle uppercase">
-                            {c.level} · {c.division}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-2 flex-shrink-0">
-                          <label className="text-[0.65rem] uppercase tracking-wider text-muted-foreground font-semibold">
-                            Fee:
-                          </label>
-                          <input
-                            type="text"
-                            value={c.fee || ""}
-                            onChange={(e) => handleUpdateCategoryFee(c.id, e.target.value)}
-                            placeholder="No fee set"
-                            className="w-28 sm:w-32 rounded border border-input bg-card px-2 py-1 text-xs text-foreground focus:border-pickle focus:outline-none font-medium"
-                          />
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-2 flex-wrap min-w-0">
+                            <span className="text-[0.65rem] font-bold uppercase tracking-wider text-pickle">
+                              {c.level} · {c.division}
+                            </span>
+                            {c.teams && c.teams.length > 0 && (
+                              <span className="px-2 py-0.5 rounded text-[0.65rem] font-mono font-bold bg-pickle/15 text-pickle border border-pickle/30">
+                                {c.teams.length} Teams
+                              </span>
+                            )}
+                          </div>
                           <button
                             type="button"
                             onClick={() => handleRemoveCategory(c.id)}
-                            className="text-muted-foreground hover:text-brick text-sm cursor-pointer ml-1 font-bold p-1"
+                            className="text-[0.65rem] text-muted-foreground hover:text-brick font-bold uppercase tracking-wider cursor-pointer"
                             title="Remove category"
                           >
-                            x
+                            Remove
                           </button>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          <div>
+                            <label className="block text-[0.65rem] uppercase tracking-wider text-muted-foreground font-semibold mb-1">
+                              Division Label
+                            </label>
+                            <input
+                              type="text"
+                              value={c.label}
+                              onChange={(e) => handleUpdateCategory(c.id, { label: e.target.value })}
+                              className="w-full rounded border border-input bg-card px-2.5 py-1.5 text-xs text-foreground font-bold focus:border-pickle focus:outline-none shadow-xs"
+                              placeholder="e.g. Beginner Men's"
+                            />
+                          </div>
+
+                          <div>
+                            <label className="block text-[0.65rem] uppercase tracking-wider text-muted-foreground font-semibold mb-1">
+                              Entry Fee
+                            </label>
+                            <input
+                              type="text"
+                              value={c.fee || ""}
+                              onChange={(e) => handleUpdateCategory(c.id, { fee: e.target.value })}
+                              placeholder="e.g. PHP 1,000 per team"
+                              className="w-full rounded border border-input bg-card px-2.5 py-1.5 text-xs text-foreground font-medium focus:border-pickle focus:outline-none shadow-xs"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="block text-[0.65rem] uppercase tracking-wider text-muted-foreground font-semibold mb-1">
+                              Skill Level
+                            </label>
+                            <select
+                              value={c.level}
+                              onChange={(e) => handleUpdateCategory(c.id, { level: e.target.value as Category["level"] })}
+                              className="w-full rounded border border-input bg-card px-2 py-1 text-xs text-foreground font-medium focus:border-pickle focus:outline-none shadow-xs"
+                            >
+                              <option value="Beginners">Beginners</option>
+                              <option value="Novice">Novice</option>
+                              <option value="Intermediate">Intermediate</option>
+                              <option value="Advance">Advance</option>
+                              <option value="Open">Open</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block text-[0.65rem] uppercase tracking-wider text-muted-foreground font-semibold mb-1">
+                              Division Type
+                            </label>
+                            <select
+                              value={c.division}
+                              onChange={(e) => handleUpdateCategory(c.id, { division: e.target.value as Category["division"] })}
+                              className="w-full rounded border border-input bg-card px-2 py-1 text-xs text-foreground font-medium focus:border-pickle focus:outline-none shadow-xs"
+                            >
+                              <option value="Men's">Men's</option>
+                              <option value="Women's">Women's</option>
+                              <option value="Mixed">Mixed</option>
+                              <option value="Open">Open</option>
+                            </select>
+                          </div>
                         </div>
                       </div>
                     ))}
@@ -677,7 +902,10 @@ export function TournamentsManager({
             <div className="pt-4 border-t border-border flex items-center justify-end gap-3">
               <button
                 type="button"
-                onClick={() => setViewMode("list")}
+                onClick={() => {
+                  setViewMode("list");
+                  setEditingTournamentSlug(null);
+                }}
                 className="px-5 py-2.5 text-xs font-bold uppercase tracking-widest border border-border bg-card text-foreground/80 hover:text-foreground hover:border-foreground/30 rounded-md cursor-pointer transition-all"
               >
                 Cancel
@@ -686,7 +914,7 @@ export function TournamentsManager({
                 type="submit"
                 className="bg-brick px-8 py-3 rounded-md font-display text-2xl tracking-widest text-sand hover:bg-brick-deep shadow-md hover:shadow-lg transition-all cursor-pointer"
               >
-                Create Tournament
+                {viewMode === "edit" ? "Save Changes" : "Create Tournament"}
               </button>
             </div>
           </form>
@@ -708,7 +936,7 @@ export function TournamentsManager({
                 No tournaments have been added. Start by creating your first tournament to configure divisions, draw brackets, and dispatch matches to Courts 1–4.
               </p>
               <button
-                onClick={() => setViewMode("create")}
+                onClick={handleStartCreate}
                 className="mt-6 bg-brick px-7 py-3 rounded-md font-display text-2xl tracking-widest text-sand hover:bg-brick-deep shadow-md transition-all cursor-pointer"
               >
                 + Create Tournament
@@ -765,22 +993,35 @@ export function TournamentsManager({
                         </div>
                       </div>
 
-                      {/* Quick Status Control */}
-                      <div className="flex items-center gap-2 flex-shrink-0">
-                        <label className="text-[0.65rem] uppercase tracking-wider text-foreground font-bold">
-                          Status:
-                        </label>
-                        <select
-                          value={t.status}
-                          onChange={(e) =>
-                            handleStatusChange(t.slug, e.target.value as Tournament["status"])
-                          }
-                          className="rounded-md border-2 border-border bg-card px-3 py-1.5 text-xs text-foreground focus:border-pickle focus:outline-none font-bold shadow-xs"
+                      {/* Quick Status Control & Edit */}
+                      <div className="flex items-center gap-2.5 flex-shrink-0 flex-wrap">
+                        <button
+                          type="button"
+                          onClick={() => handleStartEdit(t)}
+                          className="px-3.5 py-1.5 rounded-md text-xs font-bold uppercase tracking-wider bg-pickle text-sand hover:opacity-90 transition-all cursor-pointer shadow-xs inline-flex items-center gap-1.5"
+                          title="Edit tournament info, categories, fees, and rules"
                         >
-                          <option value="Registration open">Registration open</option>
-                          <option value="Live">Live</option>
-                          <option value="Completed">Completed</option>
-                        </select>
+                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                          </svg>
+                          Edit Tournament
+                        </button>
+                        <div className="flex items-center gap-1.5">
+                          <label className="text-[0.65rem] uppercase tracking-wider text-foreground font-bold">
+                            Status:
+                          </label>
+                          <select
+                            value={t.status}
+                            onChange={(e) =>
+                              handleStatusChange(t.slug, e.target.value as Tournament["status"])
+                            }
+                            className="rounded-md border-2 border-border bg-card px-3 py-1.5 text-xs text-foreground focus:border-pickle focus:outline-none font-bold shadow-xs"
+                          >
+                            <option value="Registration open">Registration open</option>
+                            <option value="Live">Live</option>
+                            <option value="Completed">Completed</option>
+                          </select>
+                        </div>
                       </div>
                     </div>
 
@@ -791,16 +1032,33 @@ export function TournamentsManager({
                           Categories ({t.categories?.length || 0}):
                         </span>
                         {t.categories?.map((c) => (
-                          <span
+                          <button
                             key={c.id}
-                            className="bg-card border-2 border-border px-2.5 py-1 rounded-md text-[0.7rem] text-foreground font-bold shadow-xs"
+                            type="button"
+                            onClick={() => handleStartEdit(t)}
+                            className="bg-card hover:border-pickle hover:text-pickle border-2 border-border px-2.5 py-1 rounded-md text-[0.7rem] text-foreground font-bold shadow-xs transition-colors cursor-pointer text-left inline-flex items-center gap-1.5"
+                            title="Click to edit category details"
                           >
-                            {c.label} {c.fee ? `· ${c.fee}` : ""} ({c.teams?.length || 0} teams)
-                          </span>
+                            <span>{c.label} {c.fee ? `· ${c.fee}` : ""} ({c.teams?.length || 0} teams)</span>
+                            <svg className="w-3 h-3 text-pickle/70" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                            </svg>
+                          </button>
                         ))}
                       </div>
 
-                      <div className="flex items-center gap-2 flex-shrink-0">
+                      <div className="flex items-center gap-2 flex-shrink-0 flex-wrap">
+                        <button
+                          type="button"
+                          onClick={() => handleStartEdit(t)}
+                          className="px-3 py-1.5 rounded text-xs font-bold uppercase tracking-wider border border-pickle bg-pickle/15 text-pickle hover:bg-pickle hover:text-sand transition-all cursor-pointer shadow-xs inline-flex items-center gap-1.5 font-sans"
+                          title="Edit tournament info, categories, and rules"
+                        >
+                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                          </svg>
+                          Edit
+                        </button>
                         <button
                           type="button"
                           onClick={() => exportTournamentToExcelWorkbook(t)}

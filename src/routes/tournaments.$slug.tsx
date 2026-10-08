@@ -1,4 +1,4 @@
-import { createFileRoute, notFound, Link } from "@tanstack/react-router";
+import { createFileRoute, notFound, Link, useNavigate } from "@tanstack/react-router";
 import { useState, useMemo, useEffect } from "react";
 import {
   getTournament,
@@ -26,6 +26,12 @@ import { dbGetTournaments, dbGetDrawnGroups, getCachedDrawnGroups } from "@/lib/
 import { MiniCourtVisualizer } from "@/components/public/MiniCourtVisualizer";
 import { FindMatchesModal } from "@/components/public/FindMatchesModal";
 import { PublicRegistrationModal } from "@/components/public/PublicRegistrationModal";
+import { CategorySheet } from "@/components/public/CategorySheet";
+import { SimpleBracketView } from "@/components/public/SimpleBracketView";
+import { TeamFinder } from "@/components/public/TeamFinder";
+import { StepIndicator } from "@/components/public/StepIndicator";
+import { UpNextSlider } from "@/components/public/UpNextSlider";
+import { FinalResultsView } from "@/components/public/FinalResultsView";
 
 export const Route = createFileRoute("/tournaments/$slug")({
   loader: async ({ params }) => {
@@ -50,14 +56,30 @@ export const Route = createFileRoute("/tournaments/$slug")({
     ],
   }),
   component: TournamentPage,
-  errorComponent: () => (
-    <div className="mx-auto max-w-3xl px-5 py-24 text-center">
-      <h1 className="text-4xl font-display">This tournament didn't load</h1>
-      <Link to="/" className="mt-4 inline-block text-primary underline font-semibold">
-        Back to tournaments
-      </Link>
-    </div>
-  ),
+  errorComponent: ({ error, reset }: { error: any; reset: () => void }) => {
+    console.error("Tournament page error:", error);
+    return (
+      <div className="mx-auto max-w-3xl px-5 py-24 text-center">
+        <h1 className="text-4xl font-display text-foreground">This tournament didn't load</h1>
+        {error?.message && (
+          <p className="mt-3 text-xs font-mono text-brick max-w-lg mx-auto bg-brick/10 border border-brick/30 p-2.5 rounded">
+            {error.message}
+          </p>
+        )}
+        <div className="mt-6 flex items-center justify-center gap-4">
+          <button
+            onClick={() => reset()}
+            className="px-4 py-2 bg-pickle text-sand text-xs font-bold uppercase tracking-wider rounded hover:opacity-90 cursor-pointer"
+          >
+            Try Again
+          </button>
+          <Link to="/" className="text-xs font-bold uppercase tracking-wider text-muted-foreground hover:text-foreground underline">
+            Back to tournaments
+          </Link>
+        </div>
+      </div>
+    );
+  },
   notFoundComponent: () => (
     <div className="mx-auto max-w-3xl px-5 py-24 text-center">
       <h1 className="text-4xl font-display">Tournament not found</h1>
@@ -94,12 +116,29 @@ function TournamentPage() {
   const finalMatches = useMemo(() => confirmedMatches.filter((m) => m.status === "final"), [confirmedMatches]);
   const scheduledMatches = useMemo(() => confirmedMatches.filter((m) => m.status === "scheduled"), [confirmedMatches]);
 
+  const navigate = useNavigate();
   const [tab, setTab] = useState<TabKey>("bracket");
   const [drawRevision, setDrawRevision] = useState(0);
   const [isRegModalOpen, setIsRegModalOpen] = useState(false);
   const [findMatchesTeam, setFindMatchesTeam] = useState<Team | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [activeBracketFilter, setActiveBracketFilter] = useState<string>("all");
+
+  // Friendly flow state (Step 1 -> Step 2 -> Step 3)
+  const [friendlyMode, setFriendlyMode] = useState(true);
+  const [friendlySubTab, setFriendlySubTab] = useState<"bracket" | "results">("bracket");
+  const [isCategorySheetOpen, setIsCategorySheetOpen] = useState(false);
+  const [highlightTeam, setHighlightTeam] = useState<string | null>(null);
+
+  const liveCategoryIds = useMemo(() => {
+    const set = new Set<string>();
+    matches.forEach((m) => {
+      if (m.status === "live" && m.categoryId) {
+        set.add(m.categoryId);
+      }
+    });
+    return set;
+  }, [matches]);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
@@ -114,7 +153,7 @@ function TournamentPage() {
       .then(() => {
         if (mounted) setDrawRevision((v) => v + 1);
       })
-      .catch(() => {});
+      .catch(() => { });
 
     const handleDrawChange = () => {
       setDrawRevision((v) => v + 1);
@@ -144,7 +183,7 @@ function TournamentPage() {
           setDrawRevision((v) => v + 1);
         }
       })
-      .catch(() => {});
+      .catch(() => { });
 
     return () => {
       mounted = false;
@@ -159,6 +198,14 @@ function TournamentPage() {
     const bracketParam = params.get("bracket");
     const tabParam = params.get("tab") as TabKey | null;
     const regParam = params.get("register");
+    const categoryParam = params.get("category");
+
+    if (categoryParam) {
+      const matchCat = t.categories.find((c) => c.id === categoryParam);
+      if (matchCat) {
+        setActiveId(matchCat.id);
+      }
+    }
 
     if (teamParam) {
       for (const cat of t.categories) {
@@ -217,6 +264,15 @@ function TournamentPage() {
     }
     return rawCategory;
   }, [rawCategory, drawnGroups]);
+
+  const categoryFinalMatches = useMemo(() => {
+    if (!category) return [];
+    return finalMatches.filter((m) => {
+      if (m.categoryId === category.id) return true;
+      if (category.teams?.some((t) => t.name === m.teamAName || t.name === m.teamBName)) return true;
+      return false;
+    });
+  }, [finalMatches, category]);
 
   // Intelligent default tab: if drawn groups exist with teams and no live matches, default to "pools"
   useEffect(() => {
@@ -303,193 +359,323 @@ function TournamentPage() {
       />
 
 
-      {/* ── Category picker + capacity bar + tabs ── */}
+      {/* ── Category & Bracket Interactive Flow ── */}
       <section className="mx-auto max-w-6xl px-4 py-8 sm:px-5 sm:py-10">
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-          <div>
-            <span className="text-[0.65rem] uppercase tracking-[0.24em] font-bold text-pickle block">
-              Division &amp; Category
-            </span>
-            <h2 className="text-2xl sm:text-3xl font-display mt-0.5">Select Category</h2>
-          </div>
-
-          {/* Real-time sync heartbeat pill */}
-          <div className="inline-flex items-center gap-2 self-start sm:self-auto px-3 py-1.5 bg-charcoal border border-border text-[0.65rem] font-mono uppercase tracking-widest text-sand">
-            <span className="relative flex h-2 w-2">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-pickle opacity-75"></span>
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-pickle"></span>
-            </span>
-            <span>Live Sync Active (2s)</span>
-          </div>
+        {/* Step Indicator: 1 = Tournament (navigates to home), 2 = Category (opens sheet), 3 = Bracket (current) */}
+        <div className="mb-6">
+          <StepIndicator
+            current={3}
+            onStepClick={(step) => {
+              if (step === 1) {
+                navigate({ to: "/" });
+              } else if (step === 2) {
+                setIsCategorySheetOpen(true);
+              }
+            }}
+          />
         </div>
 
-        {/* Category pills — horizontal scroll on mobile */}
-        <div className="mt-4 flex gap-2 overflow-x-auto pb-1 sm:flex-wrap sm:overflow-visible sm:pb-0">
-          {t.categories.map((c) => (
+        {/* Selected Category Banner with Action Buttons */}
+        <div className="surface-card p-4 sm:p-5 border-2 border-border hover:border-pickle/50 transition-colors rounded-2xl flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-xs uppercase tracking-[0.24em] font-bold text-pickle">
+                Current Division &middot; Step 3 of 3
+              </span>
+              <span className="px-2 py-0.5 text-xs font-mono bg-charcoal border border-border text-sand rounded">
+                {category.level}
+              </span>
+              {liveCategoryIds.has(category.id) && (
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 text-xs font-bold uppercase tracking-wide bg-pickle text-sand rounded-full">
+                  <span className="h-1.5 w-1.5 rounded-full bg-sand animate-pulse" />
+                  Playing Now
+                </span>
+              )}
+            </div>
+            <h2 className="text-3xl sm:text-4xl font-display text-foreground">{category.label}</h2>
+            <p className="text-sm text-muted-foreground">
+              {category.teams?.length ?? 0} confirmed teams &middot; Showing active bracket matches
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2.5">
             <button
-              key={c.id}
-              onClick={() => setActiveId(c.id)}
-              className={`flex-shrink-0 border px-3 py-1.5 text-xs font-semibold transition-colors sm:px-4 sm:py-2 sm:text-sm ${
-                c.id === category.id
-                  ? "border-primary bg-primary text-primary-foreground font-bold shadow-sm"
-                  : "border-border bg-card text-foreground hover:border-primary"
-              }`}
+              type="button"
+              onClick={() => setIsCategorySheetOpen(true)}
+              className="min-h-[3rem] px-5 py-2.5 bg-pickle text-sand text-xs sm:text-sm font-bold uppercase tracking-wider rounded-xl hover:opacity-90 transition-opacity cursor-pointer flex items-center gap-2"
             >
-              {c.label}
+              <span>Change Category</span>
+              <span>&rsaquo;</span>
             </button>
-          ))}
-        </div>
-
-        {/* ── Category Capacity Bar & Public Register Action ── */}
-        {(() => {
-          const currentCount = category.teams?.length ?? 0;
-          const maxCapacity = 32;
-          const percentFilled = Math.min(100, Math.round((currentCount / maxCapacity) * 100));
-          const slotsRemaining = Math.max(0, maxCapacity - currentCount);
-
-          return (
-            <div className="mt-4 surface-card p-4 sm:p-5 border border-border">
-              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2">
-                    <span className="text-[0.65rem] font-bold uppercase tracking-[0.24em] text-pickle">
-                      Category Roster Capacity &middot; {category.label}
-                    </span>
-                    <span className="px-1.5 py-0.2 text-[0.6rem] font-mono bg-charcoal border border-border text-sand rounded">
-                      {category.level}
-                    </span>
-                  </div>
-                  <div className="flex items-baseline gap-2 flex-wrap">
-                    <span className="font-display text-2xl text-foreground font-bold">
-                      {currentCount} of {maxCapacity} Confirmed Teams
-                    </span>
-                    <span className="text-xs font-mono text-muted-foreground">
-                      ({percentFilled}% filled)
-                    </span>
-                    {category.pendingTeams && category.pendingTeams.length > 0 && (
-                      <span className="text-xs font-mono text-brick font-semibold">
-                        &middot; {category.pendingTeams.length} pending verification
-                      </span>
-                    )}
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2 shrink-0">
-                  <button
-                    onClick={() => setIsRegModalOpen(true)}
-                    className="px-4 py-2 bg-pickle text-sand text-xs font-bold uppercase tracking-widest hover:opacity-90 transition-opacity rounded cursor-pointer flex items-center gap-1.5"
-                  >
-                    <span>Register Team</span>
-                    <span>+</span>
-                  </button>
-                </div>
-              </div>
-
-              {/* Progress track */}
-              <div className="mt-3">
-                <div className="h-2 w-full bg-charcoal rounded-full overflow-hidden border border-border/60">
-                  <div
-                    className="h-full bg-pickle transition-all duration-500 rounded-full"
-                    style={{ width: `${percentFilled}%` }}
-                  />
-                </div>
-                <div className="mt-1.5 flex justify-between text-[0.65rem] font-mono text-muted-foreground">
-                  <span>{slotsRemaining} slots remaining</span>
-                  <span>Max {maxCapacity} teams</span>
-                </div>
-              </div>
-            </div>
-          );
-        })()}
-
-        {/* ── Sticky Mobile Navigation Bar ── */}
-        <div className="sticky top-0 z-30 bg-background/95 backdrop-blur-md border-b-2 border-charcoal pt-3 pb-0 -mx-4 px-4 sm:-mx-5 sm:px-5 shadow-sm mt-6">
-          <div className="flex items-center justify-between gap-2 overflow-x-auto no-scrollbar">
-            <div className="flex gap-0 overflow-x-auto shrink-0">
-              {(
-                [
-                  { key: "live", label: "Live Courts", badge: liveMatches.length },
-                  { key: "bracket", label: "Playoff Bracket" },
-                  { key: "pools", label: drawnGroups ? "Drawn Brackets & Pools" : "Pool Play" },
-                  { key: "teams", label: "Teams" },
-                ] as const
-              ).map((item) => {
-                const isActive = tab === item.key;
-                return (
-                  <button
-                    key={item.key}
-                    onClick={() => setTab(item.key)}
-                    className={`flex-shrink-0 px-3 py-2 font-display text-sm uppercase tracking-wide sm:px-5 sm:text-lg transition-colors flex items-center gap-2 ${
-                      isActive ? "bg-charcoal text-sand" : "text-muted-foreground hover:text-foreground"
-                    }`}
-                  >
-                    <span>{item.label}</span>
-                    {item.key === "live" && item.badge > 0 && (
-                      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[0.6rem] font-bold bg-pickle text-sand rounded">
-                        <span className="h-1.5 w-1.5 rounded-full bg-sand animate-pulse" />
-                        {item.badge}
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-
-            {/* Quick Find My Matches button in sticky header */}
             <button
-              onClick={() => setTab("teams")}
-              className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono font-bold uppercase tracking-wider bg-charcoal border border-border text-pickle hover:border-pickle transition-colors shrink-0 rounded cursor-pointer"
+              type="button"
+              onClick={() => setIsRegModalOpen(true)}
+              className="min-h-[3rem] px-4 py-2.5 border-2 border-border bg-card text-foreground text-xs sm:text-sm font-bold uppercase tracking-wider rounded-xl hover:border-pickle transition-colors cursor-pointer"
             >
-              <span>Find My Matches</span>
-              <span>&rarr;</span>
+              Register Team +
+            </button>
+            <button
+              type="button"
+              onClick={() => setFriendlyMode((m) => !m)}
+              className="min-h-[3rem] px-4 py-2.5 border-2 border-border bg-charcoal text-sand text-xs sm:text-sm font-mono uppercase tracking-wider rounded-xl hover:border-sand/50 transition-colors cursor-pointer"
+            >
+              {friendlyMode ? "Switch to Detailed Grid" : "Switch to Easy View"}
             </button>
           </div>
         </div>
 
-        {/* Tab Contents */}
-        <div className="mt-6 sm:mt-8">
-          {tab === "live" && (
-            <LiveCourtsTab
-              matches={matches}
-              category={category}
-            />
-          )}
-          {tab === "bracket" && (
-            <Bracket
-              category={category}
-              matches={matches}
-              mainDrawMatches={mainDrawMatches}
-              drawnGroups={drawnGroups}
-              onSwitchToPools={() => setTab("pools")}
-            />
-          )}
-          {tab === "pools" && (
-            <Pools
-              category={category}
-              matches={matches}
-              drawnGroups={drawnGroups}
-              initialBracketFilter={activeBracketFilter}
-              onShareBracket={(letter) => {
-                if (typeof window !== "undefined") {
-                  const url = new URL(window.location.href);
-                  url.searchParams.set("tab", "pools");
-                  url.searchParams.set("bracket", letter);
-                  navigator.clipboard.writeText(url.toString()).then(() => {
-                    showToast(`Bracket ${letter} link copied to clipboard`);
-                  });
-                }
-              }}
-            />
-          )}
-          {tab === "teams" && (
-            <Teams
-              category={category}
-              drawnGroups={drawnGroups}
-              onFindMatches={(tm) => setFindMatchesTeam(tm)}
-              onRegisterClick={() => setIsRegModalOpen(true)}
-            />
-          )}
+        {/* Team & Player Search */}
+        <div className="mt-4">
+          <TeamFinder
+            categories={t.categories}
+            onPick={(pickedTeam, catId) => {
+              setActiveId(catId);
+              setHighlightTeam(pickedTeam.name);
+              setFriendlyMode(true);
+              setFindMatchesTeam(pickedTeam);
+            }}
+          />
         </div>
+
+        {/* Main Content: Friendly Simple Bracket View OR Detailed Multi-Tab View */}
+        {friendlyMode ? (
+          <div className="mt-6 sm:mt-8 space-y-6">
+            {/* Friendly Sub-view Switcher: Bracket Groups vs All Match Results */}
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setFriendlySubTab("bracket")}
+                className={`min-h-[2.75rem] px-4 py-2 rounded-xl text-xs sm:text-sm font-bold uppercase tracking-wider transition-all cursor-pointer border-2 ${
+                  friendlySubTab === "bracket"
+                    ? "border-pickle bg-pickle text-sand shadow-sm"
+                    : "border-border bg-card text-foreground/80 hover:border-pickle"
+                }`}
+              >
+                Bracket Groups
+              </button>
+              <button
+                type="button"
+                onClick={() => setFriendlySubTab("results")}
+                className={`min-h-[2.75rem] px-4 py-2 rounded-xl text-xs sm:text-sm font-bold uppercase tracking-wider transition-all cursor-pointer border-2 flex items-center gap-1.5 ${
+                  friendlySubTab === "results"
+                    ? "border-pickle bg-pickle text-sand shadow-sm"
+                    : "border-border bg-card text-foreground/80 hover:border-pickle"
+                }`}
+              >
+                <span>Final Match Results</span>
+                <span className="font-mono text-xs opacity-80">({categoryFinalMatches.length})</span>
+              </button>
+            </div>
+
+            {friendlySubTab === "results" ? (
+              <FinalResultsView
+                title={`${category?.label ?? "Division"} Final Results`}
+                results={categoryFinalMatches.map((m) => ({
+                  key: m.id,
+                  teamAName: m.teamAName,
+                  teamBName: m.teamBName,
+                  scoreA: m.score.teamAScore,
+                  scoreB: m.score.teamBScore,
+                  winnerName: m.winnerTeam || (m.score.teamAScore > m.score.teamBScore ? m.teamAName : m.teamBName),
+                  court: m.court,
+                  stage: m.stage,
+                }))}
+                highlightTeam={highlightTeam}
+                onTeamTap={(tm) => setFindMatchesTeam(tm)}
+                emptyMessage="No matches have completed yet in this division. Once games finish, full scores and outcomes will appear here."
+              />
+            ) : (
+              <SimpleBracketView
+                category={category}
+                matches={matches}
+                drawnGroups={drawnGroups}
+                mainDrawMatches={mainDrawMatches}
+                highlightTeam={highlightTeam}
+                onTeamTap={(tm) => setFindMatchesTeam(tm)}
+                onClearHighlight={() => setHighlightTeam(null)}
+              />
+            )}
+
+            {/* Quick link to detailed tools if needed */}
+            <div className="text-center pt-4">
+              <button
+                type="button"
+                onClick={() => setFriendlyMode(false)}
+                className="text-xs font-mono uppercase tracking-wider text-muted-foreground hover:text-foreground underline cursor-pointer"
+              >
+                Need full official tabs, playoff tree, or pool matrices? Switch to Detailed Grid
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="mt-6 sm:mt-8">
+            {/* Category pills for detailed mode */}
+            <div className="flex gap-2 overflow-x-auto pb-1 sm:flex-wrap sm:overflow-visible sm:pb-0">
+              {t.categories.map((c) => (
+                <button
+                  key={c.id}
+                  onClick={() => setActiveId(c.id)}
+                  className={`flex-shrink-0 border px-3 py-1.5 text-xs font-semibold transition-colors sm:px-4 sm:py-2 sm:text-sm ${
+                    c.id === category.id
+                      ? "border-primary bg-primary text-primary-foreground font-bold shadow-sm"
+                      : "border-border bg-card text-foreground hover:border-primary"
+                  }`}
+                >
+                  {c.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Capacity Bar */}
+            {(() => {
+              const currentCount = category.teams?.length ?? 0;
+              const maxCapacity = 32;
+              const percentFilled = Math.min(100, Math.round((currentCount / maxCapacity) * 100));
+              const slotsRemaining = Math.max(0, maxCapacity - currentCount);
+
+              return (
+                <div className="mt-4 surface-card p-4 sm:p-5 border border-border">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[0.65rem] font-bold uppercase tracking-[0.24em] text-pickle">
+                          Category Roster Capacity &middot; {category.label}
+                        </span>
+                        <span className="px-1.5 py-0.2 text-[0.6rem] font-mono bg-charcoal border border-border text-sand rounded">
+                          {category.level}
+                        </span>
+                      </div>
+                      <div className="flex items-baseline gap-2 flex-wrap">
+                        <span className="font-display text-2xl text-foreground font-bold">
+                          {currentCount} of {maxCapacity} Confirmed Teams
+                        </span>
+                        <span className="text-xs font-mono text-muted-foreground">
+                          ({percentFilled}% filled)
+                        </span>
+                        {category.pendingTeams && category.pendingTeams.length > 0 && (
+                          <span className="text-xs font-mono text-brick font-semibold">
+                            &middot; {category.pendingTeams.length} pending verification
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        onClick={() => setIsRegModalOpen(true)}
+                        className="px-4 py-2 bg-pickle text-sand text-xs font-bold uppercase tracking-widest hover:opacity-90 transition-opacity rounded cursor-pointer flex items-center gap-1.5"
+                      >
+                        <span>Register Team</span>
+                        <span>+</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="mt-3">
+                    <div className="h-2 w-full bg-charcoal rounded-full overflow-hidden border border-border/60">
+                      <div
+                        className="h-full bg-pickle transition-all duration-500 rounded-full"
+                        style={{ width: `${percentFilled}%` }}
+                      />
+                    </div>
+                    <div className="mt-1.5 flex justify-between text-[0.65rem] font-mono text-muted-foreground">
+                      <span>{slotsRemaining} slots remaining</span>
+                      <span>Max {maxCapacity} teams</span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* Sticky Tab Navigation Bar */}
+            <div className="sticky top-0 z-30 bg-background/95 backdrop-blur-md border-b-2 border-charcoal pt-3 pb-0 -mx-4 px-4 sm:-mx-5 sm:px-5 shadow-sm mt-6">
+              <div className="flex items-center justify-between gap-2 overflow-x-auto no-scrollbar">
+                <div className="flex gap-0 overflow-x-auto shrink-0">
+                  {(
+                    [
+                      { key: "live", label: "Live Courts", badge: liveMatches.length },
+                      { key: "bracket", label: "Playoff Bracket" },
+                      { key: "pools", label: drawnGroups ? "Drawn Brackets & Pools" : "Pool Play" },
+                      { key: "teams", label: "Teams" },
+                    ] as const
+                  ).map((item) => {
+                    const isActive = tab === item.key;
+                    return (
+                      <button
+                        key={item.key}
+                        onClick={() => setTab(item.key)}
+                        className={`flex-shrink-0 px-3 py-2 font-display text-sm uppercase tracking-wide sm:px-5 sm:text-lg transition-colors flex items-center gap-2 ${
+                          isActive ? "bg-charcoal text-sand" : "text-muted-foreground hover:text-foreground"
+                        }`}
+                      >
+                        <span>{item.label}</span>
+                        {item.key === "live" && item.badge > 0 && (
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[0.6rem] font-bold bg-pickle text-sand rounded">
+                            <span className="h-1.5 w-1.5 rounded-full bg-sand animate-pulse" />
+                            {item.badge}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <button
+                  onClick={() => setTab("teams")}
+                  className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono font-bold uppercase tracking-wider bg-charcoal border border-border text-pickle hover:border-pickle transition-colors shrink-0 rounded cursor-pointer"
+                >
+                  <span>Find My Matches</span>
+                  <span>&rarr;</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Tab Contents */}
+            <div className="mt-6 sm:mt-8">
+              {tab === "live" && (
+                <LiveCourtsTab
+                  matches={matches}
+                  category={category}
+                />
+              )}
+              {tab === "bracket" && (
+                <Bracket
+                  category={category}
+                  matches={matches}
+                  mainDrawMatches={mainDrawMatches}
+                  drawnGroups={drawnGroups}
+                  onSwitchToPools={() => setTab("pools")}
+                />
+              )}
+              {tab === "pools" && (
+                <Pools
+                  category={category}
+                  matches={matches}
+                  drawnGroups={drawnGroups}
+                  initialBracketFilter={activeBracketFilter}
+                  onShareBracket={(letter) => {
+                    if (typeof window !== "undefined") {
+                      const url = new URL(window.location.href);
+                      url.searchParams.set("tab", "pools");
+                      url.searchParams.set("bracket", letter);
+                      navigator.clipboard.writeText(url.toString()).then(() => {
+                        showToast(`Bracket ${letter} link copied to clipboard`);
+                      });
+                    }
+                  }}
+                />
+              )}
+              {tab === "teams" && (
+                <Teams
+                  category={category}
+                  drawnGroups={drawnGroups}
+                  onFindMatches={(tm) => setFindMatchesTeam(tm)}
+                  onRegisterClick={() => setIsRegModalOpen(true)}
+                />
+              )}
+            </div>
+          </div>
+        )}
       </section>
 
       {/* ── Schedule & Rules ── */}
@@ -544,6 +730,20 @@ function TournamentPage() {
         initialCategory={category}
         onRegistered={(newTeam) => {
           showToast(`Team ${newTeam.name} submitted for admin verification!`);
+        }}
+      />
+
+      {/* Step 2 – Categories Bottom Sheet Modal */}
+      <CategorySheet
+        open={isCategorySheetOpen}
+        onClose={() => setIsCategorySheetOpen(false)}
+        tournamentName={t.name}
+        categories={t.categories}
+        activeId={category.id}
+        liveCategoryIds={liveCategoryIds}
+        onSelect={(newId) => {
+          setActiveId(newId);
+          setIsCategorySheetOpen(false);
         }}
       />
 
@@ -630,9 +830,12 @@ function LiveActionTicker({
                 onClick={onViewLiveCourts}
                 className="bg-card/90 border border-pickle/50 p-3 hover:border-pickle transition-colors cursor-pointer text-foreground rounded-sm flex flex-col justify-between"
               >
-                <div className="flex items-center justify-between text-[0.65rem] uppercase tracking-widest border-b border-border/50 pb-1.5 mb-2">
-                  <span className="font-bold text-pickle font-mono">{m.court}</span>
-                  <span className="font-mono text-muted-foreground">
+                <div className="flex items-center justify-between border-b border-border/50 pb-2 mb-2">
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-mono font-bold uppercase tracking-wider bg-pickle text-sand rounded-lg shadow-sm">
+                    <span className="h-1.5 w-1.5 rounded-full bg-sand animate-pulse" />
+                    {m.court?.startsWith("Court") ? m.court : `Court ${m.court}`}
+                  </span>
+                  <span className="font-mono text-xs text-sand/80 bg-charcoal px-2 py-0.5 rounded border border-border">
                     Call: {serverScore}-{receiverScore}-{s.serverNumber}
                   </span>
                 </div>
@@ -765,11 +968,10 @@ function LiveCourtsTab({
             <button
               key={btn.key}
               onClick={() => setFilter(btn.key as typeof filter)}
-              className={`px-3 py-1.5 text-xs font-bold uppercase tracking-wider border transition-colors flex items-center gap-1.5 ${
-                filter === btn.key
+              className={`px-3 py-1.5 text-xs font-bold uppercase tracking-wider border transition-colors flex items-center gap-1.5 ${filter === btn.key
                   ? "border-primary bg-primary text-primary-foreground"
                   : "border-border bg-card text-foreground hover:border-primary"
-              }`}
+                }`}
             >
               {btn.isLive && btn.count > 0 && (
                 <span className="h-2 w-2 rounded-full bg-pickle animate-pulse" />
@@ -832,15 +1034,14 @@ function LiveCourtsTab({
             return (
               <div
                 key={courtName}
-                className={`p-3.5 border rounded flex flex-col justify-between transition-all ${
-                  liveMatch
+                className={`p-3.5 border rounded flex flex-col justify-between transition-all ${liveMatch
                     ? "bg-card border-pickle/70 shadow-sm"
                     : station?.status === "warmup"
-                    ? "bg-card border-amber-500/70"
-                    : station?.status === "maintenance"
-                    ? "bg-card border-brick/60"
-                    : "bg-card/70 border-border"
-                }`}
+                      ? "bg-card border-amber-500/70"
+                      : station?.status === "maintenance"
+                        ? "bg-card border-brick/60"
+                        : "bg-card/70 border-border"
+                  }`}
               >
                 <div>
                   <div className="flex items-center justify-between border-b border-border/50 pb-2 mb-2.5">
@@ -919,47 +1120,19 @@ function LiveCourtsTab({
         </div>
       </div>
 
-      {/* ── Up Next in Queue (Spectator Queue Board) ── */}
+      {/* ── Up Next in Queue (Compact Slider) ── */}
       {queuedUpcoming.length > 0 && (
-        <div className="surface-card p-4 sm:p-5 border border-border space-y-3">
-          <div className="flex items-center justify-between">
-            <h4 className="font-display text-lg uppercase tracking-wide text-foreground">
-              Up Next in Queue ({queuedUpcoming.length} Matches)
-            </h4>
-            <span className="text-xs text-muted-foreground">
-              Order of play for facility courts
-            </span>
-          </div>
-
-          <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
-            {queuedUpcoming.slice(0, 6).map((q, idx) => (
-              <div
-                key={q.id}
-                className="p-2.5 bg-card border border-border rounded flex items-center justify-between gap-2"
-              >
-                <div className="flex items-center gap-2.5 min-w-0">
-                  <div className="h-6 w-6 rounded bg-charcoal text-sand flex items-center justify-center font-display text-xs shrink-0 border border-border">
-                    #{idx + 1}
-                  </div>
-                  <div className="min-w-0">
-                    <span className="text-[0.65rem] text-pickle font-bold block truncate">
-                      {q.stage}
-                    </span>
-                    <span className="text-xs font-semibold text-foreground block truncate">
-                      {q.teamAName} vs {q.teamBName}
-                    </span>
-                  </div>
-                </div>
-
-                {q.assignedCourt && (
-                  <span className="px-1.5 py-0.5 text-[0.6rem] uppercase tracking-wider bg-pickle/20 text-pickle border border-pickle/40 shrink-0 font-bold">
-                    {q.assignedCourt}
-                  </span>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
+        <UpNextSlider
+          title={`Up Next in Queue (${queuedUpcoming.length} Matches)`}
+          matches={queuedUpcoming.map((q, idx) => ({
+            key: q.id,
+            orderNumber: idx + 1,
+            teamAName: q.teamAName,
+            teamBName: q.teamBName,
+            court: q.assignedCourt,
+            round: q.stage,
+          }))}
+        />
       )}
 
       {/* Live matches section */}
@@ -983,18 +1156,21 @@ function LiveCourtsTab({
         </div>
       )}
 
-      {/* Completed matches section */}
+      {/* Completed matches section (User-Friendly Final Results) */}
       {(filter === "all" || filter === "final") && finalMatches.length > 0 && (
-        <div className="space-y-4">
-          <h4 className="font-display text-xl uppercase tracking-wide text-brick">
-            Final Match Results
-          </h4>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {finalMatches.map((m) => (
-              <LiveCourtCard key={m.id} match={m} />
-            ))}
-          </div>
-        </div>
+        <FinalResultsView
+          title="Final Match Results"
+          results={finalMatches.map((m) => ({
+            key: m.id,
+            teamAName: m.teamAName,
+            teamBName: m.teamBName,
+            scoreA: m.score.teamAScore,
+            scoreB: m.score.teamBScore,
+            winnerName: m.winnerTeam || (m.score.teamAScore > m.score.teamBScore ? m.teamAName : m.teamBName),
+            court: m.court,
+            stage: m.stage,
+          }))}
+        />
       )}
 
       {/* ── Minimized Per-Court Scheduled Matches ── */}
@@ -1042,13 +1218,12 @@ function LiveCourtsTab({
                         <div className="flex items-center justify-between border-b border-border/50 pb-2 mb-2.5">
                           <span className="font-display text-base text-foreground">{courtName}</span>
                           <span
-                            className={`px-2 py-0.5 text-[0.6rem] font-bold uppercase tracking-wider rounded ${
-                              hasMatch
+                            className={`px-2 py-0.5 text-[0.6rem] font-bold uppercase tracking-wider rounded ${hasMatch
                                 ? "bg-pickle/15 text-pickle border border-pickle/40"
                                 : station?.status === "maintenance"
                                   ? "bg-brick/20 text-brick border border-brick/40"
                                   : "bg-muted text-muted-foreground border border-border"
-                            }`}
+                              }`}
                           >
                             {hasMatch
                               ? `${courtMatches.length} Scheduled`
@@ -1165,31 +1340,28 @@ function LiveCourtCard({ match }: { match: LiveMatch }) {
 
   return (
     <div
-      className={`surface-card p-0 overflow-hidden border transition-all ${
-        isLive
+      className={`surface-card p-0 overflow-hidden border transition-all ${isLive
           ? "border-pickle/60 shadow-lg shadow-pickle/10"
           : isFinal
             ? "border-brick/40"
             : "border-border"
-      }`}
+        }`}
     >
       {/* Card Header */}
       <div
-        className={`px-4 py-2.5 flex items-center justify-between ${
-          isLive ? "bg-pickle/15 text-foreground" : "bg-charcoal text-sand"
-        }`}
+        className={`px-4 py-2.5 flex items-center justify-between ${isLive ? "bg-pickle/15 text-foreground" : "bg-charcoal text-sand"
+          }`}
       >
         <span className="text-xs font-bold uppercase tracking-widest font-mono">
           {match.court === "Queue" ? "Queue (Courts 1–4)" : match.court}
         </span>
         <span
-          className={`px-2 py-0.5 text-[0.6rem] font-bold uppercase tracking-widest rounded ${
-            isLive
+          className={`px-2 py-0.5 text-[0.6rem] font-bold uppercase tracking-widest rounded ${isLive
               ? "bg-pickle text-sand animate-pulse"
               : isFinal
                 ? "bg-brick text-sand"
                 : "bg-muted text-muted-foreground"
-          }`}
+            }`}
         >
           {isLive ? "Live Now" : isFinal ? "Final" : "Scheduled"}
         </span>
@@ -1201,11 +1373,10 @@ function LiveCourtCard({ match }: { match: LiveMatch }) {
           {/* Team A */}
           <div className="text-center">
             <span
-              className={`block font-display text-4xl sm:text-5xl ${
-                match.winnerTeam === match.teamAName
+              className={`block font-display text-4xl sm:text-5xl ${match.winnerTeam === match.teamAName
                   ? "text-pickle font-bold"
                   : "text-foreground"
-              }`}
+                }`}
             >
               {s.teamAScore}
             </span>
@@ -1232,11 +1403,10 @@ function LiveCourtCard({ match }: { match: LiveMatch }) {
           {/* Team B */}
           <div className="text-center">
             <span
-              className={`block font-display text-4xl sm:text-5xl ${
-                match.winnerTeam === match.teamBName
+              className={`block font-display text-4xl sm:text-5xl ${match.winnerTeam === match.teamBName
                   ? "text-pickle font-bold"
                   : "text-foreground"
-              }`}
+                }`}
             >
               {s.teamBScore}
             </span>
@@ -1351,9 +1521,8 @@ function MatchCard({
 
   const row = (id?: string, name?: string, score?: number, won?: boolean, isServing?: boolean) => (
     <div
-      className={`flex items-center justify-between px-3 py-2 text-sm transition-colors ${
-        won ? "bg-accent/10 font-bold" : ""
-      }`}
+      className={`flex items-center justify-between px-3 py-2 text-sm transition-colors ${won ? "bg-accent/10 font-bold" : ""
+        }`}
     >
       <div className="flex items-center gap-2 min-w-0 pr-2">
         {isServing && <span className="h-2 w-2 rounded-full bg-pickle shrink-0 animate-pulse" />}
@@ -1368,13 +1537,12 @@ function MatchCard({
 
   return (
     <div
-      className={`surface-card overflow-hidden border transition-all ${
-        isLive
+      className={`surface-card overflow-hidden border transition-all ${isLive
           ? "border-pickle/60 shadow-md shadow-pickle/10"
           : isFinal
             ? "border-brick/40"
             : "border-border"
-      }`}
+        }`}
     >
       {/* Header */}
       <div className="bg-charcoal px-3 py-1.5 text-[0.6rem] uppercase tracking-[0.22em] text-sand flex items-center justify-between">
@@ -1429,13 +1597,12 @@ function MainDrawKnockoutMatchCard({
 
   return (
     <div
-      className={`surface-card overflow-hidden border transition-all ${
-        isLive
+      className={`surface-card overflow-hidden border transition-all ${isLive
           ? "border-pickle/60 shadow-md shadow-pickle/10"
           : isFinal
             ? "border-brick/50 shadow-sm"
             : "border-border"
-      }`}
+        }`}
     >
       <div className="bg-charcoal px-3 py-1.5 text-[0.6rem] uppercase tracking-[0.22em] text-sand flex items-center justify-between">
         <span className="font-bold">{match.label}</span>
@@ -1523,13 +1690,12 @@ function Bracket({
         </div>
 
         {/* Responsive bracket columns */}
-        <div className={`grid gap-6 ${
-          r16Matches.length > 0
+        <div className={`grid gap-6 ${r16Matches.length > 0
             ? "grid-cols-1 md:grid-cols-2 lg:grid-cols-4"
             : qfMatches.length > 0
               ? "grid-cols-1 md:grid-cols-2 lg:grid-cols-3"
               : "grid-cols-1 md:grid-cols-2"
-        }`}>
+          }`}>
           {/* Round of 16 */}
           {r16Matches.length > 0 && (
             <div className="space-y-4">
@@ -1889,13 +2055,12 @@ function BracketCard({
                     return (
                       <tr
                         key={row.name}
-                        className={`border-t border-border/60 transition-colors ${
-                          isQualified
+                        className={`border-t border-border/60 transition-colors ${isQualified
                             ? "border-l-4 border-l-pickle bg-pickle/5"
                             : i % 2 === 0
                               ? "bg-background"
                               : "bg-card"
-                        }`}
+                          }`}
                       >
                         <td className="px-3 py-2 font-semibold truncate max-w-[140px]">
                           <div className="flex items-center gap-1.5 truncate">
@@ -1958,13 +2123,12 @@ function BracketCard({
                 return (
                   <div
                     key={gm.id}
-                    className={`border transition-colors ${
-                      isLive
+                    className={`border transition-colors ${isLive
                         ? "border-pickle/50 bg-pickle/5 shadow-sm"
                         : isFinal
                           ? "border-brick/25 bg-card"
                           : "border-border bg-card"
-                    }`}
+                      }`}
                   >
                     {/* Match row header */}
                     <div className="flex items-center justify-between px-3 pt-2 pb-1 text-[0.6rem] uppercase tracking-widest">
@@ -2092,11 +2256,10 @@ function Pools({
           </span>
           <button
             onClick={() => setSelectedBracket("all")}
-            className={`px-3 py-1.5 text-xs font-mono font-bold uppercase tracking-wider border rounded transition-colors shrink-0 cursor-pointer ${
-              selectedBracket === "all"
+            className={`px-3 py-1.5 text-xs font-mono font-bold uppercase tracking-wider border rounded transition-colors shrink-0 cursor-pointer ${selectedBracket === "all"
                 ? "border-pickle bg-pickle text-sand"
                 : "border-border bg-card text-foreground hover:border-pickle"
-            }`}
+              }`}
           >
             All Brackets ({groupsToDisplay.length})
           </button>
@@ -2114,11 +2277,10 @@ function Pools({
               <button
                 key={grp.letter}
                 onClick={() => setSelectedBracket(grp.letter)}
-                className={`px-3 py-1.5 text-xs font-mono font-bold uppercase tracking-wider border rounded transition-colors shrink-0 flex items-center gap-1.5 cursor-pointer ${
-                  isSelected
+                className={`px-3 py-1.5 text-xs font-mono font-bold uppercase tracking-wider border rounded transition-colors shrink-0 flex items-center gap-1.5 cursor-pointer ${isSelected
                     ? "border-pickle bg-pickle text-sand"
                     : "border-border bg-card text-foreground hover:border-pickle"
-                }`}
+                  }`}
               >
                 <span>Bracket {grp.letter}</span>
                 {hasLiveMatch && (
@@ -2211,13 +2373,12 @@ function Pools({
                   return (
                     <li
                       key={m.id}
-                      className={`surface-card flex flex-col gap-1 p-3 text-sm sm:flex-row sm:items-center sm:gap-4 border transition-colors ${
-                        isLive
+                      className={`surface-card flex flex-col gap-1 p-3 text-sm sm:flex-row sm:items-center sm:gap-4 border transition-colors ${isLive
                           ? "border-pickle/60 bg-pickle/5 shadow-sm"
                           : isFinal
                             ? "border-brick/30"
                             : "border-border"
-                      }`}
+                        }`}
                     >
                       {/* Teams & score row */}
                       <div className="flex items-center gap-2 flex-1 min-w-0">
@@ -2445,11 +2606,10 @@ function Teams({
                         </span>
                       )}
                       <span
-                        className={`px-2 py-0.5 text-[0.6rem] font-bold uppercase tracking-widest rounded ${
-                          isPaid
+                        className={`px-2 py-0.5 text-[0.6rem] font-bold uppercase tracking-widest rounded ${isPaid
                             ? "bg-pickle/20 text-pickle border border-pickle/40"
                             : "bg-brick/20 text-brick border border-brick/40"
-                        }`}
+                          }`}
                       >
                         {isPaid ? "Verified" : "Pending"}
                       </span>
@@ -2494,3 +2654,4 @@ function Teams({
     </div>
   );
 }
+

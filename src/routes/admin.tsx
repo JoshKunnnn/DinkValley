@@ -16,6 +16,8 @@ import {
   deleteAllTeamsInCategory,
   approvePendingRegistration,
   rejectPendingRegistration,
+  getUniqueClubTeams,
+  type ExistingClubTeam,
 } from "@/lib/tournament-store";
 import { generate32Teams } from "@/lib/team-generator";
 import {
@@ -188,7 +190,7 @@ function Admin() {
 
   const tournament = tournaments.find((t) => t.slug === tournamentSlug) ?? tournaments[0];
   const category =
-    tournament?.categories?.find((c) => c.id === categoryId) ?? tournament?.categories?.[0];
+    tournament?.categories?.find((c) => c.id === categoryId || (c as any).category_slug === categoryId) ?? tournament?.categories?.[0];
 
   // Sync tournamentSlug when tournaments change
   useEffect(() => {
@@ -206,7 +208,10 @@ function Admin() {
   // Sync categoryId when tournament categories change
   useEffect(() => {
     if (tournament && tournament.categories && tournament.categories.length > 0) {
-      if (categoryId !== "all" && (!categoryId || !tournament.categories.some((c) => c.id === categoryId))) {
+      if (
+        categoryId !== "all" &&
+        (!categoryId || !tournament.categories.some((c) => c.id === categoryId || (c as any).category_slug === categoryId))
+      ) {
         setCategoryId(tournament.categories[0]!.id);
       }
     }
@@ -1032,6 +1037,75 @@ function TeamsTab({
   const [newPlayers, setNewPlayers] = useState("");
   const [targetNewCategory, setTargetNewCategory] = useState<string>(category?.id || tournament.categories?.[0]?.id || "");
   const [teamAddError, setTeamAddError] = useState<string | null>(null);
+
+  // Existing team registration state & handlers
+  const [registerMode, setRegisterMode] = useState<"existing" | "manual">("existing");
+  const [existingSearchQuery, setExistingSearchQuery] = useState("");
+  const [confirmingRosterTeam, setConfirmingRosterTeam] = useState<ExistingClubTeam | null>(null);
+  const [adminRosterNotice, setAdminRosterNotice] = useState<string | null>(null);
+
+  const existingClubTeams = useMemo(() => {
+    return getUniqueClubTeams();
+  }, [tournament, tourns]);
+
+  const filteredClubTeams = useMemo(() => {
+    if (!existingSearchQuery.trim()) return existingClubTeams;
+    const q = existingSearchQuery.trim().toLowerCase();
+    return existingClubTeams.filter(
+      (t) =>
+        t.name.toLowerCase().includes(q) ||
+        (t.club || "").toLowerCase().includes(q) ||
+        t.players.some((p) => p.toLowerCase().includes(q))
+    );
+  }, [existingClubTeams, existingSearchQuery]);
+
+  const handlePromptAddExistingTeam = (t: ExistingClubTeam) => {
+    setConfirmingRosterTeam(t);
+  };
+
+  const handleConfirmPutInRoster = () => {
+    if (!confirmingRosterTeam) return;
+    const targetCatId = targetNewCategory || (categoryId !== "all" ? categoryId : category.id);
+    const targetCat = tournament.categories.find((c) => c.id === targetCatId) || category;
+
+    const alreadyRegistered =
+      targetCat.teams?.some(
+        (t) => t.name.trim().toLowerCase() === confirmingRosterTeam.name.trim().toLowerCase()
+      ) ||
+      (targetCat.pendingTeams || []).some(
+        (t) => t.name.trim().toLowerCase() === confirmingRosterTeam.name.trim().toLowerCase()
+      );
+
+    if (alreadyRegistered) {
+      setTeamAddError(`"${confirmingRosterTeam.name}" is already registered in ${targetCat.label}.`);
+      setConfirmingRosterTeam(null);
+      return;
+    }
+
+    const newTeam: Team = {
+      id: generateUUID(),
+      name: confirmingRosterTeam.name.trim(),
+      players:
+        confirmingRosterTeam.players && confirmingRosterTeam.players.length > 0
+          ? confirmingRosterTeam.players
+          : ["Player 1", "Player 2"],
+      club: confirmingRosterTeam.club || "Dink Valley",
+      paid: true,
+      paymentStatus: "Verified",
+    };
+
+    addTeamToCategory(tournament.slug, targetCatId, newTeam);
+    setAdminRosterNotice(`Team "${confirmingRosterTeam.name}" has been put into ${targetCat.label} roster.`);
+    setConfirmingRosterTeam(null);
+    setTeamAddError(null);
+  };
+
+  const handlePreFillForCustomization = (t: ExistingClubTeam) => {
+    setNewTeamName(t.name);
+    setNewPlayers(t.players.join(" / "));
+    setRegisterMode("manual");
+    setConfirmingRosterTeam(null);
+  };
 
   const isAllCategories = categoryId === "all";
   const targetCategories = useMemo(() => {
@@ -2079,53 +2153,235 @@ function TeamsTab({
       </div>
 
       {/* Add team / pair row */}
-      <div className="surface-card p-4 border-2 border-border rounded-xl space-y-3 bg-card">
-        <div className="flex items-center justify-between">
-          <span className="text-xs font-bold uppercase tracking-widest text-foreground">
-            Register or Add Pair
-          </span>
-          <span className="text-[0.7rem] text-foreground/80 font-mono font-bold">
-            {isAllCategories ? "Select division below" : `Adding to ${category.label}`}
-          </span>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          {isAllCategories && (
-            <select
-              value={targetNewCategory}
-              onChange={(e) => setTargetNewCategory(e.target.value)}
-              className="border-2 border-input bg-background px-3 py-2 text-xs font-mono font-bold text-foreground focus:border-pickle focus:outline-none rounded"
+      <div className="surface-card p-4 sm:p-5 border-2 border-border rounded-xl space-y-4 bg-card shadow-xs">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-border pb-3">
+          <div>
+            <span className="text-xs font-bold uppercase tracking-widest text-foreground block">
+              Register or Add Team
+            </span>
+            <span className="text-[0.7rem] text-foreground/80 font-mono font-bold">
+              {isAllCategories ? "Select division below" : `Adding to ${category.label}`}
+            </span>
+          </div>
+
+          {/* Mode toggle */}
+          <div className="flex items-center gap-1 bg-background p-1 rounded-lg border border-border">
+            <button
+              type="button"
+              onClick={() => setRegisterMode("existing")}
+              className={`px-3 py-1 text-xs font-bold uppercase tracking-wider rounded transition-all cursor-pointer ${
+                registerMode === "existing"
+                  ? "bg-pickle text-sand shadow-xs"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
             >
-              {tournament.categories.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.label}
-                </option>
-              ))}
-            </select>
-          )}
-          <input
-            value={newTeamName}
-            onChange={(e) => setNewTeamName(e.target.value)}
-            placeholder="Team name (e.g. Smash Bros)"
-            className="flex-1 min-w-[140px] border-2 border-input bg-background px-3 py-2 text-sm text-foreground font-medium focus:border-pickle focus:outline-none rounded"
-          />
-          <input
-            value={newPlayers}
-            onChange={(e) => setNewPlayers(e.target.value)}
-            placeholder="Player 1 / Player 2"
-            className="flex-1 min-w-[160px] border-2 border-input bg-background px-3 py-2 text-sm text-foreground font-medium focus:border-pickle focus:outline-none rounded"
-          />
-          <button
-            type="button"
-            onClick={handleCreateTeam}
-            className="bg-pickle px-4 py-2 text-xs font-mono font-bold uppercase tracking-wider text-white hover:opacity-90 cursor-pointer shadow-xs whitespace-nowrap rounded"
-          >
-            + Add Pair
-          </button>
+              Existing Teams ({existingClubTeams.length})
+            </button>
+            <button
+              type="button"
+              onClick={() => setRegisterMode("manual")}
+              className={`px-3 py-1 text-xs font-bold uppercase tracking-wider rounded transition-all cursor-pointer ${
+                registerMode === "manual"
+                  ? "bg-pickle text-sand shadow-xs"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              Custom Pair
+            </button>
+          </div>
         </div>
+
+        {/* Division target selector */}
+        <div className="flex items-center gap-2">
+          <label className="text-[0.65rem] font-bold uppercase tracking-wider text-muted-foreground whitespace-nowrap">
+            Target Division:
+          </label>
+          <select
+            value={targetNewCategory}
+            onChange={(e) => setTargetNewCategory(e.target.value)}
+            className="flex-1 border-2 border-input bg-background px-3 py-1.5 text-xs font-mono font-bold text-foreground focus:border-pickle focus:outline-none rounded"
+          >
+            {tournament.categories.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.label} ({c.level} · {c.division}) &mdash; {c.teams?.length || 0} teams
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {/* Success / Error notification */}
+        {adminRosterNotice && (
+          <div className="p-3 rounded-lg bg-pickle/15 border border-pickle/40 text-xs text-pickle font-bold flex items-center justify-between">
+            <span>{adminRosterNotice}</span>
+            <button
+              type="button"
+              onClick={() => setAdminRosterNotice(null)}
+              className="text-[0.65rem] text-pickle hover:text-foreground uppercase cursor-pointer"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
         {teamAddError && (
-          <p className="text-xs text-brick font-bold">{teamAddError}</p>
+          <div className="p-3 rounded-lg bg-brick/15 border border-brick/40 text-xs text-brick font-bold flex items-center justify-between">
+            <span>{teamAddError}</span>
+            <button
+              type="button"
+              onClick={() => setTeamAddError(null)}
+              className="text-[0.65rem] text-brick hover:text-foreground uppercase cursor-pointer"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
+        {registerMode === "existing" ? (
+          <div className="space-y-3">
+            {/* Search */}
+            <input
+              type="text"
+              placeholder="Search existing club team or player name..."
+              value={existingSearchQuery}
+              onChange={(e) => setExistingSearchQuery(e.target.value)}
+              className="w-full border-2 border-input bg-background px-3 py-2 text-xs font-medium text-foreground rounded focus:border-pickle focus:outline-none placeholder:text-muted-foreground/60"
+            />
+
+            {/* Clickable Team Cards Grid */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5 max-h-56 overflow-y-auto pr-1">
+              {filteredClubTeams.length === 0 ? (
+                <div className="col-span-full py-4 text-center text-xs text-muted-foreground">
+                  No existing club teams found matching "{existingSearchQuery}".
+                </div>
+              ) : (
+                filteredClubTeams.map((t) => (
+                  <div
+                    key={t.name}
+                    onClick={() => handlePromptAddExistingTeam(t)}
+                    className="p-3 rounded-lg border border-border bg-background hover:border-pickle hover:bg-card text-left cursor-pointer transition-all space-y-1.5 shadow-2xs group"
+                  >
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="font-bold text-xs text-foreground group-hover:text-pickle transition-colors truncate">
+                        {t.name}
+                      </span>
+                      <span className="text-[0.6rem] font-mono uppercase px-1.5 py-0.5 rounded bg-card border border-border text-muted-foreground shrink-0">
+                        {t.club || "Club"}
+                      </span>
+                    </div>
+                    <p className="text-[0.7rem] text-muted-foreground truncate">
+                      {t.players.join(" & ") || "2 Players"}
+                    </p>
+                    <div className="pt-1 flex items-center justify-between gap-2">
+                      <span className="text-[0.6rem] font-mono text-muted-foreground">
+                        {t.appearancesCount} past event{t.appearancesCount === 1 ? "" : "s"}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handlePromptAddExistingTeam(t);
+                        }}
+                        className="px-2.5 py-1 text-[0.65rem] font-bold uppercase tracking-wider bg-pickle text-sand hover:opacity-90 rounded cursor-pointer transition-all shrink-0"
+                      >
+                        + Put in Roster
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            <input
+              value={newTeamName}
+              onChange={(e) => setNewTeamName(e.target.value)}
+              placeholder="Team name (e.g. Smash Bros)"
+              className="flex-1 min-w-[140px] border-2 border-input bg-background px-3 py-2 text-sm text-foreground font-medium focus:border-pickle focus:outline-none rounded"
+            />
+            <input
+              value={newPlayers}
+              onChange={(e) => setNewPlayers(e.target.value)}
+              placeholder="Player 1 / Player 2"
+              className="flex-1 min-w-[160px] border-2 border-input bg-background px-3 py-2 text-sm text-foreground font-medium focus:border-pickle focus:outline-none rounded"
+            />
+            <button
+              type="button"
+              onClick={handleCreateTeam}
+              className="bg-pickle px-4 py-2 text-xs font-mono font-bold uppercase tracking-wider text-white hover:opacity-90 cursor-pointer shadow-xs whitespace-nowrap rounded"
+            >
+              + Add Pair
+            </button>
+          </div>
         )}
       </div>
+
+      {/* Confirmation Modal: Put Existing Team in Roster */}
+      {confirmingRosterTeam && (() => {
+        const targetCatId = targetNewCategory || (categoryId !== "all" ? categoryId : category.id);
+        const targetCat = tournament.categories.find((c) => c.id === targetCatId) || category;
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-sm animate-in fade-in">
+            <div className="surface-card bg-card border-2 border-pickle w-full max-w-md p-6 rounded-xl shadow-2xl space-y-4">
+              <div>
+                <span className="text-[0.65rem] font-bold uppercase tracking-[0.24em] text-pickle block font-mono">
+                  Roster Confirmation
+                </span>
+                <h3 className="font-display text-2xl text-foreground font-bold mt-1">
+                  Put this team in the roster?
+                </h3>
+              </div>
+
+              <p className="text-xs text-muted-foreground">
+                Would you like to put existing team <strong>"{confirmingRosterTeam.name}"</strong> into the roster for <strong>{targetCat.label}</strong>?
+              </p>
+
+              <div className="surface-card bg-background/80 p-3.5 rounded-lg border border-border space-y-2 text-xs">
+                <div className="flex justify-between border-b border-border/40 pb-1.5">
+                  <span className="text-muted-foreground uppercase text-[0.65rem] font-mono">Team</span>
+                  <span className="font-bold text-foreground">{confirmingRosterTeam.name}</span>
+                </div>
+                <div className="flex justify-between border-b border-border/40 pb-1.5">
+                  <span className="text-muted-foreground uppercase text-[0.65rem] font-mono">Players</span>
+                  <span className="font-semibold text-foreground">{confirmingRosterTeam.players.join(" & ") || "2 Players"}</span>
+                </div>
+                <div className="flex justify-between border-b border-border/40 pb-1.5">
+                  <span className="text-muted-foreground uppercase text-[0.65rem] font-mono">Club</span>
+                  <span className="font-semibold text-foreground">{confirmingRosterTeam.club || "Dink Valley"}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground uppercase text-[0.65rem] font-mono">Target Division</span>
+                  <span className="font-bold text-pickle">{targetCat.label}</span>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-2.5 pt-2 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => setConfirmingRosterTeam(null)}
+                  className="px-4 py-2 text-xs font-bold uppercase tracking-wider border border-border bg-card text-foreground hover:bg-background rounded-md cursor-pointer transition-all"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handlePreFillForCustomization(confirmingRosterTeam)}
+                  className="px-3 py-2 text-xs font-bold uppercase tracking-wider border border-pickle/40 text-pickle hover:bg-pickle/10 rounded-md cursor-pointer transition-all"
+                  title="Edit names before adding"
+                >
+                  Customize Players
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfirmPutInRoster}
+                  className="px-4 py-2 text-xs font-bold uppercase tracking-wider bg-pickle text-sand hover:opacity-90 rounded-md cursor-pointer shadow-xs transition-all"
+                >
+                  Yes, Put in Roster
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Filter tabs, Search & Bulk expand */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
