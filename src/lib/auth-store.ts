@@ -1,4 +1,6 @@
+import { supabase } from "@/integrations/supabase/client";
 import { getAccessCodes, saveAccessCodes, validateAndUseCode } from "./access-codes";
+import { dbCheckAccessCode } from "./supabase-service";
 
 export type StaffRole = "admin" | "umpire";
 
@@ -105,7 +107,12 @@ export function setStaffSession(role: StaffRole, name: string): void {
   }
 }
 
-export function logoutStaff(): void {
+export async function logoutStaff(): Promise<void> {
+  try {
+    await supabase.auth.signOut();
+  } catch {
+    // ignore
+  }
   if (typeof window === "undefined") return;
   try {
     localStorage.removeItem("mock_auth");
@@ -120,57 +127,33 @@ export function logoutStaff(): void {
 }
 
 /**
- * Authenticate using an official access code (e.g. DV-ADMIN or UMP-2026).
+ * Access code direct login is disabled.
+ * Access codes are only viewed in the admin console and redeemed during initial account registration.
  */
-export function loginWithAccessCode(codeStr: string): {
+export async function loginWithAccessCode(_codeStr: string): Promise<{
   success: boolean;
   role?: StaffRole;
   name?: string;
   error?: string;
-} {
-  const clean = codeStr.trim().toUpperCase();
-  if (!clean) {
-    return { success: false, error: "Please enter an official access code." };
-  }
-
-  const codes = getAccessCodes();
-  const match = codes.find((c) => c.code.toUpperCase() === clean);
-
-  if (match) {
-    const role: StaffRole = match.role;
-    const defaultName = role === "admin" ? "Tournament Director" : "Match Official";
-    setStaffSession(role, defaultName);
-    return { success: true, role, name: defaultName };
-  }
-
-  // Check fallback known codes
-  if (clean === "DV-ADMIN" || clean === "DV-ADMIN-2026") {
-    setStaffSession("admin", "Tournament Director");
-    return { success: true, role: "admin", name: "Tournament Director" };
-  }
-  if (clean === "UMP-2026" || clean === "UMP-CERT-88") {
-    setStaffSession("umpire", "Match Official");
-    return { success: true, role: "umpire", name: "Match Official" };
-  }
-
+}> {
   return {
     success: false,
-    error: "Invalid access code. Please request an authorized access code from tournament management.",
+    error: "Direct access code login has been disabled for security. Please sign in with your email and password. Access codes are managed in the Admin Console and used for new official account registration.",
   };
 }
 
 /**
- * Authenticate using email and password.
+ * Authenticate using email and password via Supabase Auth with fallback.
  */
-export function loginWithCredentials(
+export async function loginWithCredentials(
   emailStr: string,
   passwordStr: string
-): {
+): Promise<{
   success: boolean;
   role?: StaffRole;
   name?: string;
   error?: string;
-} {
+}> {
   const cleanEmail = emailStr.trim().toLowerCase();
   const cleanPassword = passwordStr.trim();
 
@@ -178,12 +161,36 @@ export function loginWithCredentials(
     return { success: false, error: "Please enter both email and password." };
   }
 
+  // 1. Try Supabase Auth
+  try {
+    const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+      email: cleanEmail,
+      password: cleanPassword,
+    });
+
+    if (!authError && authData?.user) {
+      // Query profile role
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("role, name")
+        .eq("id", authData.user.id)
+        .maybeSingle();
+
+      const role: StaffRole = profile?.role === "admin" ? "admin" : "umpire";
+      const name = profile?.name || (role === "admin" ? "Tournament Director" : "Match Official");
+      setStaffSession(role, name);
+      return { success: true, role, name };
+    }
+  } catch {
+    // continue to local credential store below
+  }
+
+  // 2. Fallback local / demo accounts for offline compatibility
   const users = getStaffUsers();
   let user = users.find(
     (u) => u.email.toLowerCase() === cleanEmail && u.password === cleanPassword
   );
 
-  // Fallback credentials
   if (!user) {
     if (cleanEmail === "admin@dinkvalley.com" && cleanPassword === "admin123") {
       user = {
@@ -215,14 +222,15 @@ export function loginWithCredentials(
 
 /**
  * Register a new official staff account using an official access code.
+ * Creates real Supabase Auth user + profile via database trigger, with local fallback.
  */
-export function registerStaffAccount(data: {
+export async function registerStaffAccount(data: {
   name: string;
   email: string;
   password: string;
   role: StaffRole;
   accessCode: string;
-}): { success: boolean; error?: string } {
+}): Promise<{ success: boolean; error?: string }> {
   const cleanName = data.name.trim();
   const cleanEmail = data.email.trim().toLowerCase();
   const cleanPassword = data.password.trim();
@@ -241,31 +249,70 @@ export function registerStaffAccount(data: {
     return { success: false, error: "Official access code is required to register." };
   }
 
+  // 1. Check access code with server
+  let serverValidated = false;
+  try {
+    const serverRole = await dbCheckAccessCode(cleanCode);
+    if (serverRole) {
+      if (serverRole !== data.role) {
+        return {
+          success: false,
+          error: `This access code is designated for ${serverRole.toUpperCase()} accounts, not ${data.role.toUpperCase()}.`,
+        };
+      }
+      serverValidated = true;
+    }
+  } catch {
+    // fallback to local access codes
+  }
+
+  if (!serverValidated) {
+    const validation = validateAndUseCode(cleanCode, data.role, cleanEmail);
+    if (!validation.valid) {
+      return { success: false, error: validation.error || "Invalid access code." };
+    }
+  }
+
+  // 2. Try Supabase Auth Sign Up
+  try {
+    const { data: authData, error: signUpError } = await supabase.auth.signUp({
+      email: cleanEmail,
+      password: cleanPassword,
+      options: {
+        data: {
+          name: cleanName,
+          access_code: cleanCode,
+        },
+      },
+    });
+
+    if (signUpError) {
+      if (signUpError.message.includes("User already registered") || signUpError.message.includes("already exists")) {
+        return { success: false, error: "An account with this email address already exists. Please sign in." };
+      }
+      console.warn("[Auth] Supabase signup error, falling back to local:", signUpError.message);
+    } else if (authData?.user) {
+      setStaffSession(data.role, cleanName);
+    }
+  } catch (err: any) {
+    console.warn("[Auth] Unexpected signup error:", err);
+  }
+
+  // 3. Keep local accounts updated for offline resilience
   const users = getStaffUsers();
-  if (users.some((u) => u.email.toLowerCase() === cleanEmail)) {
-    return { success: false, error: "An account with this email address already exists." };
+  if (!users.some((u) => u.email.toLowerCase() === cleanEmail)) {
+    const newUser: StaffUser = {
+      name: cleanName,
+      email: cleanEmail,
+      password: cleanPassword,
+      role: data.role,
+      accessCode: cleanCode,
+      certifiedAt: new Date().toISOString().split("T")[0],
+    };
+    users.push(newUser);
+    saveStaffUsers(users);
   }
 
-  // Validate the code against role
-  const validation = validateAndUseCode(cleanCode, data.role, cleanEmail);
-  if (!validation.valid) {
-    return { success: false, error: validation.error || "Invalid access code." };
-  }
-
-  const newUser: StaffUser = {
-    name: cleanName,
-    email: cleanEmail,
-    password: cleanPassword,
-    role: data.role,
-    accessCode: cleanCode,
-    certifiedAt: new Date().toISOString().split("T")[0],
-  };
-
-  users.push(newUser);
-  saveStaffUsers(users);
-
-  // Automatically authenticate new user
   setStaffSession(data.role, cleanName);
-
   return { success: true };
 }

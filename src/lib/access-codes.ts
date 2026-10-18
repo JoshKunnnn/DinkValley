@@ -1,3 +1,5 @@
+import { dbCheckAccessCode, dbCreateAccessCode, dbRevokeAccessCode } from "./supabase-service";
+
 export type AccessCode = {
   id: string;
   code: string;
@@ -64,13 +66,55 @@ export function generateNewCode(role: "admin" | "umpire", customCode?: string, c
 
   codes.unshift(newCode);
   saveAccessCodes(codes);
+
+  // Sync to Supabase server in background
+  dbCreateAccessCode(finalCode, role, createdBy).catch((err) => {
+    console.warn("[AccessCodes] Failed to sync new code to Supabase:", err);
+  });
+
   return newCode;
 }
 
 export function revokeCode(id: string): AccessCode[] {
   const codes = getAccessCodes().filter((c) => c.id !== id);
   saveAccessCodes(codes);
+
+  // Sync revocation to Supabase server in background
+  dbRevokeAccessCode(id).catch((err) => {
+    console.warn("[AccessCodes] Failed to revoke code from Supabase:", err);
+  });
+
   return codes;
+}
+
+export async function validateAndUseCodeAsync(
+  codeStr: string,
+  role: "admin" | "umpire",
+  userEmail: string
+): Promise<{ valid: boolean; error?: string }> {
+  const cleanCode = codeStr.trim().toUpperCase();
+  if (!cleanCode) {
+    return { valid: false, error: "Access code is required to register." };
+  }
+
+  // 1. Try server-side validation via secure Supabase RPC
+  try {
+    const serverRole = await dbCheckAccessCode(cleanCode);
+    if (serverRole) {
+      if (serverRole !== role) {
+        return {
+          valid: false,
+          error: `This access code is assigned for ${serverRole.toUpperCase()} accounts, not ${role.toUpperCase()}.`,
+        };
+      }
+      return { valid: true };
+    }
+  } catch {
+    // fallback to local verification below
+  }
+
+  // 2. Local verification fallback
+  return validateAndUseCode(cleanCode, role, userEmail);
 }
 
 export function validateAndUseCode(

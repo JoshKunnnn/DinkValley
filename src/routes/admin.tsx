@@ -23,15 +23,16 @@ import { generate32Teams } from "@/lib/team-generator";
 import {
   type AccessCode,
   getAccessCodes,
+  saveAccessCodes,
   generateNewCode,
   revokeCode,
 } from "@/lib/access-codes";
 import {
-  loginWithAccessCode,
   loginWithCredentials,
   getAuthenticatedStaff,
   logoutStaff,
 } from "@/lib/auth-store";
+import { dbGetAccessCodes } from "@/lib/supabase-service";
 import { generateUUID } from "@/lib/utils";
 import {
   exportCategoryTeamsToCsv,
@@ -128,7 +129,7 @@ function AdminErrorComponent({ error, reset }: { error: Error; reset: () => void
 const levels = ["Beginners", "Novice", "Intermediate", "Advance", "Open"];
 const divisions = ["Men's", "Women's", "Mixed"];
 
-type TabKey = "draw" | "dispatch" | "setup" | "teams";
+type TabKey = "draw" | "dispatch" | "setup" | "teams" | "access-codes";
 type DrawSubTab = "bracket-draw" | "brackets";
 type SetupSection = "tournaments" | "teams" | "access-codes";
 
@@ -137,6 +138,7 @@ const tabs: { key: TabKey; label: string }[] = [
   { key: "dispatch", label: "Dispatch" },
   { key: "setup", label: "Setup" },
   { key: "teams", label: "Teams & Payments" },
+  { key: "access-codes", label: "Access Codes" },
 ];
 
 function Admin() {
@@ -166,7 +168,7 @@ function Admin() {
     });
   };
 
-  const [authCodeInput, setAuthCodeInput] = useState("");
+  const [authEmailInput, setAuthEmailInput] = useState("");
   const [authPasswordInput, setAuthPasswordInput] = useState("");
   const [authError, setAuthError] = useState<string | null>(null);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
@@ -222,41 +224,28 @@ function Admin() {
     setIsAuthenticated(false);
   };
 
-  const handleAdminGateSubmit = (e: React.FormEvent) => {
+  const handleAdminGateSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError(null);
     setIsAuthenticating(true);
 
-    const cleanInput = authCodeInput.trim();
-    if (!cleanInput) {
-      setAuthError("Please enter an Admin Access Code or email address.");
+    const cleanEmail = authEmailInput.trim().toLowerCase();
+    const cleanPassword = authPasswordInput.trim();
+
+    if (!cleanEmail || !cleanPassword) {
+      setAuthError("Please enter your administrator email and password.");
       setIsAuthenticating(false);
       return;
     }
 
-    if (cleanInput.includes("@")) {
-      const res = loginWithCredentials(cleanInput, authPasswordInput);
-      setIsAuthenticating(false);
-      if (!res.success) {
-        setAuthError(res.error || "Invalid credentials.");
-        return;
-      }
-      if (res.role !== "admin") {
-        setAuthError("This account is designated for Match Officials. Please access the Umpire Console.");
-        return;
-      }
-      setIsAuthenticated(true);
-      return;
-    }
-
-    const res = loginWithAccessCode(cleanInput);
+    const res = await loginWithCredentials(cleanEmail, cleanPassword);
     setIsAuthenticating(false);
     if (!res.success) {
-      setAuthError(res.error || "Invalid access code.");
+      setAuthError(res.error || "Invalid administrator credentials.");
       return;
     }
     if (res.role !== "admin") {
-      setAuthError("This access code is designated for Match Officials. Please access the Umpire Console.");
+      setAuthError("This account does not have Tournament Director (Admin) privileges. Please access the Umpire Console.");
       return;
     }
     setIsAuthenticated(true);
@@ -299,7 +288,7 @@ function Admin() {
               Organizer Gate
             </h2>
             <p className="text-xs text-muted-foreground mt-1.5">
-              Authorized Tournament Directors only. Enter your Admin Access Code or administrator credentials to proceed.
+              Authorized Tournament Directors only. Enter your administrator email and password to proceed.
             </p>
           </div>
 
@@ -312,41 +301,39 @@ function Admin() {
           <form onSubmit={handleAdminGateSubmit} className="space-y-3 pt-2 text-left">
             <div>
               <label className="block text-[0.65rem] uppercase tracking-wider text-muted-foreground font-bold mb-1">
-                Admin Access Code or Email
+                Administrator Email
               </label>
               <input
-                type="text"
-                value={authCodeInput}
-                onChange={(e) => setAuthCodeInput(e.target.value)}
-                placeholder="e.g. DV-ADMIN or admin@dinkvalley.com"
+                type="email"
+                value={authEmailInput}
+                onChange={(e) => setAuthEmailInput(e.target.value)}
+                placeholder="admin@dinkvalley.com"
                 autoFocus
                 required
-                className="w-full bg-charcoal border border-border px-3.5 py-2.5 text-sand text-sm font-mono uppercase tracking-wider rounded focus:outline-none focus:border-pickle"
+                className="w-full bg-charcoal border border-border px-3.5 py-2.5 text-sand text-sm rounded focus:outline-none focus:border-pickle"
               />
             </div>
 
-            {authCodeInput.includes("@") && (
-              <div>
-                <label className="block text-[0.65rem] uppercase tracking-wider text-muted-foreground font-bold mb-1">
-                  Password
-                </label>
-                <input
-                  type="password"
-                  value={authPasswordInput}
-                  onChange={(e) => setAuthPasswordInput(e.target.value)}
-                  placeholder="••••••••"
-                  required
-                  className="w-full bg-charcoal border border-border px-3.5 py-2 text-sand text-sm rounded focus:outline-none focus:border-pickle"
-                />
-              </div>
-            )}
+            <div>
+              <label className="block text-[0.65rem] uppercase tracking-wider text-muted-foreground font-bold mb-1">
+                Password
+              </label>
+              <input
+                type="password"
+                value={authPasswordInput}
+                onChange={(e) => setAuthPasswordInput(e.target.value)}
+                placeholder="••••••••"
+                required
+                className="w-full bg-charcoal border border-border px-3.5 py-2 text-sand text-sm rounded focus:outline-none focus:border-pickle"
+              />
+            </div>
 
             <button
               type="submit"
-              disabled={isAuthenticating || !authCodeInput.trim()}
+              disabled={isAuthenticating || !authEmailInput.trim() || !authPasswordInput.trim()}
               className="w-full bg-brick py-3 px-6 font-display text-xl tracking-wider text-sand hover:bg-brick-deep transition-all cursor-pointer shadow-md rounded disabled:opacity-50 mt-1"
             >
-              {isAuthenticating ? "Verifying Authorization..." : "Authenticate & Enter"}
+              {isAuthenticating ? "Authenticating..." : "Sign In & Enter"}
             </button>
           </form>
 
@@ -848,6 +835,13 @@ function Admin() {
                   setCategoryId={setCategoryId}
                 />
               )}
+            </div>
+          )}
+
+          {/* ── ACCESS CODES TAB ── */}
+          {activeTab === "access-codes" && (
+            <div className="max-w-4xl space-y-4">
+              <AccessCodesTab />
             </div>
           )}
 
@@ -1568,9 +1562,9 @@ function TeamsTab({
     }
   };
 
-  const handleExportExcelWorkbook = () => {
+  const handleExportExcelWorkbook = async () => {
     try {
-      const res = exportTournamentToExcelWorkbook(
+      const res = await exportTournamentToExcelWorkbook(
         tournament,
         resolvedMap,
         resolvedProofs
@@ -2793,6 +2787,24 @@ function AccessCodesTab() {
   const [role, setRole] = useState<"admin" | "umpire">("umpire");
   const [customCode, setCustomCode] = useState("");
   const [copiedCodeId, setCopiedCodeId] = useState<string | null>(null);
+
+  useEffect(() => {
+    dbGetAccessCodes().then((serverCodes) => {
+      if (serverCodes && serverCodes.length > 0) {
+        const mapped: AccessCode[] = serverCodes.map((sc) => ({
+          id: sc.id,
+          code: sc.code,
+          role: sc.role as "admin" | "umpire",
+          createdAt: sc.created_at ? sc.created_at.split("T")[0] : new Date().toISOString().split("T")[0],
+          createdBy: sc.created_by_name || "Admin",
+          isUsed: Boolean(sc.used_at),
+          usedBy: sc.used_by_email || undefined,
+        }));
+        setCodes(mapped);
+        saveAccessCodes(mapped);
+      }
+    });
+  }, []);
 
   const handleGenerate = (e: React.FormEvent) => {
     e.preventDefault();

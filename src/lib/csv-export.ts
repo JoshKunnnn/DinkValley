@@ -1,5 +1,5 @@
 import type { Tournament, Category, Team } from "@/data/tournaments";
-import * as XLSX from "xlsx";
+import ExcelJS from "exceljs";
 
 export type CsvExportFilter = "all" | "verified-only" | "pending-only";
 
@@ -301,12 +301,14 @@ export function getUniqueSheetName(usedNames: Set<string>, baseName: string, ind
  * with a dedicated sheet/tab for each category, plus a Tournament Overview sheet
  * and an All Teams Master sheet.
  */
-export function exportTournamentToExcelWorkbook(
+export async function exportTournamentToExcelWorkbook(
   tournament: Tournament,
   paymentMap?: Record<string, boolean>,
   proofMap?: Record<string, string>
-): { filename: string; sheetCount: number; totalTeams: number } {
-  const wb = XLSX.utils.book_new();
+): Promise<{ filename: string; sheetCount: number; totalTeams: number }> {
+  const wb = new ExcelJS.Workbook();
+  wb.creator = "Dink Valley Pickleball Club";
+  wb.created = new Date();
   const usedSheetNames = new Set<string>();
   const categories = tournament.categories || [];
 
@@ -373,19 +375,19 @@ export function exportTournamentToExcelWorkbook(
   overviewRows.push([]);
   overviewRows.push(["Note: Click on each division tab at the bottom to view player rosters, clubs, and payment verification details."]);
 
-  const wsOverview = XLSX.utils.aoa_to_sheet(overviewRows);
-  wsOverview["!cols"] = [
-    { wch: 6 },
-    { wch: 32 },
-    { wch: 16 },
-    { wch: 16 },
-    { wch: 16 },
-    { wch: 16 },
-    { wch: 16 },
-    { wch: 20 },
-  ];
   const overviewSheetName = getUniqueSheetName(usedSheetNames, "Tournament Overview", 0);
-  XLSX.utils.book_append_sheet(wb, wsOverview, overviewSheetName);
+  const wsOverview = wb.addWorksheet(overviewSheetName);
+  overviewRows.forEach((r) => wsOverview.addRow(r));
+  wsOverview.columns = [
+    { width: 6 },
+    { width: 32 },
+    { width: 16 },
+    { width: 16 },
+    { width: 16 },
+    { width: 16 },
+    { width: 16 },
+    { width: 20 },
+  ];
 
   // ── SHEETS 2..N: DEDICATED WORKSHEET / TAB PER CATEGORY ──
   categories.forEach((cat, idx) => {
@@ -465,22 +467,21 @@ export function exportTournamentToExcelWorkbook(
       catRows.push(["—", "No teams registered yet in this category."]);
     }
 
-    const wsCat = XLSX.utils.aoa_to_sheet(catRows);
-    wsCat["!cols"] = [
-      { wch: 5 },
-      { wch: 14 },
-      { wch: 28 },
-      { wch: 22 },
-      { wch: 22 },
-      { wch: 24 },
-      { wch: 18 },
-      { wch: 16 },
-      { wch: 18 },
-      { wch: 20 },
-    ];
-
     const catSheetName = getUniqueSheetName(usedSheetNames, cat.label, idx + 1);
-    XLSX.utils.book_append_sheet(wb, wsCat, catSheetName);
+    const wsCat = wb.addWorksheet(catSheetName);
+    catRows.forEach((r) => wsCat.addRow(r));
+    wsCat.columns = [
+      { width: 5 },
+      { width: 14 },
+      { width: 28 },
+      { width: 22 },
+      { width: 22 },
+      { width: 24 },
+      { width: 18 },
+      { width: 16 },
+      { width: 18 },
+      { width: 20 },
+    ];
   });
 
   // ── FINAL SHEET: MASTER CONTINUOUS ALL-TEAMS TAB ──
@@ -549,31 +550,31 @@ export function exportTournamentToExcelWorkbook(
     });
   });
 
-  const wsMaster = XLSX.utils.aoa_to_sheet(allMasterRows);
-  wsMaster["!cols"] = [
-    { wch: 5 },
-    { wch: 28 },
-    { wch: 14 },
-    { wch: 26 },
-    { wch: 20 },
-    { wch: 20 },
-    { wch: 22 },
-    { wch: 18 },
-    { wch: 16 },
-    { wch: 18 },
-    { wch: 26 },
-    { wch: 20 },
-  ];
   const allTeamsSheetName = getUniqueSheetName(usedSheetNames, "All Teams Master", 999);
-  XLSX.utils.book_append_sheet(wb, wsMaster, allTeamsSheetName);
+  const wsMaster = wb.addWorksheet(allTeamsSheetName);
+  allMasterRows.forEach((r) => wsMaster.addRow(r));
+  wsMaster.columns = [
+    { width: 5 },
+    { width: 28 },
+    { width: 14 },
+    { width: 26 },
+    { width: 20 },
+    { width: 20 },
+    { width: 22 },
+    { width: 18 },
+    { width: 16 },
+    { width: 18 },
+    { width: 26 },
+    { width: 20 },
+  ];
 
   // Trigger browser download of .xlsx file
   const dateStr = new Date().toISOString().split("T")[0];
   const filename = `${tournament.slug}-tournament-workbook-${dateStr}.xlsx`;
 
   if (typeof window !== "undefined") {
-    const wbout = XLSX.write(wb, { bookType: "xlsx", type: "array" });
-    const blob = new Blob([wbout], {
+    const buffer = await wb.xlsx.writeBuffer();
+    const blob = new Blob([buffer], {
       type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     });
     const url = URL.createObjectURL(blob);
@@ -591,7 +592,7 @@ export function exportTournamentToExcelWorkbook(
 
   return {
     filename,
-    sheetCount: wb.SheetNames.length,
+    sheetCount: wb.worksheets.length,
     totalTeams: grandTotalTeams,
   };
 }

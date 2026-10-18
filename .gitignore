@@ -25,6 +25,10 @@ dist-ssr
 .wrangler/
 .dev.vars
 
+# Supabase
+supabase/.temp/
+.temp/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
@@ -32,6 +36,7 @@ dist-ssr
 .DS_Store
 *.suo
 *.ntvs*
-*.njsproj
-*.sln
-*.sw?
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class

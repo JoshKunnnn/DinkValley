@@ -1,61 +1,14 @@
 import { createFileRoute, useNavigate, Link } from "@tanstack/react-router";
-import { useState, useEffect } from "react";
-import { validateAndUseCode } from "@/lib/access-codes";
+import { useState } from "react";
+import {
+  loginWithCredentials,
+  registerStaffAccount,
+  type StaffRole as Role,
+} from "@/lib/auth-store";
 
 export const Route = createFileRoute("/login")({
   component: Login,
 });
-
-type Role = "admin" | "umpire";
-
-type UserAccount = {
-  name: string;
-  email: string;
-  password: string;
-  role: Role;
-  accessCode?: string | undefined;
-  certifiedAt?: string | undefined;
-};
-
-const DEFAULT_ACCOUNTS: UserAccount[] = [
-  {
-    name: "Tournament Director",
-    email: "admin@dinkvalley.com",
-    password: "admin123",
-    role: "admin",
-    accessCode: "DV-ADMIN-2026",
-    certifiedAt: "2026-01-01",
-  },
-  {
-    name: "Head Official",
-    email: "umpire@dinkvalley.com",
-    password: "umpire123",
-    role: "umpire",
-    accessCode: "UMP-CERT-88",
-    certifiedAt: "2026-01-15",
-  },
-];
-
-function getUsers(): UserAccount[] {
-  try {
-    const raw = localStorage.getItem("dv_user_accounts");
-    if (!raw) {
-      localStorage.setItem("dv_user_accounts", JSON.stringify(DEFAULT_ACCOUNTS));
-      return DEFAULT_ACCOUNTS;
-    }
-    return JSON.parse(raw) as UserAccount[];
-  } catch {
-    return DEFAULT_ACCOUNTS;
-  }
-}
-
-function saveUsers(users: UserAccount[]) {
-  try {
-    localStorage.setItem("dv_user_accounts", JSON.stringify(users));
-  } catch {
-    // ignore
-  }
-}
 
 function Login() {
   const navigate = useNavigate({ from: "/login" });
@@ -69,12 +22,7 @@ function Login() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
 
-  useEffect(() => {
-    // Seed default accounts if empty
-    getUsers();
-  }, []);
-
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
 
@@ -86,97 +34,67 @@ function Login() {
       return;
     }
 
-    const users = getUsers();
-    let user = users.find(
-      (u) => u.email.toLowerCase() === cleanEmail && u.password === cleanPassword
-    );
+    setIsLoading(true);
+    const res = await loginWithCredentials(cleanEmail, cleanPassword);
 
-    // Fallback rule detection for default credentials if accounts were cleared
-    if (!user) {
-      if (cleanEmail.includes("admin") || cleanEmail.includes("organizer")) {
-        user = {
-          name: "Admin Organizer",
-          email: cleanEmail,
-          password: cleanPassword,
-          role: "admin",
-        };
-      }
-    }
-
-    if (!user) {
-      setError("Invalid credentials. Check your email or register a new account below.");
+    if (!res.success || !res.role) {
+      setIsLoading(false);
+      setError(res.error || "Invalid credentials. Check your email and password.");
       return;
     }
 
-    setDetectedRole(user.role);
-    setIsLoading(true);
-
-    const targetUser = user;
+    setDetectedRole(res.role);
     setTimeout(() => {
-      if (targetUser.role === "admin") {
-        localStorage.setItem("mock_auth", "true");
-        localStorage.setItem("mock_admin_name", targetUser.name);
+      if (res.role === "admin") {
         navigate({ to: "/admin" });
       } else {
-        localStorage.setItem("mock_umpire_auth", "true");
-        localStorage.setItem("mock_umpire_name", targetUser.name);
         navigate({ to: "/umpire" });
       }
-    }, 1800);
+    }, 1200);
   };
 
-  const handleRegister = (e: React.FormEvent) => {
+  const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
 
     const cleanName = name.trim();
     const cleanEmail = email.trim().toLowerCase();
     const cleanPassword = password.trim();
+    const cleanCode = accessCode.trim().toUpperCase();
 
     if (!cleanName || !cleanEmail || !cleanPassword) {
       setError("Full Name, Email, and Password are required.");
       return;
     }
 
-    const users = getUsers();
-    if (users.some((u) => u.email.toLowerCase() === cleanEmail)) {
-      setError("An account with this email address already exists. Please sign in.");
+    if (!cleanCode) {
+      setError("Official access code is required to register.");
       return;
     }
 
-    // Access Code Verification
-    const validation = validateAndUseCode(accessCode, selectedRole, cleanEmail);
-    if (!validation.valid) {
-      setError(validation.error ?? "Invalid access code. Please request a valid code from an Admin.");
-      return;
-    }
-
-    const newAccount: UserAccount = {
+    setIsLoading(true);
+    const res = await registerStaffAccount({
       name: cleanName,
       email: cleanEmail,
       password: cleanPassword,
       role: selectedRole,
-      accessCode: accessCode.trim().toUpperCase(),
-      certifiedAt: new Date().toISOString().split("T")[0],
-    };
+      accessCode: cleanCode,
+    });
 
-    users.push(newAccount);
-    saveUsers(users);
+    if (!res.success) {
+      setIsLoading(false);
+      setError(res.error || "Registration failed. Please verify your access code.");
+      return;
+    }
 
     setDetectedRole(selectedRole);
-    setIsLoading(true);
-
     setTimeout(() => {
       if (selectedRole === "admin") {
-        localStorage.setItem("mock_auth", "true");
-        localStorage.setItem("mock_admin_name", cleanName);
         navigate({ to: "/admin" });
       } else {
-        localStorage.setItem("mock_umpire_auth", "true");
-        localStorage.setItem("mock_umpire_name", cleanName);
         navigate({ to: "/umpire" });
       }
-    }, 1800);
+    }, 1200);
   };
 
   return (
@@ -229,38 +147,7 @@ function Login() {
               </p>
             </div>
 
-            {/* Quick Demo Credentials Banner */}
-            <div className="mb-4 bg-charcoal/90 border border-pickle/40 px-4 py-3 text-xs space-y-1">
-              <span className="block text-[0.6rem] uppercase tracking-widest font-bold text-pickle">
-                Demo Accounts (Click to Fill):
-              </span>
-              <div className="flex items-center justify-between text-sand/80 font-mono text-[0.7rem]">
-                <span>Admin: <strong>admin@dinkvalley.com</strong> / admin123</span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setEmail("admin@dinkvalley.com");
-                    setPassword("admin123");
-                  }}
-                  className="px-2 py-0.5 text-[0.6rem] font-bold uppercase tracking-wider bg-sand/10 hover:bg-sand/20 text-sand cursor-pointer transition-colors"
-                >
-                  Fill Admin
-                </button>
-              </div>
-              <div className="flex items-center justify-between text-sand/80 font-mono text-[0.7rem]">
-                <span>Umpire: <strong>umpire@dinkvalley.com</strong> / umpire123</span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setEmail("umpire@dinkvalley.com");
-                    setPassword("umpire123");
-                  }}
-                  className="px-2 py-0.5 text-[0.6rem] font-bold uppercase tracking-wider bg-sand/10 hover:bg-sand/20 text-sand cursor-pointer transition-colors"
-                >
-                  Fill Umpire
-                </button>
-              </div>
-            </div>
+
 
             {/* Card */}
             <div className="surface-card bg-charcoal p-6 sm:p-8 border border-border shadow-xl">
@@ -368,7 +255,7 @@ function Login() {
                         required
                         value={accessCode}
                         onChange={(e) => setAccessCode(e.target.value)}
-                        placeholder={selectedRole === "admin" ? "e.g. DV-ADMIN" : "e.g. UMP-2026"}
+                        placeholder="Enter code provided by administrator"
                         className="w-full border border-border bg-background/20 px-4 py-2.5 text-sand uppercase placeholder:text-sand/40 focus:border-pickle focus:outline-none transition-colors text-xs font-mono"
                       />
                     </label>

@@ -1,49 +1,10 @@
 import { createFileRoute, useNavigate, Link } from "@tanstack/react-router";
 import { useState } from "react";
-import { validateAndUseCode } from "@/lib/access-codes";
-import { dbRegisterProfile } from "@/lib/supabase-service";
+import { registerStaffAccount, type StaffRole as Role } from "@/lib/auth-store";
 
 export const Route = createFileRoute("/register")({
-  head: () => ({
-    meta: [
-      { title: "Register Official Account | Dink Valley" },
-      {
-        name: "description",
-        content: "Register as a Tournament Director or Match Official at Dink Valley Pickleball Club.",
-      },
-    ],
-  }),
   component: Register,
 });
-
-type Role = "admin" | "umpire";
-
-type UserAccount = {
-  name: string;
-  email: string;
-  password: string;
-  role: Role;
-  accessCode?: string | undefined;
-  certifiedAt?: string | undefined;
-};
-
-function getUsers(): UserAccount[] {
-  try {
-    const raw = localStorage.getItem("dv_user_accounts");
-    if (!raw) return [];
-    return JSON.parse(raw) as UserAccount[];
-  } catch {
-    return [];
-  }
-}
-
-function saveUsers(users: UserAccount[]) {
-  try {
-    localStorage.setItem("dv_user_accounts", JSON.stringify(users));
-  } catch {
-    // ignore
-  }
-}
 
 function Register() {
   const navigate = useNavigate();
@@ -82,47 +43,26 @@ function Register() {
       return;
     }
 
-    // Access Code Validation
-    const validation = validateAndUseCode(cleanCode, selectedRole, cleanEmail);
-    if (!validation.valid) {
-      setError(validation.error || "Invalid access code. Please use an authorized code.");
+    if (!cleanCode) {
+      setError("Official access code is required.");
       return;
     }
 
     setIsLoading(true);
 
     try {
-      // 1. Register in Supabase Database
-      const dbResult = await dbRegisterProfile({
-        name: cleanName,
-        email: cleanEmail,
-        role: selectedRole,
-      });
-
-      if (!dbResult.success && dbResult.error) {
-        console.warn("[Register] Supabase profile note:", dbResult.error);
-      }
-
-      // 2. Save in local accounts for offline compatibility
-      const users = getUsers();
-      const newAccount: UserAccount = {
+      const res = await registerStaffAccount({
         name: cleanName,
         email: cleanEmail,
         password: cleanPassword,
         role: selectedRole,
         accessCode: cleanCode,
-        certifiedAt: new Date().toISOString().slice(0, 10),
-      };
-      users.push(newAccount);
-      saveUsers(users);
+      });
 
-      // 3. Set Active Session
-      if (selectedRole === "admin") {
-        localStorage.setItem("mock_auth", "true");
-        localStorage.setItem("mock_admin_name", cleanName);
-      } else {
-        localStorage.setItem("mock_umpire_auth", "true");
-        localStorage.setItem("mock_umpire_name", cleanName);
+      if (!res.success) {
+        setError(res.error || "Failed to register official account. Please check your access code.");
+        setIsLoading(false);
+        return;
       }
 
       setSuccessNotice(`Registration successful! Account certified as ${selectedRole === "admin" ? "Tournament Director" : "Match Official"}.`);
@@ -140,10 +80,6 @@ function Register() {
     }
   };
 
-  const handleUsePresetCode = (code: string) => {
-    setAccessCode(code);
-    setError("");
-  };
 
   return (
     <div className="court-lines flex min-h-[calc(100vh-4rem)] items-center justify-center px-4 py-12">
@@ -308,23 +244,12 @@ function Register() {
                 required
                 value={accessCode}
                 onChange={(e) => setAccessCode(e.target.value.toUpperCase())}
-                placeholder={selectedRole === "admin" ? "e.g. DV-ADMIN" : "e.g. UMP-2026"}
+                placeholder="Enter access code provided by admin"
                 className="w-full rounded-md border border-input bg-background/60 px-3.5 py-2.5 text-xs font-mono uppercase text-foreground placeholder:text-muted-foreground/60 focus:border-pickle focus:ring-2 focus:ring-pickle/20 focus:outline-none transition-all"
               />
-
-              {/* Sample Code Helper Bar */}
-              <div className="mt-2 flex items-center justify-between rounded bg-muted/40 px-3 py-2 text-[0.7rem] border border-border">
-                <span className="text-muted-foreground">
-                  Sample {selectedRole === "admin" ? "Admin" : "Umpire"} Code:
-                </span>
-                <button
-                  type="button"
-                  onClick={() => handleUsePresetCode(selectedRole === "admin" ? "DV-ADMIN" : "UMP-2026")}
-                  className="px-2 py-0.5 rounded font-mono font-bold uppercase tracking-wider bg-pickle/20 text-pickle hover:bg-pickle hover:text-sand transition-all cursor-pointer"
-                >
-                  Use {selectedRole === "admin" ? "DV-ADMIN" : "UMP-2026"}
-                </button>
-              </div>
+              <p className="mt-1.5 text-[0.7rem] text-muted-foreground">
+                Access codes are generated by Tournament Directors in the Admin Console. Contact your organizer to obtain one.
+              </p>
             </div>
 
             {/* Submit Button */}

@@ -183,7 +183,7 @@ export function SiteFooter() {
       <div className="mx-auto flex max-w-6xl flex-col sm:flex-row sm:items-center sm:justify-between gap-4 px-5 text-sm text-sand/70">
         <div>
           <span className="font-display text-xl text-sand block">Dink Valley Pickleball Club</span>
-          <span>Santiago City, Philippines &middot; Courts open daily 6AM - 10PM</span>
+          <span>C. Ebersole St, Santiago City, 3311 Isabela, Philippines</span>
         </div>
         <div className="flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-5 text-xs text-sand/60">
           <button

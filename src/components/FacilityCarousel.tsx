@@ -43,7 +43,7 @@ export const FACILITY_SLIDES: FacilitySlide[] = [
     tag: "Club Grounds",
     title: "The Valley Grounds",
     subtitle: "Santiago City, Isabela",
-    desc: "Santiago City's premier pickleball facility in Isabela, featuring secure parking, comfortable player amenities, and open play from 6:00 AM to 10:00 PM daily.",
+    desc: "Santiago City's premier pickleball facility in Isabela, featuring secure parking, comfortable player amenities, and open tournament court play.",
   },
 ];
 

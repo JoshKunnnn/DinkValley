@@ -1096,3 +1096,106 @@ export async function dbDeleteDispatchQueue(
   }
 }
 
+/**
+ * Register a team publicly via the secure server-side RPC.
+ * Respects RLS and validations (32 team cap, no duplicate names, Pending status).
+ */
+export async function dbRegisterTeam(params: {
+  tournamentSlug: string;
+  categorySlug: string;
+  team: Team;
+}): Promise<{ success: boolean; teamId?: string; error?: string }> {
+  try {
+    const isUuid = (id?: string) =>
+      id ? /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) : false;
+
+    const { data, error } = await supabase.rpc("register_team", {
+      p_tournament_slug: params.tournamentSlug,
+      p_category_slug: params.categorySlug,
+      p_team_name: params.team.name,
+      p_players: params.team.players,
+      p_club: params.team.club || null,
+      p_payment_ref: params.team.paymentRef || null,
+      p_payment_proof_url: params.team.paymentProofUrl || null,
+      p_team_id: isUuid(params.team.id) ? params.team.id : null,
+    });
+
+    if (error) {
+      console.warn("[Supabase] Failed to register team via RPC:", error.message);
+      return { success: false, error: error.message };
+    }
+
+    return { success: true, teamId: data };
+  } catch (err: any) {
+    console.warn("[Supabase] Unexpected error registering team:", err);
+    return { success: false, error: err?.message || "Failed to submit registration" };
+  }
+}
+
+/**
+ * Check if an access code is valid and unused on the server.
+ * Returns the assigned role ('admin' | 'umpire') or null.
+ */
+export async function dbCheckAccessCode(code: string): Promise<"admin" | "umpire" | null> {
+  try {
+    const clean = code.trim().toUpperCase();
+    if (!clean) return null;
+    const { data, error } = await supabase.rpc("check_access_code", {
+      p_code: clean,
+    });
+    if (error || !data) return null;
+    return data === "admin" || data === "umpire" ? data : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetch all access codes (admin only).
+ */
+export async function dbGetAccessCodes(): Promise<any[]> {
+  try {
+    const { data, error } = await supabase
+      .from("access_codes")
+      .select("*")
+      .order("created_at", { ascending: false });
+    if (error || !data) return [];
+    return data;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Create a new access code in Supabase (admin only).
+ */
+export async function dbCreateAccessCode(
+  code: string,
+  role: "admin" | "umpire",
+  createdByName: string = "Admin Director"
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const { error } = await supabase.from("access_codes").insert({
+      code: code.trim().toUpperCase(),
+      role,
+      created_by_name: createdByName,
+    });
+    if (error) return { success: false, error: error.message };
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err?.message || "Failed to create code" };
+  }
+}
+
+/**
+ * Revoke/delete an access code from Supabase (admin only).
+ */
+export async function dbRevokeAccessCode(id: string): Promise<boolean> {
+  try {
+    const { error } = await supabase.from("access_codes").delete().eq("id", id);
+    return !error;
+  } catch {
+    return false;
+  }
+}
+

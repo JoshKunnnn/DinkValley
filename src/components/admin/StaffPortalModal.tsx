@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
-  loginWithAccessCode,
   loginWithCredentials,
   registerStaffAccount,
   type StaffRole,
@@ -15,10 +14,8 @@ interface StaffPortalModalProps {
 export function StaffPortalModal({ isOpen, onClose }: StaffPortalModalProps) {
   const navigate = useNavigate();
   const [tab, setTab] = useState<"signin" | "register">("signin");
-  const [signInMethod, setSignInMethod] = useState<"code" | "credentials">("code");
 
-  // Sign In state
-  const [accessCode, setAccessCode] = useState("");
+  // Sign In state (Email & Password credentials only)
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
 
@@ -52,40 +49,16 @@ export function StaffPortalModal({ isOpen, onClose }: StaffPortalModalProps) {
   useEffect(() => {
     setError(null);
     setSuccessNotice(null);
-  }, [tab, signInMethod, isOpen]);
+  }, [tab, isOpen]);
 
   if (!isOpen) return null;
 
-  const handleSignInWithCode = (e: React.FormEvent) => {
+  const handleSignInWithCredentials = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     setIsLoading(true);
 
-    const res = loginWithAccessCode(accessCode);
-    setIsLoading(false);
-
-    if (!res.success) {
-      setError(res.error || "Authentication failed. Please verify your access code.");
-      return;
-    }
-
-    setSuccessNotice(`Authenticated as ${res.name}. Redirecting...`);
-    setTimeout(() => {
-      onClose();
-      if (res.role === "admin") {
-        navigate({ to: "/admin" });
-      } else {
-        navigate({ to: "/umpire" });
-      }
-    }, 450);
-  };
-
-  const handleSignInWithCredentials = (e: React.FormEvent) => {
-    e.preventDefault();
-    setError(null);
-    setIsLoading(true);
-
-    const res = loginWithCredentials(email, password);
+    const res = await loginWithCredentials(email, password);
     setIsLoading(false);
 
     if (!res.success) {
@@ -104,7 +77,7 @@ export function StaffPortalModal({ isOpen, onClose }: StaffPortalModalProps) {
     }, 450);
   };
 
-  const handleRegister = (e: React.FormEvent) => {
+  const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
 
@@ -114,7 +87,7 @@ export function StaffPortalModal({ isOpen, onClose }: StaffPortalModalProps) {
     }
 
     setIsLoading(true);
-    const res = registerStaffAccount({
+    const res = await registerStaffAccount({
       name: regName,
       email: regEmail,
       password: regPassword,
@@ -216,100 +189,44 @@ export function StaffPortalModal({ isOpen, onClose }: StaffPortalModalProps) {
           {/* TAB 1: SIGN IN */}
           {tab === "signin" && (
             <div className="space-y-4">
-              {/* Method Toggle */}
-              <div className="flex gap-2">
+              <form onSubmit={handleSignInWithCredentials} className="space-y-3 pt-1">
+                <div>
+                  <label className="block text-[0.65rem] uppercase tracking-wider text-muted-foreground font-bold mb-1">
+                    Email Address
+                  </label>
+                  <input
+                    type="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="staff@dinkvalley.com"
+                    autoFocus
+                    required
+                    className="w-full bg-charcoal border border-border px-3 py-2 text-sand text-sm rounded focus:outline-none focus:border-pickle"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[0.65rem] uppercase tracking-wider text-muted-foreground font-bold mb-1">
+                    Password
+                  </label>
+                  <input
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="••••••••"
+                    required
+                    className="w-full bg-charcoal border border-border px-3 py-2 text-sand text-sm rounded focus:outline-none focus:border-pickle"
+                  />
+                </div>
+
                 <button
-                  type="button"
-                  onClick={() => setSignInMethod("code")}
-                  className={`flex-1 py-2 text-xs font-bold uppercase tracking-wider rounded border transition-colors cursor-pointer ${
-                    signInMethod === "code"
-                      ? "bg-charcoal border-pickle text-sand"
-                      : "border-border text-muted-foreground hover:text-foreground"
-                  }`}
+                  type="submit"
+                  disabled={isLoading || !email.trim() || !password.trim()}
+                  className="w-full bg-brick py-2.5 text-xs font-bold uppercase tracking-widest text-sand hover:bg-brick-deep transition-all cursor-pointer rounded disabled:opacity-50 mt-2"
                 >
-                  Access Code
+                  {isLoading ? "Signing In..." : "Sign In to Account"}
                 </button>
-                <button
-                  type="button"
-                  onClick={() => setSignInMethod("credentials")}
-                  className={`flex-1 py-2 text-xs font-bold uppercase tracking-wider rounded border transition-colors cursor-pointer ${
-                    signInMethod === "credentials"
-                      ? "bg-charcoal border-pickle text-sand"
-                      : "border-border text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  Email &amp; Password
-                </button>
-              </div>
-
-              {signInMethod === "code" ? (
-                <form onSubmit={handleSignInWithCode} className="space-y-4 pt-1">
-                  <div>
-                    <label className="block text-[0.65rem] uppercase tracking-wider text-muted-foreground font-bold mb-1.5">
-                      Enter Official Access Code
-                    </label>
-                    <input
-                      type="text"
-                      value={accessCode}
-                      onChange={(e) => setAccessCode(e.target.value)}
-                      placeholder="e.g. DV-ADMIN or UMP-2026"
-                      autoFocus
-                      required
-                      className="w-full bg-charcoal border border-border px-3.5 py-2.5 text-sand font-mono uppercase tracking-widest text-sm rounded focus:outline-none focus:border-pickle"
-                    />
-                    <p className="mt-1.5 text-[0.7rem] text-muted-foreground">
-                      Admin codes unlock the Organizer Console. Umpire codes route directly to the Live Officiating Terminal.
-                    </p>
-                  </div>
-
-                  <button
-                    type="submit"
-                    disabled={isLoading || !accessCode.trim()}
-                    className="w-full bg-brick py-2.5 text-xs font-bold uppercase tracking-widest text-sand hover:bg-brick-deep transition-all cursor-pointer rounded disabled:opacity-50"
-                  >
-                    {isLoading ? "Validating Code..." : "Enter Staff Console"}
-                  </button>
-                </form>
-              ) : (
-                <form onSubmit={handleSignInWithCredentials} className="space-y-3 pt-1">
-                  <div>
-                    <label className="block text-[0.65rem] uppercase tracking-wider text-muted-foreground font-bold mb-1">
-                      Email Address
-                    </label>
-                    <input
-                      type="email"
-                      value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      placeholder="staff@dinkvalley.com"
-                      autoFocus
-                      required
-                      className="w-full bg-charcoal border border-border px-3 py-2 text-sand text-sm rounded focus:outline-none focus:border-pickle"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-[0.65rem] uppercase tracking-wider text-muted-foreground font-bold mb-1">
-                      Password
-                    </label>
-                    <input
-                      type="password"
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      placeholder="••••••••"
-                      required
-                      className="w-full bg-charcoal border border-border px-3 py-2 text-sand text-sm rounded focus:outline-none focus:border-pickle"
-                    />
-                  </div>
-
-                  <button
-                    type="submit"
-                    disabled={isLoading || !email.trim() || !password.trim()}
-                    className="w-full bg-brick py-2.5 text-xs font-bold uppercase tracking-widest text-sand hover:bg-brick-deep transition-all cursor-pointer rounded disabled:opacity-50 mt-2"
-                  >
-                    {isLoading ? "Signing In..." : "Sign In to Account"}
-                  </button>
-                </form>
-              )}
+              </form>
             </div>
           )}
 

@@ -1,4 +1,4 @@
-import { X, MapPin, Clock, Phone, Mail, Award, CheckCircle2 } from "lucide-react";
+import { X, MapPin, Clock, Phone, Mail, Award, CheckCircle2, Activity } from "lucide-react";
 
 interface FacilityModalProps {
   isOpen: boolean;
@@ -192,16 +192,16 @@ export function FacilityModal({ isOpen, onClose }: FacilityModalProps) {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 border-t border-border pt-4">
             <div className="p-4 border border-border rounded-lg bg-charcoal/40 space-y-2">
               <div className="flex items-center gap-2 text-pickle">
-                <Clock size={16} />
+                <Activity size={16} />
                 <span className="text-xs font-bold uppercase tracking-wider">
-                  Operating Hours
+                  Court Access
                 </span>
               </div>
               <p className="text-xs text-sand/80 font-mono">
-                Monday to Sunday: 6:00 AM - 10:00 PM
+                Open Play &amp; Tournament Schedules
               </p>
               <p className="text-[0.7rem] text-sand/50">
-                Open play, court bookings, tournament dispatches, and private sessions.
+                Booked practice drills, court reservations, and official circuit matches.
               </p>
             </div>
 
@@ -213,16 +213,27 @@ export function FacilityModal({ isOpen, onClose }: FacilityModalProps) {
                 </span>
               </div>
               <p className="text-xs text-sand/80">
-                Santiago City, Isabela, Philippines
+                C. Ebersole St, Santiago City, 3311 Isabela, Philippines (near 3 I. Ancheta St)
               </p>
+              <div className="pt-1">
+                <a
+                  href="https://www.google.com/maps/place/Dink+Valley+Pickleball/@16.6995003,121.560007,17z/data=!4m6!3m5!1s0x339007fe7dccafe5:0x1b74fabd2aa7183b!8m2!3d16.6995003!4d121.560007!16s%2Fg%2F11z4sfbhrd"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 text-xs text-pickle hover:underline font-mono font-bold"
+                >
+                  <MapPin size={12} />
+                  <span>Dink Valley Pickleball on Google Maps &rarr;</span>
+                </a>
+              </div>
               <div className="space-y-1 pt-1 text-[0.7rem] text-sand/60">
                 <div className="flex items-center gap-1.5">
                   <Phone size={12} className="text-pickle" />
-                  <span>Contact: +63 9XX XXX XXXX (Template)</span>
+                  <span>Contact: +63 9XX XXX XXXX</span>
                 </div>
                 <div className="flex items-center gap-1.5">
                   <Mail size={12} className="text-pickle" />
-                  <span>Email: dinkvalley@gmail.com (Template)</span>
+                  <span>Email: dinkvalley@gmail.com</span>
                 </div>
               </div>
             </div>

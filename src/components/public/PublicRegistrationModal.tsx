@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import type { Tournament, Category, Team } from "@/data/tournaments";
 import { addPendingRegistration, getUniqueClubTeams, type ExistingClubTeam } from "@/lib/tournament-store";
-import { dbSaveTournament } from "@/lib/supabase-service";
+import { dbRegisterTeam } from "@/lib/supabase-service";
 import { generateUUID, fileToOptimizedDataUrl } from "@/lib/utils";
 
 interface PublicRegistrationModalProps {
@@ -239,13 +239,24 @@ export function PublicRegistrationModal({
         paymentStatus: "Pending",
       };
 
-      // 1. Add to local and tournament store as pending verification
-      const updatedTourney = addPendingRegistration(tournament.slug, activeCategory.id, newTeam);
+      // 1. Submit directly to Supabase via secure RPC (enforces RLS, max 32 teams, and Pending state)
+      const rpcResult = await dbRegisterTeam({
+        tournamentSlug: tournament.slug,
+        categorySlug: activeCategory.id,
+        team: newTeam,
+      });
 
-      // 2. Persist directly to Supabase cloud
-      if (updatedTourney) {
-        await dbSaveTournament(updatedTourney);
+      if (!rpcResult.success) {
+        setError(rpcResult.error || "Failed to submit registration. Please try again.");
+        return;
       }
+
+      if (rpcResult.teamId) {
+        newTeam.id = rpcResult.teamId;
+      }
+
+      // 2. Add to local tournament store for instant optimistic UI update
+      addPendingRegistration(tournament.slug, activeCategory.id, newTeam);
 
       setSubmittedTeam(newTeam);
       if (onRegistered) {

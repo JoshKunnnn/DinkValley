@@ -39,6 +39,42 @@ export type Database = {
   }
   public: {
     Tables: {
+      access_codes: {
+        Row: {
+          id: string
+          code: string
+          role: string
+          created_at: string
+          created_by: string | null
+          created_by_name: string | null
+          used_at: string | null
+          used_by: string | null
+          used_by_email: string | null
+        }
+        Insert: {
+          id?: string
+          code: string
+          role: string
+          created_at?: string
+          created_by?: string | null
+          created_by_name?: string | null
+          used_at?: string | null
+          used_by?: string | null
+          used_by_email?: string | null
+        }
+        Update: {
+          id?: string
+          code?: string
+          role?: string
+          created_at?: string
+          created_by?: string | null
+          created_by_name?: string | null
+          used_at?: string | null
+          used_by?: string | null
+          used_by_email?: string | null
+        }
+        Relationships: []
+      }
       categories: {
         Row: {
           category_slug: string
@@ -374,7 +410,37 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      check_access_code: {
+        Args: {
+          p_code: string
+        }
+        Returns: string | null
+      }
+      register_team: {
+        Args: {
+          p_tournament_slug: string
+          p_category_slug: string
+          p_team_name: string
+          p_players: string[]
+          p_club?: string | null
+          p_payment_ref?: string | null
+          p_payment_proof_url?: string | null
+          p_team_id?: string | null
+        }
+        Returns: string
+      }
+      is_admin: {
+        Args: Record<PropertyKey, never>
+        Returns: boolean
+      }
+      is_staff: {
+        Args: Record<PropertyKey, never>
+        Returns: boolean
+      }
+      current_user_role: {
+        Args: Record<PropertyKey, never>
+        Returns: string | null
+      }
     }
     Enums: {
       [_ in never]: never
