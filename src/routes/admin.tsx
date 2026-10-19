@@ -143,7 +143,7 @@ const tabs: { key: TabKey; label: string }[] = [
 
 function Admin() {
   const navigate = useNavigate();
-  const { tournaments } = useTournamentStore();
+  const { tournaments, isOnline } = useTournamentStore();
 
   const [isMounted, setIsMounted] = useState(false);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -531,9 +531,21 @@ function Admin() {
               </p>
             </div>
           </div>
-          <span className="flex-shrink-0 text-[0.6rem] sm:text-xs font-semibold uppercase tracking-widest text-pickle border border-pickle px-2 py-1 sm:px-2.5">
-            Admin
-          </span>
+          <div className="flex items-center gap-2">
+            <div className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 text-[0.65rem] font-bold uppercase tracking-wider rounded border border-border bg-card">
+              <span
+                className={`w-1.5 h-1.5 rounded-full ${
+                  isOnline ? "bg-pickle animate-pulse" : "bg-amber-600"
+                }`}
+              />
+              <span className={isOnline ? "text-pickle" : "text-amber-600"}>
+                {isOnline ? "Database Live" : "Offline"}
+              </span>
+            </div>
+            <span className="flex-shrink-0 text-[0.6rem] sm:text-xs font-semibold uppercase tracking-widest text-pickle border border-pickle px-2 py-1 sm:px-2.5">
+              Admin
+            </span>
+          </div>
         </header>
 
         {/* Content */}
@@ -2784,33 +2796,45 @@ function Field({
 ──────────────────────────────────────────────── */
 function AccessCodesTab() {
   const [codes, setCodes] = useState<AccessCode[]>(() => getAccessCodes());
-  const [role, setRole] = useState<"admin" | "umpire">("umpire");
+  const [role, setRole] = useState<"admin" | "umpire">("admin");
   const [customCode, setCustomCode] = useState("");
   const [copiedCodeId, setCopiedCodeId] = useState<string | null>(null);
+  const [recentlyGenerated, setRecentlyGenerated] = useState<string | null>(null);
 
   useEffect(() => {
     dbGetAccessCodes().then((serverCodes) => {
       if (serverCodes && serverCodes.length > 0) {
-        const mapped: AccessCode[] = serverCodes.map((sc) => ({
-          id: sc.id,
-          code: sc.code,
-          role: sc.role as "admin" | "umpire",
-          createdAt: sc.created_at ? sc.created_at.split("T")[0] : new Date().toISOString().split("T")[0],
-          createdBy: sc.created_by_name || "Admin",
-          isUsed: Boolean(sc.used_at),
-          usedBy: sc.used_by_email || undefined,
-        }));
-        setCodes(mapped);
-        saveAccessCodes(mapped);
+        const local = getAccessCodes();
+        const codeMap = new Map<string, AccessCode>();
+        local.forEach((c) => codeMap.set(c.code.toUpperCase(), c));
+        serverCodes.forEach((sc) => {
+          const upper = sc.code.toUpperCase();
+          codeMap.set(upper, {
+            id: sc.id,
+            code: upper,
+            role: sc.role as "admin" | "umpire",
+            createdAt: sc.created_at ? sc.created_at.split("T")[0] : new Date().toISOString().split("T")[0],
+            createdBy: sc.created_by_name || "Admin",
+            isUsed: Boolean(sc.used_at),
+            usedBy: sc.used_by_email || undefined,
+          });
+        });
+        const merged = Array.from(codeMap.values());
+        setCodes(merged);
+        saveAccessCodes(merged);
       }
     });
   }, []);
 
   const handleGenerate = (e: React.FormEvent) => {
     e.preventDefault();
-    generateNewCode(role, customCode, "Admin Director");
+    const cleanCustom = customCode.trim().toUpperCase();
+    const newEntry = generateNewCode(role, cleanCustom || undefined, "Admin Director");
     setCodes(getAccessCodes());
     setCustomCode("");
+    setRecentlyGenerated(newEntry.code);
+    navigator.clipboard.writeText(newEntry.code).catch(() => {});
+    setTimeout(() => setRecentlyGenerated(null), 5000);
   };
 
   const handleRevoke = (id: string) => {
@@ -2882,6 +2906,15 @@ function AccessCodesTab() {
             </button>
           </div>
         </div>
+
+        {recentlyGenerated && (
+          <div className="mt-2 p-3 bg-pickle/20 border border-pickle text-xs text-pickle font-bold flex items-center justify-between">
+            <span>
+              Generated code <span className="font-mono text-sand underline">{recentlyGenerated}</span> for {role === "admin" ? "Admin / Director" : "Umpire / Official"}. Copied to clipboard!
+            </span>
+            <span className="text-[0.65rem] text-sand/70 uppercase tracking-widest">Ready for Registration</span>
+          </div>
+        )}
       </form>
 
       {/* Access Codes Summary */}

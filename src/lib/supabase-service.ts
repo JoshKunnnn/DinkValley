@@ -371,14 +371,49 @@ export async function dbSaveTournament(t: Tournament): Promise<boolean> {
  */
 export async function dbDeleteTournament(slug: string): Promise<boolean> {
   try {
-    const { error } = await supabase.from("tournaments").delete().eq("slug", slug);
+    const cleanSlug = slug.trim();
+    if (!cleanSlug) return false;
+
+    // 1. Locate tournament ID
+    const { data: tourney } = await supabase
+      .from("tournaments")
+      .select("id")
+      .eq("slug", cleanSlug)
+      .maybeSingle();
+
+    if (!tourney) {
+      // Attempt direct delete by slug as fallback
+      await supabase.from("tournaments").delete().eq("slug", cleanSlug);
+      return true;
+    }
+
+    const tourneyId = tourney.id;
+
+    // 2. Release any court stations referencing this tournament to prevent FK constraints
+    await supabase
+      .from("court_stations")
+      .update({
+        tournament_id: null,
+        current_match_id: null,
+        on_deck_match_id: null,
+        status: "idle",
+      })
+      .eq("tournament_id", tourneyId);
+
+    // 3. Clear matches, teams, categories
+    await supabase.from("matches").delete().eq("tournament_id", tourneyId);
+    await supabase.from("teams").delete().eq("tournament_id", tourneyId);
+    await supabase.from("categories").delete().eq("tournament_id", tourneyId);
+
+    // 4. Delete the tournament row
+    const { error } = await supabase.from("tournaments").delete().eq("id", tourneyId);
     if (error) {
-      console.error("[Supabase] Error deleting tournament:", error);
+      console.warn("[Supabase] Notice on cloud tournament deletion:", error.message);
       return false;
     }
     return true;
   } catch (err) {
-    console.error("[Supabase] Unexpected error deleting tournament:", err);
+    console.warn("[Supabase] Unexpected notice deleting tournament from cloud:", err);
     return false;
   }
 }

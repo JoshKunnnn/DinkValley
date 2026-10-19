@@ -275,6 +275,7 @@ html.dv-large-text {
     transform: translateY(100%);
     opacity: 0.9;
   }
+
   to {
     transform: translateY(0);
     opacity: 1;
@@ -290,6 +291,7 @@ html.dv-large-text {
     opacity: 0;
     transform: translateY(6px);
   }
+
   to {
     opacity: 1;
     transform: translateY(0);
@@ -301,6 +303,7 @@ html.dv-large-text {
 }
 
 @media (prefers-reduced-motion: reduce) {
+
   .sheet-up,
   .fade-in-soft {
     animation: none !important;

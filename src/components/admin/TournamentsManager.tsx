@@ -37,8 +37,18 @@ export function TournamentsManager({
   onSelectTournament,
   activeTournamentSlug,
 }: TournamentsManagerProps) {
-  const { tournaments, addTournament, updateTournament, deleteTournament } = useTournamentStore();
+  const {
+    tournaments,
+    addTournament,
+    updateTournament,
+    deleteTournament,
+    isLoading,
+    isOnline,
+    syncFromCloud,
+    lastSyncedAt,
+  } = useTournamentStore();
 
+  const [isSyncing, setIsSyncing] = useState(false);
   const [viewMode, setViewMode] = useState<"create" | "list" | "edit">(() =>
     tournaments.length === 0 ? "create" : "list"
   );
@@ -301,7 +311,7 @@ export function TournamentsManager({
     };
 
     const created = addTournament(payload);
-    setNotice(`Tournament "${created.name}" created successfully.`);
+    setNotice(`Tournament "${created.name}" created and saved to cloud database.`);
     if (onSelectTournament) {
       onSelectTournament(created.slug);
     }
@@ -356,7 +366,7 @@ export function TournamentsManager({
     };
 
     updateTournament(editingTournamentSlug, payload);
-    setNotice(`Tournament "${name.trim()}" updated successfully.`);
+    setNotice(`Tournament "${name.trim()}" updated in database.`);
 
     if (onSelectTournament && payload.slug) {
       onSelectTournament(payload.slug);
@@ -367,9 +377,16 @@ export function TournamentsManager({
   };
 
   const handleDelete = (tourneySlug: string, tourneyName: string) => {
-    if (window.confirm(`Are you sure you want to delete "${tourneyName}"? This action cannot be undone.`)) {
+    if (window.confirm(`Are you sure you want to permanently delete "${tourneyName}"? This action cannot be undone.`)) {
       deleteTournament(tourneySlug);
-      setNotice(`Tournament "${tourneyName}" removed.`);
+      if (editingTournamentSlug === tourneySlug) {
+        setEditingTournamentSlug(null);
+        setViewMode("list");
+      }
+      if (activeTournamentSlug === tourneySlug && onSelectTournament) {
+        onSelectTournament("");
+      }
+      setNotice(`Tournament "${tourneyName}" deleted permanently from database.`);
     }
   };
 
@@ -395,6 +412,30 @@ export function TournamentsManager({
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
+          <div className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold uppercase tracking-wider rounded border border-border bg-card">
+            <span
+              className={`w-2 h-2 rounded-full ${
+                isOnline ? "bg-pickle animate-pulse" : "bg-amber-600"
+              }`}
+            />
+            <span className={isOnline ? "text-pickle" : "text-amber-600"}>
+              {isOnline ? "Database Live" : "Offline"}
+            </span>
+          </div>
+
+          <button
+            onClick={async () => {
+              setIsSyncing(true);
+              await syncFromCloud();
+              setIsSyncing(false);
+            }}
+            disabled={isSyncing || !isOnline}
+            className="px-3 py-1.5 text-xs font-bold uppercase tracking-widest bg-card border border-border hover:border-pickle rounded text-foreground transition-all cursor-pointer disabled:opacity-50"
+            title="Refetch tournaments directly from Supabase database"
+          >
+            {isSyncing ? "Syncing..." : "Sync Database"}
+          </button>
+
           <button
             onClick={() => {
               setViewMode("list");

@@ -854,6 +854,42 @@ export function purgeQueueForCategory(tournamentSlug: string, categoryId: string
 }
 
 /**
+ * Removes all matches from the dispatch queue and clears assigned courts for a deleted tournament.
+ */
+export function purgeQueueForTournament(tournamentSlug: string): void {
+  const queue = getDispatchQueue();
+  const filtered = queue
+    .filter((q) => {
+      const matchInTourney =
+        q.tournamentSlug === tournamentSlug ||
+        (!q.tournamentSlug && q.matchId && q.matchId.includes(tournamentSlug));
+      return !matchInTourney;
+    })
+    .map((q, i) => ({ ...q, priority: i + 1 }));
+  saveDispatchQueue(filtered);
+
+  // Release any active court stations holding matches from this tournament
+  const stations = getCourtStations();
+  let stationModified = false;
+  for (const c of FACILITY_COURTS) {
+    const st = stations[c];
+    if (st.currentMatchId && st.currentMatchId.includes(tournamentSlug)) {
+      st.currentMatchId = null;
+      st.status = "available";
+      st.dispatchedAt = null;
+      stationModified = true;
+    }
+    if (st.onDeckMatchId && st.onDeckMatchId.includes(tournamentSlug)) {
+      st.onDeckMatchId = null;
+      stationModified = true;
+    }
+  }
+  if (stationModified) {
+    saveCourtStations(stations);
+  }
+}
+
+/**
  * Removes all matches from the dispatch queue involving a specific team that was deleted.
  */
 export function purgeQueueForTeam(tournamentSlug: string, categoryId: string, teamName: string): void {

@@ -5,6 +5,7 @@ import {
   registerStaffAccount,
   type StaffRole,
 } from "@/lib/auth-store";
+import { detectRoleFromCode } from "@/lib/access-codes";
 
 interface StaffPortalModalProps {
   isOpen: boolean;
@@ -32,18 +33,6 @@ export function StaffPortalModal({ isOpen, onClose }: StaffPortalModalProps) {
   const [isLoading, setIsLoading] = useState(false);
 
   const modalRef = useRef<HTMLDivElement>(null);
-
-  // Close on Escape key
-  useEffect(() => {
-    if (!isOpen) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        onClose();
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isOpen, onClose]);
 
   // Reset errors when switching tabs
   useEffect(() => {
@@ -101,25 +90,24 @@ export function StaffPortalModal({ isOpen, onClose }: StaffPortalModalProps) {
       return;
     }
 
-    setSuccessNotice("Official account registered and certified. Redirecting...");
+    const certifiedRole = res.role || regRole;
+    setSuccessNotice(`Official account registered and certified as ${certifiedRole === "admin" ? "Tournament Director" : "Match Official"}. Redirecting...`);
     setTimeout(() => {
       onClose();
-      if (regRole === "admin") {
+      if (certifiedRole === "admin") {
         navigate({ to: "/admin" });
       } else {
         navigate({ to: "/umpire" });
       }
-    }, 500);
+    }, 600);
   };
 
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4 animate-in fade-in duration-200"
-      onClick={onClose}
     >
       <div
         ref={modalRef}
-        onClick={(e) => e.stopPropagation()}
         className="surface-card bg-card border border-border w-full max-w-lg shadow-2xl rounded-xl overflow-hidden flex flex-col max-h-[90vh]"
       >
         {/* Header */}
@@ -141,10 +129,23 @@ export function StaffPortalModal({ isOpen, onClose }: StaffPortalModalProps) {
           </div>
           <button
             onClick={onClose}
-            className="text-sand/60 hover:text-sand text-lg font-bold p-1 transition-colors cursor-pointer"
+            className="text-sand/70 hover:text-sand hover:bg-white/10 rounded-full w-8 h-8 flex items-center justify-center transition-colors cursor-pointer"
             aria-label="Close dialog"
+            title="Close"
           >
-            &times;
+            <svg
+              className="w-5 h-5 text-sand"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M6 18L18 6M6 6l12 12"
+              />
+            </svg>
           </button>
         </div>
 
@@ -327,13 +328,18 @@ export function StaffPortalModal({ isOpen, onClose }: StaffPortalModalProps) {
                 <input
                   type="text"
                   value={regAccessCode}
-                  onChange={(e) => setRegAccessCode(e.target.value)}
-                  placeholder="Issued by tournament director"
+                  onChange={(e) => {
+                    const clean = e.target.value.toUpperCase();
+                    setRegAccessCode(clean);
+                    const detected = detectRoleFromCode(clean);
+                    if (detected) setRegRole(detected);
+                  }}
+                  placeholder="e.g. ADM-4821, UMP-2026, or DV-ADMIN"
                   required
                   className="w-full bg-charcoal border border-border px-3 py-2 text-sand font-mono uppercase tracking-widest text-sm rounded focus:outline-none focus:border-pickle"
                 />
                 <p className="mt-1 text-[0.65rem] text-muted-foreground">
-                  Registration requires an unused access code created by tournament administration.
+                  Accepts ADM-*, UMP-*, DV-ADMIN, UMP-2026, or codes generated in Admin Console.
                 </p>
               </div>
 

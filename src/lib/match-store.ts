@@ -817,6 +817,32 @@ export function purgeMatchesForTeam(tournamentSlug: string, categoryId: string, 
 }
 
 /**
+ * Removes all matches belonging to a deleted tournament.
+ */
+export function purgeMatchesForTournament(tournamentSlug: string): void {
+  const current = getMatches();
+  const deletedMatchIds: string[] = [];
+
+  const retained = current.filter((m) => {
+    const isThisTourney =
+      m.tournamentSlug === tournamentSlug ||
+      (!m.tournamentSlug && m.id.includes(tournamentSlug));
+    if (isThisTourney) {
+      deletedMatchIds.push(m.id);
+      return false;
+    }
+    return true;
+  });
+
+  if (deletedMatchIds.length > 0) {
+    saveMatches(retained, false);
+    for (const id of deletedMatchIds) {
+      dbDeleteMatch(id).catch(() => {});
+    }
+  }
+}
+
+/**
  * Removes non-final matches in a category where either team is no longer in validTeamNames.
  */
 export function purgeMatchesNotInTeams(

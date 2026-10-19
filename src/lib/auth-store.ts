@@ -1,5 +1,5 @@
 import { supabase } from "@/integrations/supabase/client";
-import { getAccessCodes, saveAccessCodes, validateAndUseCode } from "./access-codes";
+import { getAccessCodes, saveAccessCodes, validateAndUseCode, validateAndUseCodeAsync } from "./access-codes";
 import { dbCheckAccessCode } from "./supabase-service";
 
 export type StaffRole = "admin" | "umpire";
@@ -228,9 +228,9 @@ export async function registerStaffAccount(data: {
   name: string;
   email: string;
   password: string;
-  role: StaffRole;
+  role?: StaffRole;
   accessCode: string;
-}): Promise<{ success: boolean; error?: string }> {
+}): Promise<{ success: boolean; role?: StaffRole; error?: string }> {
   const cleanName = data.name.trim();
   const cleanEmail = data.email.trim().toLowerCase();
   const cleanPassword = data.password.trim();
@@ -249,29 +249,16 @@ export async function registerStaffAccount(data: {
     return { success: false, error: "Official access code is required to register." };
   }
 
-  // 1. Check access code with server
-  let serverValidated = false;
-  try {
-    const serverRole = await dbCheckAccessCode(cleanCode);
-    if (serverRole) {
-      if (serverRole !== data.role) {
-        return {
-          success: false,
-          error: `This access code is designated for ${serverRole.toUpperCase()} accounts, not ${data.role.toUpperCase()}.`,
-        };
-      }
-      serverValidated = true;
-    }
-  } catch {
-    // fallback to local access codes
+  // 1. Determine effective role and validate access code
+  const validationRes = await validateAndUseCodeAsync(cleanCode, data.role, cleanEmail);
+  if (!validationRes.valid) {
+    return {
+      success: false,
+      error: validationRes.error || "Invalid access code. Please request an official code from an administrator.",
+    };
   }
 
-  if (!serverValidated) {
-    const validation = validateAndUseCode(cleanCode, data.role, cleanEmail);
-    if (!validation.valid) {
-      return { success: false, error: validation.error || "Invalid access code." };
-    }
-  }
+  const finalRole: StaffRole = validationRes.role || data.role || "umpire";
 
   // 2. Try Supabase Auth Sign Up
   try {
@@ -282,6 +269,7 @@ export async function registerStaffAccount(data: {
         data: {
           name: cleanName,
           access_code: cleanCode,
+          role: finalRole,
         },
       },
     });
@@ -290,29 +278,33 @@ export async function registerStaffAccount(data: {
       if (signUpError.message.includes("User already registered") || signUpError.message.includes("already exists")) {
         return { success: false, error: "An account with this email address already exists. Please sign in." };
       }
-      console.warn("[Auth] Supabase signup error, falling back to local:", signUpError.message);
+      console.warn("[Auth] Supabase signup warning, registering certified session locally:", signUpError.message);
     } else if (authData?.user) {
-      setStaffSession(data.role, cleanName);
+      setStaffSession(finalRole, cleanName);
     }
   } catch (err: any) {
-    console.warn("[Auth] Unexpected signup error:", err);
+    console.warn("[Auth] Unexpected signup notice:", err);
   }
 
   // 3. Keep local accounts updated for offline resilience
   const users = getStaffUsers();
-  if (!users.some((u) => u.email.toLowerCase() === cleanEmail)) {
-    const newUser: StaffUser = {
-      name: cleanName,
-      email: cleanEmail,
-      password: cleanPassword,
-      role: data.role,
-      accessCode: cleanCode,
-      certifiedAt: new Date().toISOString().split("T")[0],
-    };
-    users.push(newUser);
-    saveStaffUsers(users);
-  }
+  const existingIdx = users.findIndex((u) => u.email.toLowerCase() === cleanEmail);
+  const newUser: StaffUser = {
+    name: cleanName,
+    email: cleanEmail,
+    password: cleanPassword,
+    role: finalRole,
+    accessCode: cleanCode,
+    certifiedAt: new Date().toISOString().split("T")[0],
+  };
 
-  setStaffSession(data.role, cleanName);
-  return { success: true };
+  if (existingIdx >= 0) {
+    users[existingIdx] = newUser;
+  } else {
+    users.push(newUser);
+  }
+  saveStaffUsers(users);
+
+  setStaffSession(finalRole, cleanName);
+  return { success: true, role: finalRole };
 }

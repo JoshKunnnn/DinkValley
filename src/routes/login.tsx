@@ -5,6 +5,7 @@ import {
   registerStaffAccount,
   type StaffRole as Role,
 } from "@/lib/auth-store";
+import { detectRoleFromCode } from "@/lib/access-codes";
 
 export const Route = createFileRoute("/login")({
   component: Login,
@@ -87,9 +88,10 @@ function Login() {
       return;
     }
 
-    setDetectedRole(selectedRole);
+    const certifiedRole = res.role || selectedRole;
+    setDetectedRole(certifiedRole);
     setTimeout(() => {
-      if (selectedRole === "admin") {
+      if (certifiedRole === "admin") {
         navigate({ to: "/admin" });
       } else {
         navigate({ to: "/umpire" });
@@ -254,8 +256,13 @@ function Login() {
                         type="text"
                         required
                         value={accessCode}
-                        onChange={(e) => setAccessCode(e.target.value)}
-                        placeholder="Enter code provided by administrator"
+                        onChange={(e) => {
+                          const clean = e.target.value.toUpperCase();
+                          setAccessCode(clean);
+                          const detected = detectRoleFromCode(clean);
+                          if (detected) setSelectedRole(detected);
+                        }}
+                        placeholder="e.g. ADM-4821, UMP-2026, or DV-ADMIN"
                         className="w-full border border-border bg-background/20 px-4 py-2.5 text-sand uppercase placeholder:text-sand/40 focus:border-pickle focus:outline-none transition-colors text-xs font-mono"
                       />
                     </label>

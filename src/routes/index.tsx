@@ -259,9 +259,8 @@ function AmenitiesCarousel() {
                 type="button"
                 onClick={() => setIndex(i)}
                 aria-label={`Go to amenity ${i + 1}`}
-                className={`h-2 transition-all rounded-full cursor-pointer ${
-                  i === index ? "w-6 bg-pickle" : "w-2 bg-sand/25 hover:bg-sand/40"
-                }`}
+                className={`h-2 transition-all rounded-full cursor-pointer ${i === index ? "w-6 bg-pickle" : "w-2 bg-sand/25 hover:bg-sand/40"
+                  }`}
               />
             ))}
           </div>
@@ -323,7 +322,7 @@ function Index() {
   const { tournaments } = useTournamentStore();
   const displayTournaments =
     tournaments.length > 0 ? tournaments : (loaderTournaments ?? []);
-  
+
   const [openFaq, setOpenFaq] = useState<number | null>(null);
   const [statusFilter, setStatusFilter] = useState<"all" | "open" | "live" | "finished">("all");
   const [selectedTournament, setSelectedTournament] = useState<Tournament | null>(null);
@@ -555,11 +554,10 @@ function Index() {
                   key={filter.key}
                   type="button"
                   onClick={() => setStatusFilter(filter.key)}
-                  className={`px-3 py-1.5 rounded-full text-xs font-bold uppercase tracking-wider transition-colors cursor-pointer border ${
-                    isActive
+                  className={`px-3 py-1.5 rounded-full text-xs font-bold uppercase tracking-wider transition-colors cursor-pointer border ${isActive
                       ? "bg-brick text-sand border-brick shadow-xs"
                       : "bg-card text-muted-foreground border-border hover:border-pickle hover:text-foreground"
-                  }`}
+                    }`}
                 >
                   {filter.label}
                 </button>
@@ -842,11 +840,10 @@ function Index() {
             return (
               <div
                 key={idx}
-                className={`border-2 rounded-xl overflow-hidden transition-all duration-200 ${
-                  isOpen
+                className={`border-2 rounded-xl overflow-hidden transition-all duration-200 ${isOpen
                     ? "border-pickle bg-card shadow-sm"
                     : "border-border bg-card hover:border-pickle/50"
-                }`}
+                  }`}
               >
                 <button
                   id={`faq-${idx}`}

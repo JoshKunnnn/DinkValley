@@ -9,46 +9,67 @@ import {
   dbDeleteDrawnGroups,
   dbSubscribeToLive,
 } from "@/lib/supabase-service";
+import { supabase } from "@/integrations/supabase/client";
 import {
   purgeQueueForCategory,
   purgeQueueForTeam,
+  purgeQueueForTournament,
 } from "@/lib/court-dispatch";
 import {
   purgeMatchesForCategory,
   purgeMatchesForTeam,
+  purgeMatchesForTournament,
 } from "@/lib/match-store";
 
-const STORAGE_KEY = "dv_tournaments";
+// Offline backup storage key only used when disconnected from internet
+const OFFLINE_BACKUP_KEY = "dv_tournaments_offline_cache";
 
-/**
- * Get all tournaments stored in localStorage.
- * Defaults to an empty list (clean slate with no preloaded mock tournaments).
- */
-export function getTournaments(): Tournament[] {
+// Global in-memory authority
+let _memoryTournaments: Tournament[] | null = null;
+let _isInitialFetchDone = false;
+
+function readOfflineBackup(): Tournament[] {
   if (typeof window === "undefined") return [];
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(OFFLINE_BACKUP_KEY) || localStorage.getItem("dv_tournaments");
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) {
-      return parsed as Tournament[];
-    }
-    return [];
+    return Array.isArray(parsed) ? (parsed as Tournament[]) : [];
   } catch {
     return [];
   }
 }
 
-/**
- * Persist tournaments to localStorage and dispatch custom event for instant tab sync.
- */
-export function saveTournaments(tournaments: Tournament[]): void {
+function writeOfflineBackup(tournaments: Tournament[]): void {
   if (typeof window === "undefined") return;
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(tournaments));
+    localStorage.setItem(OFFLINE_BACKUP_KEY, JSON.stringify(tournaments));
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * Synchronous tournament getter.
+ * Returns the active in-memory list or offline fallback.
+ */
+export function getTournaments(): Tournament[] {
+  if (_memoryTournaments !== null) {
+    return _memoryTournaments;
+  }
+  const fallback = readOfflineBackup();
+  _memoryTournaments = fallback;
+  return fallback;
+}
+
+/**
+ * Save tournaments to memory and offline cache, and notify components.
+ */
+export function saveTournaments(tournaments: Tournament[]): void {
+  _memoryTournaments = tournaments;
+  writeOfflineBackup(tournaments);
+  if (typeof window !== "undefined") {
     window.dispatchEvent(new Event("dv_tournaments_updated"));
-  } catch (err) {
-    console.error("Failed to save tournaments", err);
   }
 }
 
@@ -155,7 +176,7 @@ export type NewTournamentInput = {
 };
 
 /**
- * Create and add a new tournament.
+ * Create and add a new tournament directly to the database.
  */
 export function addTournament(input: NewTournamentInput): Tournament {
   const current = getTournaments();
@@ -194,15 +215,23 @@ export function addTournament(input: NewTournamentInput): Tournament {
 
   const updated = [newTournament, ...current];
   saveTournaments(updated);
-  // Async sync to Supabase
-  dbSaveTournament(newTournament).catch((err) =>
-    console.warn("[Supabase] Failed to persist new tournament:", err)
-  );
+
+  // Persist directly to Supabase
+  dbSaveTournament(newTournament)
+    .then((ok) => {
+      if (!ok) {
+        console.warn("[Database] Tournament creation queued, verify cloud permissions.");
+      }
+    })
+    .catch((err) => {
+      console.warn("[Database] Cloud save notice:", err);
+    });
+
   return newTournament;
 }
 
 /**
- * Update an existing tournament.
+ * Update an existing tournament directly in the database.
  */
 export function updateTournament(slug: string, updates: Partial<Tournament>): Tournament | undefined {
   const current = getTournaments();
@@ -219,32 +248,48 @@ export function updateTournament(slug: string, updates: Partial<Tournament>): To
   };
 
   current[index] = updatedItem;
-  saveTournaments(current);
+  saveTournaments([...current]);
 
   // If slug was changed, delete the old slug record from Supabase
   if (updates.slug && updates.slug !== oldSlug) {
     dbDeleteTournament(oldSlug).catch(() => {});
   }
 
-  // Async sync to Supabase
-  dbSaveTournament(updatedItem).catch((err) =>
-    console.warn("[Supabase] Failed to persist updated tournament:", err)
-  );
+  // Persist directly to Supabase
+  dbSaveTournament(updatedItem).catch((err) => {
+    console.warn("[Database] Cloud update notice:", err);
+  });
+
   return updatedItem;
 }
 
 /**
- * Delete a tournament.
+ * Delete a tournament permanently directly from Supabase and active dispatch/match stores.
  */
 export function deleteTournament(slug: string): boolean {
+  const cleanSlug = slug.trim();
+  if (!cleanSlug) return false;
+
+  // 1. Clean up associated matches, queues, and court station locks
+  purgeMatchesForTournament(cleanSlug);
+  purgeQueueForTournament(cleanSlug);
+
+  // 2. Remove from active memory list and dispatch sync event
   const current = getTournaments();
-  const filtered = current.filter((t) => t.slug !== slug);
-  if (filtered.length === current.length) return false;
+  const filtered = current.filter((t) => t.slug !== cleanSlug);
   saveTournaments(filtered);
-  // Async sync to Supabase
-  dbDeleteTournament(slug).catch((err) =>
-    console.warn("[Supabase] Failed to delete tournament from cloud:", err)
-  );
+
+  // 3. Immediately delete from Supabase database
+  dbDeleteTournament(cleanSlug)
+    .then((ok) => {
+      if (!ok) {
+        console.warn("[Database] Cloud deletion notice for", cleanSlug);
+      }
+    })
+    .catch((err) => {
+      console.warn("[Database] Failed to delete tournament from cloud:", err);
+    });
+
   return true;
 }
 
@@ -360,7 +405,7 @@ export function rejectPendingRegistration(tournamentSlug: string, categoryId: st
 
   // Delete from Supabase in background
   dbDeleteTeam(teamId).catch((err) => {
-    console.warn("[Supabase] Failed to delete rejected team:", err);
+    console.warn("[Database] Failed to delete rejected team:", err);
   });
 
   return updateTournament(tournamentSlug, { categories });
@@ -397,7 +442,7 @@ export function removeTeamFromCategory(tournamentSlug: string, categoryId: strin
 
   // Delete from Supabase in background
   dbDeleteTeam(teamId).catch((err) => {
-    console.warn("[Supabase] Failed to delete team:", err);
+    console.warn("[Database] Failed to delete team:", err);
   });
 
   return updateTournament(tournamentSlug, { categories });
@@ -451,8 +496,6 @@ export function bulkSetTeamsInCategory(
 
 /**
  * Delete all teams from a specific category within a tournament.
- * Also cleans up any drawn bracket cache for this category and
- * automatically purges all corresponding matches in the dispatch queue.
  */
 export function deleteAllTeamsInCategory(
   tournamentSlug: string,
@@ -471,7 +514,7 @@ export function deleteAllTeamsInCategory(
   // Delete drawn groups and teams from Supabase
   dbDeleteDrawnGroups(tournamentSlug, categoryId).catch(() => {});
   dbDeleteAllTeamsInCategory(tournamentSlug, categoryId).catch((err) => {
-    console.warn("[Supabase] Failed to delete category teams:", err);
+    console.warn("[Database] Failed to delete category teams:", err);
   });
 
   return bulkSetTeamsInCategory(tournamentSlug, categoryId, []);
@@ -479,82 +522,139 @@ export function deleteAllTeamsInCategory(
 
 /**
  * React hook to access and synchronize tournament state.
+ * Uses database-first architecture and real-time updates as long as internet is available.
  */
 export function useTournamentStore() {
   const [tournaments, setTournaments] = useState<Tournament[]>(() => getTournaments());
+  const [isLoading, setIsLoading] = useState(!_isInitialFetchDone);
+  const [isOnline, setIsOnline] = useState(() => (typeof navigator !== "undefined" ? navigator.onLine : true));
+  const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(null);
+
+  const syncFromCloud = useCallback(async () => {
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      return;
+    }
+    try {
+      const cloudTournaments = await dbGetTournaments();
+      if (Array.isArray(cloudTournaments)) {
+        // Direct database state is the single source of truth
+        _memoryTournaments = cloudTournaments;
+        writeOfflineBackup(cloudTournaments);
+        setTournaments(cloudTournaments);
+        setLastSyncedAt(new Date());
+        _isInitialFetchDone = true;
+      }
+    } catch (err) {
+      console.warn("[TournamentStore] Sync failed, maintaining active memory state:", err);
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
 
   const refresh = useCallback(() => {
     setTournaments(getTournaments());
-  }, []);
+    syncFromCloud();
+  }, [syncFromCloud]);
 
   useEffect(() => {
-    refresh();
-
-    // Fetch directly from Supabase as single source of truth
     let mounted = true;
-    dbGetTournaments()
-      .then((cloudTournaments) => {
-        if (mounted && cloudTournaments) {
-          saveTournaments(cloudTournaments);
-          setTournaments(cloudTournaments);
-        }
-      })
-      .catch((err) => {
-        console.warn("[TournamentStore] Cloud fetch failed, using local data:", err);
-      });
 
-    // Listen for realtime changes (wrapped so subscription errors don't crash the UI)
+    // Track online / offline status
+    const handleOnline = () => {
+      setIsOnline(true);
+      syncFromCloud();
+    };
+    const handleOffline = () => {
+      setIsOnline(false);
+    };
+
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+
+    // Initial fetch from database
+    syncFromCloud().then(() => {
+      if (mounted) setIsLoading(false);
+    });
+
+    // Re-sync when tab visibility is restored
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible" && navigator.onLine) {
+        syncFromCloud();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+
+    // Listen for realtime changes on tournaments, categories, and teams
     let unsubRealtime: (() => void) | null = null;
     try {
       unsubRealtime = dbSubscribeToLive(
         () => {
-          dbGetTournaments()
-            .then((cloudTournaments) => {
-              if (mounted && cloudTournaments) {
-                saveTournaments(cloudTournaments);
-                setTournaments(cloudTournaments);
-              }
-            })
-            .catch(() => {});
+          if (mounted) syncFromCloud();
         },
-        () => {}
+        () => {
+          if (mounted) syncFromCloud();
+        }
       );
     } catch (err) {
-      console.warn("[TournamentStore] Realtime subscription failed:", err);
+      console.warn("[TournamentStore] Realtime listener error:", err);
     }
 
-    // Listen for storage events across tabs
-    const handleStorage = (e: StorageEvent) => {
-      if (e.key === STORAGE_KEY) {
-        refresh();
-      }
-    };
+    // Additional Supabase channel explicitly listening to tournament changes
+    let directTourneyChannel: ReturnType<typeof supabase.channel> | null = null;
+    try {
+      directTourneyChannel = supabase
+        .channel(`tourney-realtime-${Date.now()}`)
+        .on("postgres_changes", { event: "*", schema: "public", table: "tournaments" }, () => {
+          if (mounted) syncFromCloud();
+        })
+        .on("postgres_changes", { event: "*", schema: "public", table: "categories" }, () => {
+          if (mounted) syncFromCloud();
+        })
+        .on("postgres_changes", { event: "*", schema: "public", table: "teams" }, () => {
+          if (mounted) syncFromCloud();
+        })
+        .subscribe();
+    } catch {
+      // ignore
+    }
 
     // Listen for same-window updates
-    const handleCustom = () => {
-      refresh();
+    const handleLocalUpdate = () => {
+      setTournaments(getTournaments());
     };
-
-    window.addEventListener("storage", handleStorage);
-    window.addEventListener("dv_tournaments_updated", handleCustom);
+    window.addEventListener("dv_tournaments_updated", handleLocalUpdate);
 
     return () => {
       mounted = false;
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+      document.removeEventListener("visibilitychange", handleVisibility);
+      window.removeEventListener("dv_tournaments_updated", handleLocalUpdate);
+
       if (unsubRealtime) {
         try {
           unsubRealtime();
         } catch {
-          // already cleaned up
+          // ignore
         }
       }
-      window.removeEventListener("storage", handleStorage);
-      window.removeEventListener("dv_tournaments_updated", handleCustom);
+      if (directTourneyChannel) {
+        try {
+          supabase.removeChannel(directTourneyChannel);
+        } catch {
+          // ignore
+        }
+      }
     };
-  }, [refresh]);
+  }, [syncFromCloud]);
 
   return {
     tournaments,
+    isLoading,
+    isOnline,
+    lastSyncedAt,
     refresh,
+    syncFromCloud,
     addTournament,
     updateTournament,
     deleteTournament,

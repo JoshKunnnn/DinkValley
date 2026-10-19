@@ -224,9 +224,8 @@ export function MobileNav() {
               }
             />
             <span
-              className={`text-[0.6rem] font-bold uppercase tracking-wider leading-none truncate w-full px-0.5 text-center transition-colors ${
-                activeId === "me" || showStaffModal ? "text-pickle font-black" : "text-sand/50"
-              }`}
+              className={`text-[0.6rem] font-bold uppercase tracking-wider leading-none truncate w-full px-0.5 text-center transition-colors ${activeId === "me" || showStaffModal ? "text-pickle font-black" : "text-sand/50"
+                }`}
             >
               {authRole
                 ? authRole === "admin"
@@ -297,9 +296,8 @@ function MobileNavItem({
         }
       />
       <span
-        className={`text-[0.6rem] font-bold uppercase tracking-wider leading-none truncate w-full px-0.5 text-center transition-colors ${
-          isActive ? "text-pickle font-black" : "text-sand/50"
-        }`}
+        className={`text-[0.6rem] font-bold uppercase tracking-wider leading-none truncate w-full px-0.5 text-center transition-colors ${isActive ? "text-pickle font-black" : "text-sand/50"
+          }`}
       >
         {label}
       </span>

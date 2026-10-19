@@ -36,7 +36,8 @@ supabase/.temp/
 .DS_Store
 *.suo
 *.ntvs*
-# Python cache
+*.njsproj
+*.sln
+*.sw?
 __pycache__/
 *.py[cod]
-*$py.class
