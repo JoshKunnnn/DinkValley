@@ -14,10 +14,6 @@ import {
   updateTeamInTournament,
   bulkSetTeamsInCategory,
   deleteAllTeamsInCategory,
-  approvePendingRegistration,
-  rejectPendingRegistration,
-  getUniqueClubTeams,
-  type ExistingClubTeam,
 } from "@/lib/tournament-store";
 import { generate32Teams } from "@/lib/team-generator";
 import {
@@ -388,34 +384,22 @@ function Admin() {
 
             {/* Nav links */}
             <nav className="flex flex-col gap-1 px-3 py-4">
-              {tabs.map(({ key, label }) => {
-                const totalPendingForTab =
-                  key === "teams"
-                    ? tournament?.categories?.reduce((acc, c) => acc + (c.pendingTeams?.length || 0), 0) || 0
-                    : 0;
-
-                return (
-                  <button
-                    key={key}
-                    onClick={() => {
-                      setActiveTab(key);
-                      setMobileMenuOpen(false);
-                    }}
-                    className={`flex items-center justify-between rounded px-4 py-3 text-left text-sm font-semibold uppercase tracking-widest transition-colors cursor-pointer ${
-                      activeTab === key
-                        ? "bg-brick text-sand font-bold"
-                        : "text-sand/80 hover:bg-charcoal/60 hover:text-sand"
-                    }`}
-                  >
-                    <span>{label}</span>
-                    {totalPendingForTab > 0 && (
-                      <span className="px-2 py-0.5 text-[0.65rem] font-bold font-mono bg-brick text-sand rounded-full animate-pulse">
-                        {totalPendingForTab}
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
+              {tabs.map(({ key, label }) => (
+                <button
+                  key={key}
+                  onClick={() => {
+                    setActiveTab(key);
+                    setMobileMenuOpen(false);
+                  }}
+                  className={`flex items-center justify-between rounded px-4 py-3 text-left text-sm font-semibold uppercase tracking-widest transition-colors cursor-pointer ${
+                    activeTab === key
+                      ? "bg-brick text-sand font-bold"
+                      : "text-sand/80 hover:bg-charcoal/60 hover:text-sand"
+                  }`}
+                >
+                  <span>{label}</span>
+                </button>
+              ))}
             </nav>
 
             <div className="flex-1" />
@@ -458,31 +442,19 @@ function Admin() {
 
         {/* Nav links */}
         <nav className="flex flex-col gap-1 px-3 py-4">
-          {tabs.map(({ key, label }) => {
-            const totalPendingForTab =
-              key === "teams"
-                ? tournament?.categories?.reduce((acc, c) => acc + (c.pendingTeams?.length || 0), 0) || 0
-                : 0;
-
-            return (
-              <button
-                key={key}
-                onClick={() => setActiveTab(key)}
-                className={`flex items-center justify-between rounded px-4 py-3 text-left text-sm font-semibold uppercase tracking-widest transition-colors cursor-pointer ${
-                  activeTab === key
-                    ? "bg-brick text-sand font-bold"
-                    : "text-sand/80 hover:bg-charcoal/60 hover:text-sand"
-                }`}
-              >
-                <span>{label}</span>
-                {totalPendingForTab > 0 && (
-                  <span className="px-2 py-0.5 text-[0.65rem] font-bold font-mono bg-brick text-sand rounded-full animate-pulse">
-                    {totalPendingForTab}
-                  </span>
-                )}
-              </button>
-            );
-          })}
+          {tabs.map(({ key, label }) => (
+            <button
+              key={key}
+              onClick={() => setActiveTab(key)}
+              className={`flex items-center justify-between rounded px-4 py-3 text-left text-sm font-semibold uppercase tracking-widest transition-colors cursor-pointer ${
+                activeTab === key
+                  ? "bg-brick text-sand font-bold"
+                  : "text-sand/80 hover:bg-charcoal/60 hover:text-sand"
+              }`}
+            >
+              <span>{label}</span>
+            </button>
+          ))}
         </nav>
 
         {/* Spacer */}
@@ -724,23 +696,9 @@ function Admin() {
                     <span className="text-sm font-bold uppercase tracking-widest text-foreground">Teams & Payments</span>
                     {tournament && category && (
                       <span className="text-[0.65rem] font-mono text-foreground font-bold border-2 border-border bg-background px-2 py-0.5 rounded">
-                        {category.teams?.length ?? 0} verified
+                        {category.teams?.length ?? 0} teams
                       </span>
                     )}
-                    {tournament && (() => {
-                      const totalPending = tournament.categories.reduce(
-                        (sum, c) => sum + (c.pendingTeams?.length ?? 0),
-                        0
-                      );
-                      if (totalPending > 0) {
-                        return (
-                          <span className="text-[0.65rem] font-mono font-bold bg-brick text-white px-2 py-0.5 rounded animate-pulse">
-                            {totalPending} Pending Review
-                          </span>
-                        );
-                      }
-                      return null;
-                    })()}
                   </div>
                   <svg
                     className={`w-4 h-4 text-foreground transition-transform duration-200 ${openSetupSections.has("teams") ? "rotate-180" : ""}`}
@@ -864,133 +822,8 @@ function Admin() {
       <AdminMobileNav
         activeTab={activeTab}
         onTabChange={(tab) => { setActiveTab(tab); }}
-        pendingTeamsCount={
-          tournament?.categories?.reduce(
-            (acc, c) => acc + (c.pendingTeams?.length || 0),
-            0
-          ) || 0
-        }
         onLogout={handleLogout}
       />
-    </div>
-  );
-}
-
-
-/* ────────────────────────────────────────────────
-   Teams Tab -- Payment Proof Verification & Photo Attachments
-──────────────────────────────────────────────── */
-
-function PaymentProofModal({
-  team,
-  isPaid,
-  proofUrl,
-  onClose,
-  onTogglePaid,
-  onUpdateProof,
-}: {
-  team: Team;
-  isPaid: boolean;
-  proofUrl: string;
-  onClose: () => void;
-  onTogglePaid: () => void;
-  onUpdateProof: (newUrl: string) => void;
-}) {
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = (evt) => {
-        if (evt.target?.result) {
-          onUpdateProof(evt.target.result as string);
-        }
-      };
-      reader.readAsDataURL(file);
-    }
-  };
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-charcoal/95 backdrop-blur-sm p-4">
-      <div className="surface-card border-2 border-pickle/50 max-w-md w-full p-6 space-y-5">
-        <div className="flex items-center justify-between border-b border-border pb-3">
-          <div>
-            <span className="block text-[0.6rem] uppercase tracking-[0.28em] font-bold text-pickle">
-              Payment Attachment Proof
-            </span>
-            <h3 className="font-display text-2xl text-foreground mt-0.5">{team.name}</h3>
-            <p className="text-xs text-foreground/70">{team.players.join(" & ")}</p>
-          </div>
-          <button
-            onClick={onClose}
-            className="text-xs font-bold uppercase tracking-widest text-foreground/70 hover:text-foreground p-1 cursor-pointer"
-          >
-            Close
-          </button>
-        </div>
-
-        {/* Attachment Image Preview */}
-        <div className="space-y-2">
-          <div className="relative rounded overflow-hidden border border-border bg-charcoal flex items-center justify-center min-h-[260px]">
-            {proofUrl ? (
-              <img
-                src={proofUrl}
-                alt={`Payment proof for ${team.name}`}
-                className="max-h-[320px] w-full object-contain"
-              />
-            ) : (
-              <div className="p-8 text-center text-xs text-foreground/50">
-                No photo attachment uploaded yet.
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Details & Actions */}
-        <div className="space-y-3 bg-background p-4 border-2 border-border text-xs rounded-lg">
-          <div className="flex justify-between items-center">
-            <span className="text-foreground font-bold">Ref Number:</span>
-            <span className="font-mono text-foreground font-bold bg-card border border-border px-2 py-0.5 rounded">
-              {team.paymentRef ?? "GC-98214309"}
-            </span>
-          </div>
-          <div className="flex justify-between items-center">
-            <span className="text-foreground font-bold">Verification Status:</span>
-            <span className={`font-bold uppercase tracking-wider font-mono text-xs px-2 py-0.5 rounded ${
-              isPaid ? "bg-pickle/15 text-pickle border border-pickle/40" : "bg-brick/15 text-brick border border-brick/40"
-            }`}>
-              {isPaid ? "Verified Paid" : "Pending Verification"}
-            </span>
-          </div>
-        </div>
-
-        {/* Action Controls */}
-        <div className="space-y-2">
-          <div className="flex gap-2">
-            <button
-              onClick={() => {
-                onTogglePaid();
-              }}
-              className={`flex-1 py-3 font-display text-lg tracking-widest transition-all cursor-pointer font-bold ${
-                isPaid
-                  ? "bg-brick text-white hover:bg-brick-deep"
-                  : "bg-pickle text-white hover:opacity-90"
-              }`}
-            >
-              {isPaid ? "Mark as Pending" : "Verify & Mark Paid"}
-            </button>
-
-            <label className="flex-shrink-0 px-4 py-3 border-2 border-border bg-card text-foreground text-xs font-bold uppercase tracking-widest hover:border-pickle cursor-pointer inline-flex items-center justify-center rounded">
-              <span>Attach Photo</span>
-              <input
-                type="file"
-                accept="image/*"
-                onChange={handleFileChange}
-                className="hidden"
-              />
-            </label>
-          </div>
-        </div>
-      </div>
     </div>
   );
 }
@@ -1016,23 +849,12 @@ function TeamsTab({
   const [paymentMap, setPaymentMap] = useState<Record<string, boolean>>(() =>
     Object.fromEntries(
       (tournament.categories || []).flatMap((c) =>
-        (c.teams || []).map((t) => [t.id, t.paid ?? false])
+        (c.teams || []).map((t) => [t.id, t.paid ?? true])
       )
     )
   );
 
-  // Local proof photos: teamId -> image url
-  const [proofMap, setProofMap] = useState<Record<string, string>>(() =>
-    Object.fromEntries(
-      (tournament.categories || []).flatMap((c) =>
-        (c.teams || []).map((t) => [t.id, t.paymentProofUrl ?? ""])
-      )
-    )
-  );
-
-  const [selectedModalTeam, setSelectedModalTeam] = useState<Team | null>(null);
-  const [selectedModalCatId, setSelectedModalCatId] = useState<string | null>(null);
-  const [filter, setFilter] = useState<"all" | "paid" | "pending">("all");
+  const [filter, setFilter] = useState<"all" | "paid" | "unpaid">("all");
   const [teamSearchQuery, setTeamSearchQuery] = useState("");
   const [expandedTeamKeys, setExpandedTeamKeys] = useState<Set<string>>(new Set());
 
@@ -1044,75 +866,6 @@ function TeamsTab({
   const [targetNewCategory, setTargetNewCategory] = useState<string>(category?.id || tournament.categories?.[0]?.id || "");
   const [teamAddError, setTeamAddError] = useState<string | null>(null);
 
-  // Existing team registration state & handlers
-  const [registerMode, setRegisterMode] = useState<"existing" | "manual">("existing");
-  const [existingSearchQuery, setExistingSearchQuery] = useState("");
-  const [confirmingRosterTeam, setConfirmingRosterTeam] = useState<ExistingClubTeam | null>(null);
-  const [adminRosterNotice, setAdminRosterNotice] = useState<string | null>(null);
-
-  const existingClubTeams = useMemo(() => {
-    return getUniqueClubTeams();
-  }, [tournament, tourns]);
-
-  const filteredClubTeams = useMemo(() => {
-    if (!existingSearchQuery.trim()) return existingClubTeams;
-    const q = existingSearchQuery.trim().toLowerCase();
-    return existingClubTeams.filter(
-      (t) =>
-        t.name.toLowerCase().includes(q) ||
-        (t.club || "").toLowerCase().includes(q) ||
-        t.players.some((p) => p.toLowerCase().includes(q))
-    );
-  }, [existingClubTeams, existingSearchQuery]);
-
-  const handlePromptAddExistingTeam = (t: ExistingClubTeam) => {
-    setConfirmingRosterTeam(t);
-  };
-
-  const handleConfirmPutInRoster = () => {
-    if (!confirmingRosterTeam) return;
-    const targetCatId = targetNewCategory || (categoryId !== "all" ? categoryId : category.id);
-    const targetCat = tournament.categories.find((c) => c.id === targetCatId) || category;
-
-    const alreadyRegistered =
-      targetCat.teams?.some(
-        (t) => t.name.trim().toLowerCase() === confirmingRosterTeam.name.trim().toLowerCase()
-      ) ||
-      (targetCat.pendingTeams || []).some(
-        (t) => t.name.trim().toLowerCase() === confirmingRosterTeam.name.trim().toLowerCase()
-      );
-
-    if (alreadyRegistered) {
-      setTeamAddError(`"${confirmingRosterTeam.name}" is already registered in ${targetCat.label}.`);
-      setConfirmingRosterTeam(null);
-      return;
-    }
-
-    const newTeam: Team = {
-      id: generateUUID(),
-      name: confirmingRosterTeam.name.trim(),
-      players:
-        confirmingRosterTeam.players && confirmingRosterTeam.players.length > 0
-          ? confirmingRosterTeam.players
-          : ["Player 1", "Player 2"],
-      club: confirmingRosterTeam.club || "Dink Valley",
-      paid: true,
-      paymentStatus: "Verified",
-    };
-
-    addTeamToCategory(tournament.slug, targetCatId, newTeam);
-    setAdminRosterNotice(`Team "${confirmingRosterTeam.name}" has been put into ${targetCat.label} roster.`);
-    setConfirmingRosterTeam(null);
-    setTeamAddError(null);
-  };
-
-  const handlePreFillForCustomization = (t: ExistingClubTeam) => {
-    setNewTeamName(t.name);
-    setNewPlayers(t.players.join(" / "));
-    setRegisterMode("manual");
-    setConfirmingRosterTeam(null);
-  };
-
   const isAllCategories = categoryId === "all";
   const targetCategories = useMemo(() => {
     if (isAllCategories) return tournament.categories || [];
@@ -1121,16 +874,10 @@ function TeamsTab({
 
   // Rebuild payment map across all tournament categories
   const resolvedMap: Record<string, boolean> = {};
-  const resolvedProofs: Record<string, string> = {};
 
   (tournament.categories || []).forEach((c) => {
     (c.teams || []).forEach((t) => {
-      resolvedMap[t.id] = paymentMap[t.id] ?? t.paid ?? false;
-      resolvedProofs[t.id] = proofMap[t.id] ?? t.paymentProofUrl ?? "";
-    });
-    (c.pendingTeams || []).forEach((t) => {
-      resolvedMap[t.id] = paymentMap[t.id] ?? t.paid ?? false;
-      resolvedProofs[t.id] = proofMap[t.id] ?? t.paymentProofUrl ?? "";
+      resolvedMap[t.id] = paymentMap[t.id] ?? t.paid ?? true;
     });
   });
 
@@ -1140,15 +887,7 @@ function TeamsTab({
     setPaymentMap((prev) => ({ ...prev, [id]: nextVal }));
     updateTeamInTournament(tournament.slug, targetCatId, id, {
       paid: nextVal,
-      paymentStatus: nextVal ? "Verified" : "Pending",
-    });
-  };
-
-  const updateProof = (id: string, url: string, catId?: string) => {
-    const targetCatId = catId || (categoryId !== "all" ? categoryId : category.id);
-    setProofMap((prev) => ({ ...prev, [id]: url }));
-    updateTeamInTournament(tournament.slug, targetCatId, id, {
-      paymentProofUrl: url,
+      paymentStatus: nextVal ? "Verified" : "Unpaid",
     });
   };
 
@@ -1166,11 +905,12 @@ function TeamsTab({
       name: newTeamName.trim(),
       players: playersList,
       club: "Dink Valley",
-      paid: false,
-      paymentStatus: "Pending",
+      paid: true,
+      paymentStatus: "Verified",
     };
     const targetCatId = targetNewCategory || (categoryId !== "all" ? categoryId : category.id);
     addTeamToCategory(tournament.slug, targetCatId, newTeam);
+    setPaymentMap((prev) => ({ ...prev, [id]: true }));
     setNewTeamName("");
     setNewPlayers("");
     setTeamAddError(null);
@@ -1190,7 +930,7 @@ function TeamsTab({
     const updatedName = window.prompt(`Edit name for Player ${playerIndex + 1}:`, currentName);
     if (!updatedName || !updatedName.trim() || updatedName.trim() === currentName) return;
 
-    const team = targetCat.teams.find((t) => t.id === teamId) || (targetCat.pendingTeams || []).find((t) => t.id === teamId);
+    const team = targetCat.teams.find((t) => t.id === teamId);
     if (!team) return;
 
     const nextPlayers = [...team.players];
@@ -1207,7 +947,7 @@ function TeamsTab({
     const newName = window.prompt("Enter player full name to add to this team:");
     if (!newName || !newName.trim()) return;
 
-    const team = targetCat.teams.find((t) => t.id === teamId) || (targetCat.pendingTeams || []).find((t) => t.id === teamId);
+    const team = targetCat.teams.find((t) => t.id === teamId);
     if (!team) return;
 
     const nextPlayers = [...team.players, newName.trim()];
@@ -1219,7 +959,7 @@ function TeamsTab({
   const handleRemovePlayerFromTeam = (teamId: string, playerIndex: number, catId?: string) => {
     const targetCatId = catId || (categoryId !== "all" ? categoryId : category.id);
     const targetCat = tournament.categories.find((c) => c.id === targetCatId) || category;
-    const team = targetCat.teams.find((t) => t.id === teamId) || (targetCat.pendingTeams || []).find((t) => t.id === teamId);
+    const team = targetCat.teams.find((t) => t.id === teamId);
     if (!team || team.players.length <= 1) {
       alert("A team must have at least one player.");
       return;
@@ -1260,13 +1000,10 @@ function TeamsTab({
     bulkSetTeamsInCategory(tournament.slug, activeCat.id, generated);
 
     const nextPay: Record<string, boolean> = { ...paymentMap };
-    const nextProof: Record<string, string> = { ...proofMap };
     generated.forEach((t) => {
       nextPay[t.id] = t.paid ?? true;
-      if (t.paymentProofUrl) nextProof[t.id] = t.paymentProofUrl;
     });
     setPaymentMap(nextPay);
-    setProofMap(nextProof);
   };
 
   const handleDeleteAllPlayers = () => {
@@ -1283,7 +1020,6 @@ function TeamsTab({
 
     deleteAllTeamsInCategory(tournament.slug, activeCat.id);
     setPaymentMap({});
-    setProofMap({});
   };
 
   const handleUndoRoster = () => {
@@ -1291,83 +1027,39 @@ function TeamsTab({
     bulkSetTeamsInCategory(tournament.slug, undoRoster.categoryId, undoRoster.teams);
 
     const nextPay: Record<string, boolean> = {};
-    const nextProof: Record<string, string> = {};
     undoRoster.teams.forEach((t) => {
       nextPay[t.id] = t.paid ?? true;
-      if (t.paymentProofUrl) nextProof[t.id] = t.paymentProofUrl;
     });
     setPaymentMap(nextPay);
-    setProofMap(nextProof);
     setUndoRoster(null);
   };
 
-  const handleApprovePending = (teamId: string, catId?: string) => {
-    const targetCatId = catId || (categoryId !== "all" ? categoryId : category.id);
-    approvePendingRegistration(tournament.slug, targetCatId, teamId);
-    if (selectedModalTeam?.id === teamId) {
-      setSelectedModalTeam(null);
-      setSelectedModalCatId(null);
-    }
-  };
-
-  const handleRejectPending = (teamId: string, teamName: string, catId?: string) => {
-    const targetCatId = catId || (categoryId !== "all" ? categoryId : category.id);
-    const targetCat = tournament.categories.find((c) => c.id === targetCatId) || category;
-    if (window.confirm(`Decline and reject registration for "${teamName}" in ${targetCat.label}?`)) {
-      rejectPendingRegistration(tournament.slug, targetCatId, teamId);
-      if (selectedModalTeam?.id === teamId) {
-        setSelectedModalTeam(null);
-        setSelectedModalCatId(null);
-      }
-    }
-  };
-
-  const allPendingEntries = useMemo(() => {
-    const list: { category: Category; team: Team }[] = [];
-    targetCategories.forEach((cat) => {
-      (cat.pendingTeams || []).forEach((pt) => {
-        list.push({ category: cat, team: pt });
-      });
-    });
-    return list;
-  }, [targetCategories]);
-
   // Overall Tournament Totals for CSV / Excel exports
   const totalTournTeams = (tournament.categories || []).reduce(
-    (sum, c) => sum + (c.teams?.length || 0) + (c.pendingTeams?.length || 0),
+    (sum, c) => sum + (c.teams?.length || 0),
     0
   );
-  const totalTournPending = (tournament.categories || []).reduce(
-    (sum, c) =>
-      sum +
-      (c.pendingTeams?.length || 0) +
-      (c.teams || []).filter((t) => !t.paid && t.paymentStatus !== "Verified").length,
+  const totalTournPaid = (tournament.categories || []).reduce(
+    (sum, c) => sum + (c.teams || []).filter((t) => resolvedMap[t.id]).length,
     0
   );
-  const totalTournVerified = Math.max(0, totalTournTeams - totalTournPending);
+  const totalTournUnpaid = Math.max(0, totalTournTeams - totalTournPaid);
 
   // Current scope counts
   const currentScopeTeamsCount = targetCategories.reduce(
-    (sum, c) => sum + (c.teams?.length || 0) + (c.pendingTeams?.length || 0),
+    (sum, c) => sum + (c.teams?.length || 0),
     0
   );
   const currentScopePaidCount = targetCategories.reduce(
     (sum, c) => sum + (c.teams || []).filter((t) => resolvedMap[t.id]).length,
     0
   );
-  const currentScopePendingCount = targetCategories.reduce(
-    (sum, c) =>
-      sum +
-      (c.pendingTeams?.length || 0) +
-      (c.teams || []).filter((t) => !resolvedMap[t.id]).length,
-    0
-  );
+  const currentScopeUnpaidCount = Math.max(0, currentScopeTeamsCount - currentScopePaidCount);
 
   // Aggregated Team Card Structure
   type TeamDivisionEntry = {
     category: Category;
     team: Team;
-    isPending: boolean;
   };
 
   type AggregatedTeam = {
@@ -1377,23 +1069,20 @@ function TeamsTab({
     divisions: TeamDivisionEntry[];
     totalPlayers: number;
     allPaid: boolean;
-    hasPending: boolean;
   };
 
   const aggregatedTeams = useMemo(() => {
     const map = new Map<string, AggregatedTeam>();
 
     targetCategories.forEach((cat) => {
-      // Verified / Approved category teams
       (cat.teams || []).forEach((team) => {
         const key = team.name.trim().toLowerCase();
         if (!key) return;
 
-        const isPaid = resolvedMap[team.id] ?? team.paid ?? false;
+        const isPaid = resolvedMap[team.id] ?? team.paid ?? true;
         const entry: TeamDivisionEntry = {
           category: cat,
           team,
-          isPending: false,
         };
 
         const existing = map.get(key);
@@ -1405,7 +1094,6 @@ function TeamsTab({
             divisions: [entry],
             totalPlayers: team.players.length,
             allPaid: isPaid,
-            hasPending: !isPaid,
           });
         } else {
           existing.divisions.push(entry);
@@ -1415,41 +1103,7 @@ function TeamsTab({
           }
           if (!isPaid) {
             existing.allPaid = false;
-            existing.hasPending = true;
           }
-        }
-      });
-
-      // Pending category registrations
-      (cat.pendingTeams || []).forEach((team) => {
-        const key = team.name.trim().toLowerCase();
-        if (!key) return;
-
-        const entry: TeamDivisionEntry = {
-          category: cat,
-          team,
-          isPending: true,
-        };
-
-        const existing = map.get(key);
-        if (!existing) {
-          map.set(key, {
-            key,
-            name: team.name.trim(),
-            club: team.club,
-            divisions: [entry],
-            totalPlayers: team.players.length,
-            allPaid: false,
-            hasPending: true,
-          });
-        } else {
-          existing.divisions.push(entry);
-          existing.totalPlayers += team.players.length;
-          if (team.club && !existing.club) {
-            existing.club = team.club;
-          }
-          existing.allPaid = false;
-          existing.hasPending = true;
         }
       });
     });
@@ -1460,8 +1114,8 @@ function TeamsTab({
   // Filtered aggregated teams
   const visibleAggregatedTeams = useMemo(() => {
     return aggregatedTeams.filter((agg) => {
-      if (filter === "paid" && (!agg.allPaid || agg.hasPending)) return false;
-      if (filter === "pending" && !agg.hasPending) return false;
+      if (filter === "paid" && !agg.allPaid) return false;
+      if (filter === "unpaid" && agg.allPaid) return false;
 
       if (teamSearchQuery.trim()) {
         const q = teamSearchQuery.trim().toLowerCase();
@@ -1509,8 +1163,7 @@ function TeamsTab({
         tournament,
         category,
         filterType,
-        resolvedMap,
-        resolvedProofs
+        resolvedMap
       );
       setExportNotification(`Exported ${res.count} entries from ${category.label} to ${res.filename}`);
       setIsExportMenuOpen(false);
@@ -1525,8 +1178,7 @@ function TeamsTab({
       const res = exportTournamentTeamsToCsv(
         tournament,
         filterType,
-        resolvedMap,
-        resolvedProofs
+        resolvedMap
       );
       setExportNotification(`Exported master roster table (${res.count} entries) to ${res.filename}`);
       setIsExportMenuOpen(false);
@@ -1542,7 +1194,7 @@ function TeamsTab({
         tournament,
         filterType,
         resolvedMap,
-        resolvedProofs,
+        undefined,
         true
       );
       setExportNotification(
@@ -1561,8 +1213,7 @@ function TeamsTab({
       const res = await exportAllCategoriesSeparately(
         tournament,
         filterType,
-        resolvedMap,
-        resolvedProofs
+        resolvedMap
       );
       setExportNotification(
         `Downloaded ${res.totalCategories} separate category files (${res.totalTeams} total teams).`
@@ -1578,8 +1229,7 @@ function TeamsTab({
     try {
       const res = await exportTournamentToExcelWorkbook(
         tournament,
-        resolvedMap,
-        resolvedProofs
+        resolvedMap
       );
       setExportNotification(
         `Generated multi-tab Excel workbook (${res.sheetCount} sheets, ${res.totalTeams} teams) to ${res.filename}`
@@ -1593,32 +1243,7 @@ function TeamsTab({
 
   return (
     <div className="max-w-4xl space-y-6">
-      {/* Modal for viewing attachment photo */}
-      {selectedModalTeam && (
-        <PaymentProofModal
-          team={selectedModalTeam}
-          isPaid={resolvedMap[selectedModalTeam.id] ?? false}
-          proofUrl={resolvedProofs[selectedModalTeam.id] || selectedModalTeam.paymentProofUrl || ""}
-          onClose={() => {
-            setSelectedModalTeam(null);
-            setSelectedModalCatId(null);
-          }}
-          onTogglePaid={() => {
-            const catId = selectedModalCatId || (categoryId !== "all" ? categoryId : category.id);
-            const targetCat = tournament.categories.find((c) => c.id === catId) || category;
-            const isPending = (targetCat.pendingTeams || []).some((pt) => pt.id === selectedModalTeam.id);
-            if (isPending) {
-              handleApprovePending(selectedModalTeam.id, catId);
-            } else {
-              togglePaid(selectedModalTeam.id, catId);
-            }
-          }}
-          onUpdateProof={(url) => {
-            const catId = selectedModalCatId || (categoryId !== "all" ? categoryId : category.id);
-            updateProof(selectedModalTeam.id, url, catId);
-          }}
-        />
-      )}
+
 
       {/* Header and Export Toolbar */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
@@ -1780,24 +1405,6 @@ function TeamsTab({
 
                   <button
                     type="button"
-                    onClick={() => handleExportWholeGrouped("pending-only")}
-                    className="w-full text-left px-3 py-2.5 rounded hover:bg-background transition-colors cursor-pointer group border-t border-border"
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-brick">
-                        Export Pending Queue Only
-                      </span>
-                      <span className="text-[0.65rem] font-mono bg-brick/20 text-brick px-1.5 py-0.5 rounded font-bold">
-                        {totalTournPending} pending
-                      </span>
-                    </div>
-                    <span className="text-[0.65rem] text-foreground/80 font-medium block mt-0.5">
-                      Entries requiring payment verification across all categories
-                    </span>
-                  </button>
-
-                  <button
-                    type="button"
                     onClick={() => handleExportWholeGrouped("verified-only")}
                     className="w-full text-left px-3 py-2.5 rounded hover:bg-background transition-colors cursor-pointer group"
                   >
@@ -1806,7 +1413,7 @@ function TeamsTab({
                         Export Verified Rosters Only
                       </span>
                       <span className="text-[0.65rem] font-mono bg-pickle/20 text-pickle px-1.5 py-0.5 rounded font-bold">
-                        {totalTournVerified} verified
+                        {totalTournPaid} paid
                       </span>
                     </div>
                     <span className="text-[0.65rem] text-foreground/80 font-medium block mt-0.5">
@@ -1846,7 +1453,6 @@ function TeamsTab({
           onChange={(e) => {
             setTournamentSlug(e.target.value);
             setPaymentMap({});
-            setProofMap({});
             setFilter("all");
             setUndoRoster(null);
             setExpandedTeamKeys(new Set());
@@ -1862,7 +1468,6 @@ function TeamsTab({
           onChange={(e) => {
             setCategoryId(e.target.value);
             setPaymentMap({});
-            setProofMap({});
             setFilter("all");
             setUndoRoster(null);
             setExpandedTeamKeys(new Set());
@@ -1874,132 +1479,11 @@ function TeamsTab({
           </option>
           {tournament.categories.map((c) => (
             <option key={c.id} value={c.id}>
-              {c.label} ({c.teams?.length || 0} teams{c.pendingTeams && c.pendingTeams.length > 0 ? `, ${c.pendingTeams.length} Pending` : ""})
+              {c.label} ({c.teams?.length || 0} teams)
             </option>
           ))}
         </select>
       </div>
-
-      {/* ── Pending Registrations Queue (Awaiting Verification) ── */}
-      {allPendingEntries.length > 0 && (
-        <div className="surface-card p-5 border-2 border-brick/40 rounded-xl space-y-4 bg-brick/5 animate-in fade-in">
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-b-2 border-brick/20 pb-3">
-            <div className="flex items-center gap-2.5">
-              <span className="h-2.5 w-2.5 rounded-full bg-brick animate-ping shrink-0" />
-              <div>
-                <span className="text-[0.65rem] font-bold uppercase tracking-[0.24em] text-brick block font-mono">
-                  Action Required
-                </span>
-                <h3 className="font-display text-xl sm:text-2xl text-foreground mt-0.5 font-bold">
-                  Pending Registrations ({allPendingEntries.length})
-                </h3>
-              </div>
-            </div>
-            <span className="text-xs font-mono font-bold text-foreground/80">
-              Awaiting admin approval before entering tournament draws
-            </span>
-          </div>
-
-          <div className="space-y-3">
-            {allPendingEntries.map(({ category: ptCat, team: pt }) => (
-              <div
-                key={`${ptCat.id}-${pt.id}`}
-                className="surface-card bg-card p-4 border-2 border-border rounded-lg flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-sm"
-              >
-                <div className="flex items-start gap-3.5 min-w-0">
-                  {pt.paymentProofUrl ? (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSelectedModalTeam(pt);
-                        setSelectedModalCatId(ptCat.id);
-                      }}
-                      className="relative group shrink-0 h-16 w-16 rounded overflow-hidden border-2 border-border bg-background cursor-pointer"
-                      title="Click to zoom receipt"
-                    >
-                      <img
-                        src={pt.paymentProofUrl}
-                        alt="Receipt"
-                        className="h-full w-full object-cover group-hover:scale-110 transition-transform"
-                      />
-                      <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-[0.65rem] font-mono text-white font-bold">
-                        View
-                      </div>
-                    </button>
-                  ) : (
-                    <div className="h-16 w-16 rounded border-2 border-border bg-background flex items-center justify-center text-[0.65rem] font-mono text-foreground/70 font-bold text-center p-1 shrink-0">
-                      No receipt
-                    </div>
-                  )}
-
-                  <div className="min-w-0 space-y-1">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="font-display text-lg text-foreground font-bold leading-tight">
-                        {pt.name}
-                      </span>
-                      <span className="px-2 py-0.5 text-[0.6rem] font-mono bg-brick/15 text-brick border border-brick/40 rounded font-bold uppercase tracking-wider">
-                        Pending Verification
-                      </span>
-                      <span className="px-2 py-0.5 text-[0.6rem] font-mono bg-background border border-border text-foreground font-bold rounded">
-                        {ptCat.label}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
-                      {pt.players.map((p, pIdx) => (
-                        <span
-                          key={pIdx}
-                          className="px-2 py-0.5 text-[0.65rem] rounded bg-background border border-border text-foreground font-semibold flex items-center gap-1"
-                        >
-                          <span className="text-pickle font-mono text-[0.65rem] font-bold">P{pIdx + 1}:</span>
-                          <span>{p}</span>
-                        </span>
-                      ))}
-                    </div>
-                    {pt.club && (
-                      <div className="text-[0.7rem] text-foreground/80 font-mono font-semibold">
-                        Club: {pt.club}
-                      </div>
-                    )}
-                    <div className="text-[0.7rem] text-foreground/80 font-mono font-semibold">
-                      Ref: <span className="text-pickle font-bold">{pt.paymentRef || "None"}</span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Actions */}
-                <div className="flex items-center gap-2 shrink-0 self-end md:self-center">
-                  {pt.paymentProofUrl && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSelectedModalTeam(pt);
-                        setSelectedModalCatId(ptCat.id);
-                      }}
-                      className="px-3 py-2 border-2 border-border bg-background text-foreground text-xs font-mono font-bold uppercase tracking-wider rounded hover:border-pickle hover:text-pickle transition-colors cursor-pointer"
-                    >
-                      View Receipt
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => handleRejectPending(pt.id, pt.name, ptCat.id)}
-                    className="px-3 py-2 border border-brick/50 text-brick hover:bg-brick hover:text-white text-xs font-mono font-bold uppercase tracking-wider rounded transition-colors cursor-pointer"
-                  >
-                    Decline
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleApprovePending(pt.id, ptCat.id)}
-                    className="px-4 py-2 bg-pickle text-white text-xs font-bold uppercase tracking-widest hover:opacity-90 transition-opacity rounded cursor-pointer shadow-sm"
-                  >
-                    Approve Entry
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
 
       {/* Undo Banner if an action just occurred */}
       {undoRoster && (
@@ -2119,15 +1603,15 @@ function TeamsTab({
               {currentScopePaidCount}
             </p>
             <p className="text-[0.7rem] sm:text-xs uppercase tracking-widest text-foreground/80 font-bold">
-              Verified
+              Paid
             </p>
           </div>
           <div className="text-center px-1">
             <p className="font-display text-3xl sm:text-4xl text-brick font-bold">
-              {currentScopePendingCount}
+              {currentScopeUnpaidCount}
             </p>
             <p className="text-[0.7rem] sm:text-xs uppercase tracking-widest text-foreground/80 font-bold">
-              Pending
+              Unpaid
             </p>
           </div>
         </div>
@@ -2135,7 +1619,7 @@ function TeamsTab({
         {/* Full-width progress bar */}
         <div className="pt-2 border-t-2 border-border">
           <div className="mb-1.5 flex justify-between text-xs text-foreground font-bold">
-            <span>Verification progress</span>
+            <span>Payment progress</span>
             <span className="font-mono text-pickle">
               {currentScopeTeamsCount > 0
                 ? Math.round((currentScopePaidCount / currentScopeTeamsCount) * 100)
@@ -2170,31 +1654,6 @@ function TeamsTab({
             </span>
           </div>
 
-          {/* Mode toggle */}
-          <div className="flex items-center gap-1 bg-background p-1 rounded-lg border border-border">
-            <button
-              type="button"
-              onClick={() => setRegisterMode("existing")}
-              className={`px-3 py-1 text-xs font-bold uppercase tracking-wider rounded transition-all cursor-pointer ${
-                registerMode === "existing"
-                  ? "bg-pickle text-sand shadow-xs"
-                  : "text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              Existing Teams ({existingClubTeams.length})
-            </button>
-            <button
-              type="button"
-              onClick={() => setRegisterMode("manual")}
-              className={`px-3 py-1 text-xs font-bold uppercase tracking-wider rounded transition-all cursor-pointer ${
-                registerMode === "manual"
-                  ? "bg-pickle text-sand shadow-xs"
-                  : "text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              Custom Pair
-            </button>
-          </div>
         </div>
 
         {/* Division target selector */}
@@ -2215,19 +1674,6 @@ function TeamsTab({
           </select>
         </div>
 
-        {/* Success / Error notification */}
-        {adminRosterNotice && (
-          <div className="p-3 rounded-lg bg-pickle/15 border border-pickle/40 text-xs text-pickle font-bold flex items-center justify-between">
-            <span>{adminRosterNotice}</span>
-            <button
-              type="button"
-              onClick={() => setAdminRosterNotice(null)}
-              className="text-[0.65rem] text-pickle hover:text-foreground uppercase cursor-pointer"
-            >
-              Dismiss
-            </button>
-          </div>
-        )}
         {teamAddError && (
           <div className="p-3 rounded-lg bg-brick/15 border border-brick/40 text-xs text-brick font-bold flex items-center justify-between">
             <span>{teamAddError}</span>
@@ -2241,159 +1687,34 @@ function TeamsTab({
           </div>
         )}
 
-        {registerMode === "existing" ? (
-          <div className="space-y-3">
-            {/* Search */}
-            <input
-              type="text"
-              placeholder="Search existing club team or player name..."
-              value={existingSearchQuery}
-              onChange={(e) => setExistingSearchQuery(e.target.value)}
-              className="w-full border-2 border-input bg-background px-3 py-2 text-xs font-medium text-foreground rounded focus:border-pickle focus:outline-none placeholder:text-muted-foreground/60"
-            />
-
-            {/* Clickable Team Cards Grid */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5 max-h-56 overflow-y-auto pr-1">
-              {filteredClubTeams.length === 0 ? (
-                <div className="col-span-full py-4 text-center text-xs text-muted-foreground">
-                  No existing club teams found matching "{existingSearchQuery}".
-                </div>
-              ) : (
-                filteredClubTeams.map((t) => (
-                  <div
-                    key={t.name}
-                    onClick={() => handlePromptAddExistingTeam(t)}
-                    className="p-3 rounded-lg border border-border bg-background hover:border-pickle hover:bg-card text-left cursor-pointer transition-all space-y-1.5 shadow-2xs group"
-                  >
-                    <div className="flex items-center justify-between gap-1">
-                      <span className="font-bold text-xs text-foreground group-hover:text-pickle transition-colors truncate">
-                        {t.name}
-                      </span>
-                      <span className="text-[0.6rem] font-mono uppercase px-1.5 py-0.5 rounded bg-card border border-border text-muted-foreground shrink-0">
-                        {t.club || "Club"}
-                      </span>
-                    </div>
-                    <p className="text-[0.7rem] text-muted-foreground truncate">
-                      {t.players.join(" & ") || "2 Players"}
-                    </p>
-                    <div className="pt-1 flex items-center justify-between gap-2">
-                      <span className="text-[0.6rem] font-mono text-muted-foreground">
-                        {t.appearancesCount} past event{t.appearancesCount === 1 ? "" : "s"}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handlePromptAddExistingTeam(t);
-                        }}
-                        className="px-2.5 py-1 text-[0.65rem] font-bold uppercase tracking-wider bg-pickle text-sand hover:opacity-90 rounded cursor-pointer transition-all shrink-0"
-                      >
-                        + Put in Roster
-                      </button>
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-        ) : (
-          <div className="flex flex-wrap gap-2">
-            <input
-              value={newTeamName}
-              onChange={(e) => setNewTeamName(e.target.value)}
-              placeholder="Team name (e.g. Smash Bros)"
-              className="flex-1 min-w-[140px] border-2 border-input bg-background px-3 py-2 text-sm text-foreground font-medium focus:border-pickle focus:outline-none rounded"
-            />
-            <input
-              value={newPlayers}
-              onChange={(e) => setNewPlayers(e.target.value)}
-              placeholder="Player 1 / Player 2"
-              className="flex-1 min-w-[160px] border-2 border-input bg-background px-3 py-2 text-sm text-foreground font-medium focus:border-pickle focus:outline-none rounded"
-            />
-            <button
-              type="button"
-              onClick={handleCreateTeam}
-              className="bg-pickle px-4 py-2 text-xs font-mono font-bold uppercase tracking-wider text-white hover:opacity-90 cursor-pointer shadow-xs whitespace-nowrap rounded"
-            >
-              + Add Pair
-            </button>
-          </div>
-        )}
+        <div className="flex flex-wrap gap-2">
+          <input
+            value={newTeamName}
+            onChange={(e) => setNewTeamName(e.target.value)}
+            placeholder="Team name (e.g. Smash Bros)"
+            className="flex-1 min-w-[140px] border-2 border-input bg-background px-3 py-2 text-sm text-foreground font-medium focus:border-pickle focus:outline-none rounded"
+          />
+          <input
+            value={newPlayers}
+            onChange={(e) => setNewPlayers(e.target.value)}
+            placeholder="Player 1 / Player 2"
+            className="flex-1 min-w-[160px] border-2 border-input bg-background px-3 py-2 text-sm text-foreground font-medium focus:border-pickle focus:outline-none rounded"
+          />
+          <button
+            type="button"
+            onClick={handleCreateTeam}
+            className="bg-pickle px-4 py-2 text-xs font-mono font-bold uppercase tracking-wider text-white hover:opacity-90 cursor-pointer shadow-xs whitespace-nowrap rounded"
+          >
+            + Add Pair
+          </button>
+        </div>
       </div>
-
-      {/* Confirmation Modal: Put Existing Team in Roster */}
-      {confirmingRosterTeam && (() => {
-        const targetCatId = targetNewCategory || (categoryId !== "all" ? categoryId : category.id);
-        const targetCat = tournament.categories.find((c) => c.id === targetCatId) || category;
-        return (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-sm animate-in fade-in">
-            <div className="surface-card bg-card border-2 border-pickle w-full max-w-md p-6 rounded-xl shadow-2xl space-y-4">
-              <div>
-                <span className="text-[0.65rem] font-bold uppercase tracking-[0.24em] text-pickle block font-mono">
-                  Roster Confirmation
-                </span>
-                <h3 className="font-display text-2xl text-foreground font-bold mt-1">
-                  Put this team in the roster?
-                </h3>
-              </div>
-
-              <p className="text-xs text-muted-foreground">
-                Would you like to put existing team <strong>"{confirmingRosterTeam.name}"</strong> into the roster for <strong>{targetCat.label}</strong>?
-              </p>
-
-              <div className="surface-card bg-background/80 p-3.5 rounded-lg border border-border space-y-2 text-xs">
-                <div className="flex justify-between border-b border-border/40 pb-1.5">
-                  <span className="text-muted-foreground uppercase text-[0.65rem] font-mono">Team</span>
-                  <span className="font-bold text-foreground">{confirmingRosterTeam.name}</span>
-                </div>
-                <div className="flex justify-between border-b border-border/40 pb-1.5">
-                  <span className="text-muted-foreground uppercase text-[0.65rem] font-mono">Players</span>
-                  <span className="font-semibold text-foreground">{confirmingRosterTeam.players.join(" & ") || "2 Players"}</span>
-                </div>
-                <div className="flex justify-between border-b border-border/40 pb-1.5">
-                  <span className="text-muted-foreground uppercase text-[0.65rem] font-mono">Club</span>
-                  <span className="font-semibold text-foreground">{confirmingRosterTeam.club || "Dink Valley"}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground uppercase text-[0.65rem] font-mono">Target Division</span>
-                  <span className="font-bold text-pickle">{targetCat.label}</span>
-                </div>
-              </div>
-
-              <div className="flex items-center justify-end gap-2.5 pt-2 flex-wrap">
-                <button
-                  type="button"
-                  onClick={() => setConfirmingRosterTeam(null)}
-                  className="px-4 py-2 text-xs font-bold uppercase tracking-wider border border-border bg-card text-foreground hover:bg-background rounded-md cursor-pointer transition-all"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handlePreFillForCustomization(confirmingRosterTeam)}
-                  className="px-3 py-2 text-xs font-bold uppercase tracking-wider border border-pickle/40 text-pickle hover:bg-pickle/10 rounded-md cursor-pointer transition-all"
-                  title="Edit names before adding"
-                >
-                  Customize Players
-                </button>
-                <button
-                  type="button"
-                  onClick={handleConfirmPutInRoster}
-                  className="px-4 py-2 text-xs font-bold uppercase tracking-wider bg-pickle text-sand hover:opacity-90 rounded-md cursor-pointer shadow-xs transition-all"
-                >
-                  Yes, Put in Roster
-                </button>
-              </div>
-            </div>
-          </div>
-        );
-      })()}
 
       {/* Filter tabs, Search & Bulk expand */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         {/* Status segmented buttons */}
         <div className="grid grid-cols-3 p-1 bg-background rounded-lg border-2 border-border sm:flex sm:bg-transparent sm:border-0 sm:border-b-2 sm:border-border sm:p-0 sm:rounded-none sm:gap-1">
-          {(["all", "paid", "pending"] as const).map((f) => (
+          {(["all", "paid", "unpaid"] as const).map((f) => (
             <button
               key={f}
               onClick={() => setFilter(f)}
@@ -2406,8 +1727,8 @@ function TeamsTab({
               {f === "all"
                 ? `All (${aggregatedTeams.length})`
                 : f === "paid"
-                ? `Verified (${aggregatedTeams.filter((t) => t.allPaid && !t.hasPending).length})`
-                : `Pending (${aggregatedTeams.filter((t) => t.hasPending).length})`}
+                ? `Paid (${aggregatedTeams.filter((t) => t.allPaid).length})`
+                : `Unpaid (${aggregatedTeams.filter((t) => !t.allPaid).length})`}
             </button>
           ))}
         </div>
@@ -2509,15 +1830,15 @@ function TeamsTab({
 
                   {/* Right Column: Overall Status Badge & Expand Indicator */}
                   <div className="flex items-center gap-2.5 shrink-0 self-start md:self-center">
-                    {teamCard.allPaid && !teamCard.hasPending ? (
+                    {teamCard.allPaid ? (
                       <span className="px-3 py-1 text-xs font-mono font-bold uppercase tracking-wider bg-pickle/15 text-pickle border-2 border-pickle/40 rounded-full inline-flex items-center gap-1.5">
                         <span className="h-2 w-2 rounded-full bg-pickle" />
-                        Verified
+                        Paid
                       </span>
                     ) : (
                       <span className="px-3 py-1 text-xs font-mono font-bold uppercase tracking-wider bg-brick/15 text-brick border-2 border-brick/40 rounded-full inline-flex items-center gap-1.5">
-                        <span className="h-2 w-2 rounded-full bg-brick animate-ping" />
-                        {teamCard.divisions.filter((d) => d.isPending || !d.team.paid).length} Pending Review
+                        <span className="h-2 w-2 rounded-full bg-brick" />
+                        Unpaid
                       </span>
                     )}
 
@@ -2558,7 +1879,6 @@ function TeamsTab({
                         const divTeam = divEntry.team;
                         const divCat = divEntry.category;
                         const isDivPaid = resolvedMap[divTeam.id] ?? divTeam.paid ?? false;
-                        const divProof = resolvedProofs[divTeam.id];
 
                         return (
                           <div
@@ -2586,70 +1906,20 @@ function TeamsTab({
 
                               {/* Division Actions */}
                               <div className="flex items-center gap-2 flex-wrap shrink-0">
-                                {divEntry.isPending ? (
-                                  <div className="flex items-center gap-1.5">
-                                    <span className="px-2 py-1 text-xs font-mono bg-brick/15 text-brick border-2 border-brick/40 rounded font-bold uppercase tracking-wider">
-                                      Pending Approval
-                                    </span>
-                                    <button
-                                      type="button"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        handleApprovePending(divTeam.id, divCat.id);
-                                      }}
-                                      className="px-3 py-1 text-xs font-mono font-bold uppercase tracking-wider bg-pickle text-white rounded hover:opacity-90 cursor-pointer shadow-xs"
-                                    >
-                                      Approve
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        handleRejectPending(divTeam.id, divTeam.name, divCat.id);
-                                      }}
-                                      className="px-3 py-1 text-xs font-mono font-bold text-brick border-2 border-brick/50 hover:bg-brick hover:text-white rounded cursor-pointer"
-                                    >
-                                      Decline
-                                    </button>
-                                  </div>
-                                ) : (
-                                  <button
-                                    type="button"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      togglePaid(divTeam.id, divCat.id);
-                                    }}
-                                    title={isDivPaid ? "Click to set pending" : "Click to mark verified"}
-                                    className={`rounded-full px-3 py-1 text-xs font-bold uppercase tracking-widest font-mono transition-colors cursor-pointer ${
-                                      isDivPaid
-                                        ? "bg-pickle/20 text-pickle hover:bg-pickle/30 border-2 border-pickle/40"
-                                        : "bg-brick/20 text-brick hover:bg-brick/30 border-2 border-brick/40"
-                                    }`}
-                                  >
-                                    {isDivPaid ? "Verified" : "Pending Payment"}
-                                  </button>
-                                )}
-
                                 <button
                                   type="button"
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    setSelectedModalTeam(divTeam);
-                                    setSelectedModalCatId(divCat.id);
+                                    togglePaid(divTeam.id, divCat.id);
                                   }}
-                                  className="inline-flex items-center gap-1.5 px-3 py-1 border-2 border-border bg-card text-foreground text-xs font-mono font-bold uppercase tracking-wider hover:border-pickle hover:text-pickle transition-colors cursor-pointer rounded"
+                                  title={isDivPaid ? "Click to set unpaid" : "Click to mark paid"}
+                                  className={`rounded-full px-3 py-1 text-xs font-bold uppercase tracking-widest font-mono transition-colors cursor-pointer ${
+                                    isDivPaid
+                                      ? "bg-pickle/20 text-pickle hover:bg-pickle/30 border-2 border-pickle/40"
+                                      : "bg-brick/20 text-brick hover:bg-brick/30 border-2 border-brick/40"
+                                  }`}
                                 >
-                                  {divProof ? (
-                                    <>
-                                      <span className="h-2 w-2 rounded-full bg-pickle" />
-                                      <span>Receipt</span>
-                                    </>
-                                  ) : (
-                                    <>
-                                      <span className="h-2 w-2 rounded-full bg-brick" />
-                                      <span>Attach Photo</span>
-                                    </>
-                                  )}
+                                  {isDivPaid ? "Paid" : "Unpaid"}
                                 </button>
 
                                 <button

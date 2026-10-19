@@ -1,8 +1,8 @@
 import { useState, useEffect } from "react";
 import type { Tournament, Category, Team } from "@/data/tournaments";
-import { addPendingRegistration, getUniqueClubTeams, type ExistingClubTeam } from "@/lib/tournament-store";
+import { addTeamToCategory } from "@/lib/tournament-store";
 import { dbRegisterTeam } from "@/lib/supabase-service";
-import { generateUUID, fileToOptimizedDataUrl } from "@/lib/utils";
+import { generateUUID } from "@/lib/utils";
 
 interface PublicRegistrationModalProps {
   isOpen: boolean;
@@ -32,11 +32,6 @@ export function PublicRegistrationModal({
     }
   }, [initialCategory, tournament?.categories, selectedCatId]);
 
-  const [teamMode, setTeamMode] = useState<"existing" | "new">("existing");
-  const [existingTeams, setExistingTeams] = useState<ExistingClubTeam[]>([]);
-  const [selectedExistingTeam, setSelectedExistingTeam] = useState<string>("");
-  const [teamSearchQuery, setTeamSearchQuery] = useState<string>("");
-
   const [teamName, setTeamName] = useState("");
   const [player1Name, setPlayer1Name] = useState("");
   const [player2Name, setPlayer2Name] = useState("");
@@ -44,134 +39,35 @@ export function PublicRegistrationModal({
   const [contactEmail, setContactEmail] = useState("");
   const [contactPhone, setContactPhone] = useState("");
   const [paymentRef, setPaymentRef] = useState("");
-  const [receiptDataUrl, setReceiptDataUrl] = useState<string | null>(null);
-  const [receiptFileName, setReceiptFileName] = useState<string | null>(null);
-  const [isProcessingReceipt, setIsProcessingReceipt] = useState(false);
 
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submittedTeam, setSubmittedTeam] = useState<Team | null>(null);
-  const [confirmingTeam, setConfirmingTeam] = useState<ExistingClubTeam | null>(null);
-  const [isConfirmingSubmit, setIsConfirmingSubmit] = useState(false);
-  const [rosterNotice, setRosterNotice] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isOpen) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        if (confirmingTeam) {
-          setConfirmingTeam(null);
-        } else if (isConfirmingSubmit) {
-          setIsConfirmingSubmit(false);
-        } else {
-          onClose();
-        }
+        onClose();
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isOpen, onClose, confirmingTeam, isConfirmingSubmit]);
+  }, [isOpen, onClose]);
 
   useEffect(() => {
     if (isOpen) {
-      try {
-        const allTeams = getUniqueClubTeams();
-        setExistingTeams(Array.isArray(allTeams) ? allTeams : []);
-        setTeamMode(Array.isArray(allTeams) && allTeams.length > 0 ? "existing" : "new");
-      } catch {
-        setExistingTeams([]);
-        setTeamMode("new");
-      }
-      setSelectedExistingTeam("");
-      setTeamSearchQuery("");
+      setTeamName("");
+      setPlayer1Name("");
+      setPlayer2Name("");
+      setClub("");
+      setContactEmail("");
+      setContactPhone("");
+      setPaymentRef("");
       setSubmittedTeam(null);
       setError(null);
-      setRosterNotice(null);
-      setConfirmingTeam(null);
-      setIsConfirmingSubmit(false);
-      setReceiptDataUrl(null);
-      setReceiptFileName(null);
     }
   }, [isOpen]);
-
-  const handleSelectExistingTeam = (tName: string) => {
-    setSelectedExistingTeam(tName);
-    const found = existingTeams.find((t) => t.name === tName);
-    if (found) {
-      setTeamName(found.name);
-      setClub(found.club || "Dink Valley");
-      if (Array.isArray(found.players) && found.players.length > 0) {
-        setPlayer1Name(found.players[0] || "");
-      }
-      if (Array.isArray(found.players) && found.players.length > 1) {
-        setPlayer2Name(found.players[1] || "");
-      }
-    }
-  };
-
-  const handlePromptExistingTeamConfirm = (team: ExistingClubTeam) => {
-    setConfirmingTeam(team);
-  };
-
-  const handleConfirmTeamRoster = () => {
-    if (!confirmingTeam) return;
-    handleSelectExistingTeam(confirmingTeam.name);
-    setRosterNotice(`Team "${confirmingTeam.name}" has been put in your roster.`);
-    setConfirmingTeam(null);
-  };
-
-  const handleSwitchToNewTeam = () => {
-    setTeamMode("new");
-    setSelectedExistingTeam("");
-    setTeamName("");
-    setClub("");
-    setPlayer1Name("");
-    setPlayer2Name("");
-    setRosterNotice(null);
-  };
-
-  const handleSwitchToExistingTeam = () => {
-    setTeamMode("existing");
-  };
-
-  const filteredExistingTeams = (existingTeams || []).filter((t) => {
-    if (!teamSearchQuery.trim()) return true;
-    const q = teamSearchQuery.toLowerCase();
-    const nameMatch = (t?.name || "").toLowerCase().includes(q);
-    const clubMatch = (t?.club || "").toLowerCase().includes(q);
-    const playerMatch =
-      Array.isArray(t?.players) &&
-      t.players.some((p) => typeof p === "string" && p.toLowerCase().includes(q));
-    return nameMatch || clubMatch || playerMatch;
-  });
-
-  const handleReceiptFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    if (!file.type.startsWith("image/")) {
-      setError("Please upload a valid image file (PNG, JPG, or WebP).");
-      return;
-    }
-
-    setIsProcessingReceipt(true);
-    setError(null);
-
-    try {
-      const optimized = await fileToOptimizedDataUrl(file);
-      setReceiptDataUrl(optimized);
-      setReceiptFileName(file.name);
-    } catch {
-      setError("Failed to process the receipt image. Please try another image file.");
-    } finally {
-      setIsProcessingReceipt(false);
-    }
-  };
-
-  const handleRemoveReceipt = () => {
-    setReceiptDataUrl(null);
-    setReceiptFileName(null);
-  };
 
   if (!isOpen) return null;
 
@@ -205,21 +101,13 @@ export function PublicRegistrationModal({
       setError("Please select a valid division.");
       return;
     }
-    if (!receiptDataUrl) {
-      setError("Please upload your payment receipt or proof of payment screenshot.");
-      return;
-    }
 
-    const isAlreadyRegistered =
-      (activeCategory.teams || []).some(
-        (t) => (t?.name || "").trim().toLowerCase() === cleanTeam.toLowerCase()
-      ) ||
-      (activeCategory.pendingTeams || []).some(
-        (t) => (t?.name || "").trim().toLowerCase() === cleanTeam.toLowerCase()
-      );
+    const isAlreadyRegistered = (activeCategory.teams || []).some(
+      (t) => (t?.name || "").trim().toLowerCase() === cleanTeam.toLowerCase()
+    );
     if (isAlreadyRegistered) {
       setError(
-        `"${cleanTeam}" is already registered (or pending approval) in ${activeCategory.label || "this division"}.`
+        `"${cleanTeam}" is already registered in ${activeCategory.label || "this division"}.`
       );
       return;
     }
@@ -233,13 +121,12 @@ export function PublicRegistrationModal({
         name: cleanTeam,
         players: [p1, p2],
         club: club.trim() ? club.trim() : undefined,
-        paid: false,
-        paymentProofUrl: receiptDataUrl,
+        paid: true,
         paymentRef: generatedRef,
-        paymentStatus: "Pending",
+        paymentStatus: "Verified",
       };
 
-      // 1. Submit directly to Supabase via secure RPC (enforces RLS, max 32 teams, and Pending state)
+      // 1. Submit to Supabase
       const rpcResult = await dbRegisterTeam({
         tournamentSlug: tournament.slug,
         categorySlug: activeCategory.id,
@@ -256,7 +143,7 @@ export function PublicRegistrationModal({
       }
 
       // 2. Add to local tournament store for instant optimistic UI update
-      addPendingRegistration(tournament.slug, activeCategory.id, newTeam);
+      addTeamToCategory(tournament.slug, activeCategory.id, newTeam);
 
       setSubmittedTeam(newTeam);
       if (onRegistered) {
@@ -295,14 +182,14 @@ export function PublicRegistrationModal({
         {submittedTeam ? (
           <div className="p-6 overflow-y-auto space-y-4 text-center">
             <div className="inline-flex p-3 rounded-full bg-pickle/20 text-pickle border border-pickle/40 mx-auto">
-              <span className="font-mono font-bold text-xs uppercase tracking-widest">Entry Submitted</span>
+              <span className="font-mono font-bold text-xs uppercase tracking-widest">Entry Confirmed</span>
             </div>
 
-            <h3 className="text-2xl font-display text-foreground">
-              Registration Received
+            <h3 className="text-2xl font-display text-foreground font-bold">
+              Team Registered Successfully
             </h3>
             <p className="text-xs text-muted-foreground max-w-sm mx-auto">
-              Your registration and payment receipt have been submitted. An administrator will review and verify your receipt before officially confirming your team in the category roster.
+              Your team has been confirmed and placed directly into the official category roster.
             </p>
 
             <div className="surface-card p-4 text-left border border-border space-y-2 text-xs">
@@ -328,21 +215,10 @@ export function PublicRegistrationModal({
                 <span className="text-muted-foreground uppercase">Reference Code</span>
                 <span className="font-bold text-pickle">{submittedTeam.paymentRef}</span>
               </div>
-              {submittedTeam.paymentProofUrl && (
-                <div className="pt-2">
-                  <div className="flex items-center justify-between mb-1.5 font-mono text-[0.65rem]">
-                    <span className="text-muted-foreground uppercase">Attached Receipt</span>
-                    <span className="text-pickle font-bold">Uploaded &middot; Pending Verification</span>
-                  </div>
-                  <div className="rounded border border-border bg-charcoal/80 p-2 flex items-center justify-center">
-                    <img
-                      src={submittedTeam.paymentProofUrl}
-                      alt="Uploaded payment receipt"
-                      className="max-h-40 w-auto rounded object-contain border border-border/60 shadow-sm"
-                    />
-                  </div>
-                </div>
-              )}
+              <div className="flex justify-between font-mono">
+                <span className="text-muted-foreground uppercase">Status</span>
+                <span className="font-bold text-pickle uppercase">Paid / Confirmed</span>
+              </div>
             </div>
 
             <div className="pt-2">
@@ -385,163 +261,36 @@ export function PublicRegistrationModal({
               )}
             </div>
 
-            {/* Team Details & Existing Team Fetcher */}
+            {/* Team Details */}
             <div className="space-y-3.5 pt-1">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                <label className="text-xs font-bold uppercase tracking-wider text-foreground block">
-                  Team Information
-                </label>
-                {existingTeams.length > 0 && (
-                  <div className="grid grid-cols-2 p-0.5 bg-charcoal rounded border border-border text-[0.65rem] font-bold uppercase tracking-wider">
-                    <button
-                      type="button"
-                      onClick={handleSwitchToExistingTeam}
-                      className={`px-3 py-1 rounded transition-all cursor-pointer ${teamMode === "existing"
-                          ? "bg-pickle text-sand font-bold shadow-xs"
-                          : "text-muted-foreground hover:text-sand"
-                        }`}
-                    >
-                      Existing Team
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleSwitchToNewTeam}
-                      className={`px-3 py-1 rounded transition-all cursor-pointer ${teamMode === "new"
-                          ? "bg-pickle text-sand font-bold shadow-xs"
-                          : "text-muted-foreground hover:text-sand"
-                        }`}
-                    >
-                      Create New Team
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              {/* Existing Team Selector with Search Filter & Clickable Team Cards */}
-              {teamMode === "existing" && existingTeams.length > 0 ? (
-                <div className="space-y-3 bg-card p-3.5 rounded-lg border-2 border-border">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <span className="text-[0.65rem] font-bold uppercase tracking-wider text-pickle block">
-                        Existing Club Teams
-                      </span>
-                      <span className="text-[0.65rem] text-muted-foreground">
-                        Click a team below to put them in your roster
-                      </span>
-                    </div>
-                    <span className="text-[0.6rem] font-mono text-muted-foreground px-2 py-0.5 rounded bg-background border border-border">
-                      {existingTeams.length} available
-                    </span>
-                  </div>
-
-                  {/* Search query input */}
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="text-xs font-bold uppercase tracking-wider text-foreground block mb-1">
+                    Team Name *
+                  </label>
                   <input
                     type="text"
-                    placeholder="Search team name, club, or player..."
-                    value={teamSearchQuery}
-                    onChange={(e) => setTeamSearchQuery(e.target.value)}
-                    className="w-full bg-charcoal border border-border p-2 text-xs text-sand rounded focus:border-pickle focus:outline-none placeholder:text-muted-foreground/60"
+                    required
+                    placeholder="e.g. Metro Dinkers, Kitchen Krushers"
+                    value={teamName}
+                    onChange={(e) => setTeamName(e.target.value)}
+                    className="w-full bg-charcoal border border-border p-2 text-xs text-sand rounded focus:border-pickle focus:outline-none"
                   />
-
-                  {/* Clickable Existing Team Cards */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-52 overflow-y-auto pr-1">
-                    {filteredExistingTeams.length === 0 ? (
-                      <div className="col-span-full py-4 text-center text-xs text-muted-foreground">
-                        No club teams matching "{teamSearchQuery}".
-                      </div>
-                    ) : (
-                      filteredExistingTeams.map((t) => {
-                        const isSelected = selectedExistingTeam === t.name;
-                        return (
-                          <div
-                            key={t.name}
-                            onClick={() => handlePromptExistingTeamConfirm(t)}
-                            className={`p-2.5 rounded-lg border text-left cursor-pointer transition-all ${isSelected
-                                ? "border-pickle bg-pickle/15 ring-1 ring-pickle/50"
-                                : "border-border bg-charcoal hover:border-pickle/60 hover:bg-charcoal/80"
-                              }`}
-                          >
-                            <div className="flex items-center justify-between gap-1 mb-1">
-                              <span className="font-bold text-xs text-sand truncate">
-                                {t.name}
-                              </span>
-                              <span className="text-[0.6rem] uppercase tracking-wider font-mono text-pickle/90 px-1.5 py-0.5 rounded bg-pickle/10 border border-pickle/20 shrink-0">
-                                {t.club || "Club"}
-                              </span>
-                            </div>
-                            <p className="text-[0.7rem] text-muted-foreground truncate mb-2">
-                              {Array.isArray(t?.players) ? t.players.filter(Boolean).join(" & ") : "2 Players"}
-                            </p>
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handlePromptExistingTeamConfirm(t);
-                              }}
-                              className={`w-full py-1 text-[0.65rem] font-bold uppercase tracking-wider rounded transition-all cursor-pointer ${isSelected
-                                  ? "bg-pickle text-sand"
-                                  : "border border-pickle/40 bg-pickle/10 text-pickle hover:bg-pickle hover:text-sand"
-                                }`}
-                            >
-                              {isSelected ? "Selected in Roster" : "Put in Roster"}
-                            </button>
-                          </div>
-                        );
-                      })
-                    )}
-                  </div>
-
-                  {rosterNotice && (
-                    <div className="text-[0.7rem] text-pickle font-mono bg-pickle/15 p-2 rounded border border-pickle/40 flex items-center justify-between gap-2">
-                      <span>{rosterNotice}</span>
-                      <button
-                        type="button"
-                        onClick={() => setRosterNotice(null)}
-                        className="text-[0.65rem] text-pickle hover:text-foreground font-bold cursor-pointer"
-                      >
-                        Dismiss
-                      </button>
-                    </div>
-                  )}
-
-                  {selectedExistingTeam && !rosterNotice && (
-                    <div className="text-[0.65rem] text-pickle font-mono bg-pickle/10 p-2 rounded border border-pickle/30 flex flex-col sm:flex-row sm:items-center justify-between gap-1">
-                      <span>Connected: <strong>{teamName}</strong> ({club || "Dink Valley"})</span>
-                      <span className="text-muted-foreground">Roster pre-filled below &mdash; confirm or edit</span>
-                    </div>
-                  )}
                 </div>
-              ) : (
-                /* New Team Custom Fields */
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <div>
-                    <label className="text-xs font-bold uppercase tracking-wider text-foreground block mb-1">
-                      Team Name *
-                    </label>
-                    <input
-                      type="text"
-                      required
-                      placeholder="e.g. Metro Dinkers, Kitchen Krushers"
-                      value={teamName}
-                      onChange={(e) => setTeamName(e.target.value)}
-                      className="w-full bg-charcoal border border-border p-2 text-xs text-sand rounded focus:border-pickle focus:outline-none"
-                    />
-                  </div>
 
-                  <div>
-                    <label className="text-xs font-bold uppercase tracking-wider text-foreground block mb-1">
-                      Club or Academy (Optional)
-                    </label>
-                    <input
-                      type="text"
-                      placeholder="e.g. Dink Valley, Apex Paddle Club"
-                      value={club}
-                      onChange={(e) => setClub(e.target.value)}
-                      className="w-full bg-charcoal border border-border p-2 text-xs text-sand rounded focus:border-pickle focus:outline-none"
-                    />
-                  </div>
+                <div>
+                  <label className="text-xs font-bold uppercase tracking-wider text-foreground block mb-1">
+                    Club or Academy (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Dink Valley, Apex Paddle Club"
+                    value={club}
+                    onChange={(e) => setClub(e.target.value)}
+                    className="w-full bg-charcoal border border-border p-2 text-xs text-sand rounded focus:border-pickle focus:outline-none"
+                  />
                 </div>
-              )}
+              </div>
 
               {/* Players Under Team */}
               <div className="space-y-2.5 pt-2 border-t border-border/50">
@@ -599,7 +348,7 @@ export function PublicRegistrationModal({
             <div className="grid gap-3 sm:grid-cols-2">
               <div>
                 <label className="text-xs font-bold uppercase tracking-wider text-foreground block mb-1">
-                  Contact Email
+                  Contact Email (Optional)
                 </label>
                 <input
                   type="email"
@@ -611,7 +360,7 @@ export function PublicRegistrationModal({
               </div>
               <div>
                 <label className="text-xs font-bold uppercase tracking-wider text-foreground block mb-1">
-                  Contact Phone / WhatsApp
+                  Contact Phone / WhatsApp (Optional)
                 </label>
                 <input
                   type="tel"
@@ -623,92 +372,20 @@ export function PublicRegistrationModal({
               </div>
             </div>
 
-            {/* Payment & Receipt Upload Section */}
+            {/* Fee & Reference Info */}
             <div className="surface-card p-3.5 border border-border rounded space-y-3 text-xs">
               <div className="flex items-center justify-between text-muted-foreground font-mono uppercase text-[0.65rem]">
                 <span>Tournament Entry Fee</span>
                 <span className="text-pickle font-bold">{activeCategory?.fee || tournament.entryFee || "PHP 1,000 per team"}</span>
               </div>
 
-              {/* Receipt File Upload */}
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <label className="text-[0.65rem] font-bold uppercase tracking-wider text-foreground block">
-                    Upload Payment Receipt *
-                  </label>
-                  <span className="text-[0.6rem] font-mono text-pickle">
-                    Required for entry
-                  </span>
-                </div>
-
-                {receiptDataUrl ? (
-                  <div className="rounded border border-pickle/40 bg-charcoal/90 p-3 space-y-2">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <span className="h-2 w-2 rounded-full bg-pickle shrink-0" />
-                        <span className="text-[0.7rem] font-mono text-sand truncate">
-                          {receiptFileName || "receipt-image.jpg"}
-                        </span>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={handleRemoveReceipt}
-                        className="text-[0.65rem] uppercase font-bold text-brick hover:underline shrink-0 cursor-pointer"
-                      >
-                        Remove
-                      </button>
-                    </div>
-
-                    <div className="relative rounded overflow-hidden border border-border/70 bg-black/40 flex items-center justify-center p-2">
-                      <img
-                        src={receiptDataUrl}
-                        alt="Receipt preview"
-                        className="max-h-40 w-auto object-contain rounded"
-                      />
-                    </div>
-                  </div>
-                ) : (
-                  <div>
-                    <label className="relative flex flex-col items-center justify-center border-2 border-dashed border-border hover:border-pickle/70 rounded-lg p-4 bg-card hover:bg-pickle/5 transition-colors cursor-pointer text-center group">
-                      <input
-                        type="file"
-                        accept="image/*"
-                        onChange={handleReceiptFileChange}
-                        disabled={isProcessingReceipt}
-                        className="sr-only"
-                      />
-                      <svg
-                        className="h-8 w-8 text-pickle/80 group-hover:text-pickle transition-colors mb-2"
-                        fill="none"
-                        viewBox="0 0 24 24"
-                        stroke="currentColor"
-                      >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          strokeWidth={1.8}
-                          d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"
-                        />
-                      </svg>
-                      <span className="text-xs font-semibold text-sand block">
-                        {isProcessingReceipt ? "Processing receipt..." : "Click or tap to upload receipt image"}
-                      </span>
-                      <span className="text-[0.65rem] text-muted-foreground mt-0.5 block">
-                        Screenshot or photo from GCash, Maya, or Bank App (PNG, JPG, WebP)
-                      </span>
-                    </label>
-                  </div>
-                )}
-              </div>
-
-              {/* Reference Number input */}
               <div>
                 <label className="text-[0.65rem] font-bold uppercase tracking-wider text-foreground block mb-1">
-                  Reference No. (Optional if clear on receipt)
+                  Payment Reference No. (Optional)
                 </label>
                 <input
                   type="text"
-                  placeholder="e.g. 109283749812 or GC-98214309"
+                  placeholder="e.g. GC-98214309 or bank reference"
                   value={paymentRef}
                   onChange={(e) => setPaymentRef(e.target.value)}
                   className="w-full bg-charcoal border border-border p-1.5 text-xs text-sand rounded font-mono focus:border-pickle focus:outline-none"
@@ -727,80 +404,15 @@ export function PublicRegistrationModal({
               </button>
               <button
                 type="submit"
-                disabled={isSubmitting || isFull || isProcessingReceipt}
+                disabled={isSubmitting || isFull}
                 className="px-5 py-2 bg-pickle text-sand font-bold text-xs uppercase tracking-widest hover:opacity-90 transition-opacity rounded cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {isSubmitting
-                  ? "Registering..."
-                  : isProcessingReceipt
-                    ? "Processing Image..."
-                    : "Submit Registration"}
+                {isSubmitting ? "Registering..." : "Submit Registration"}
               </button>
             </div>
           </form>
-        )}
-
-        {/* Roster Confirmation Question Modal */}
-        {confirmingTeam && (
-          <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-black/85 backdrop-blur-sm animate-in fade-in">
-            <div className="surface-card bg-card border-2 border-pickle w-full max-w-md p-6 rounded-xl shadow-2xl space-y-4">
-              <div>
-                <span className="text-[0.65rem] font-bold uppercase tracking-[0.24em] text-pickle block font-mono">
-                  Roster Confirmation
-                </span>
-                <h3 className="font-display text-2xl text-foreground font-bold mt-1">
-                  Put this team in the roster?
-                </h3>
-              </div>
-
-              <p className="text-xs text-muted-foreground">
-                Would you like to put existing team <strong>"{confirmingTeam.name}"</strong> into the roster for <strong>{activeCategory?.label}</strong>?
-              </p>
-
-              <div className="surface-card bg-background/80 p-3.5 rounded-lg border border-border space-y-2 text-xs">
-                <div className="flex justify-between border-b border-border/40 pb-1.5">
-                  <span className="text-muted-foreground uppercase text-[0.65rem] font-mono">Team</span>
-                  <span className="font-bold text-foreground">{confirmingTeam.name}</span>
-                </div>
-                <div className="flex justify-between border-b border-border/40 pb-1.5">
-                  <span className="text-muted-foreground uppercase text-[0.65rem] font-mono">Players</span>
-                  <span className="font-semibold text-foreground">
-                    {Array.isArray(confirmingTeam?.players)
-                      ? confirmingTeam.players.filter(Boolean).join(" & ")
-                      : "2 Players"}
-                  </span>
-                </div>
-                <div className="flex justify-between border-b border-border/40 pb-1.5">
-                  <span className="text-muted-foreground uppercase text-[0.65rem] font-mono">Club</span>
-                  <span className="font-semibold text-foreground">{confirmingTeam.club || "Dink Valley"}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground uppercase text-[0.65rem] font-mono">Division</span>
-                  <span className="font-bold text-pickle">{activeCategory?.label}</span>
-                </div>
-              </div>
-
-              <div className="flex items-center justify-end gap-2.5 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setConfirmingTeam(null)}
-                  className="px-4 py-2 text-xs font-bold uppercase tracking-wider border border-border bg-card text-foreground hover:bg-background rounded-md cursor-pointer transition-all"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={handleConfirmTeamRoster}
-                  className="px-4 py-2 text-xs font-bold uppercase tracking-wider bg-pickle text-sand hover:opacity-90 rounded-md cursor-pointer shadow-xs transition-all"
-                >
-                  Yes, Put in Roster
-                </button>
-              </div>
-            </div>
-          </div>
         )}
       </div>
     </div>
   );
 }
-

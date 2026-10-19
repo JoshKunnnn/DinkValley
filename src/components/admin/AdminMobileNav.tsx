@@ -23,7 +23,6 @@ type AdminTabKey = "draw" | "dispatch" | "setup" | "teams" | "access-codes";
 interface AdminMobileNavProps {
   activeTab: AdminTabKey;
   onTabChange: (tab: AdminTabKey) => void;
-  pendingTeamsCount: number;
   onLogout: () => void;
 }
 
@@ -42,7 +41,6 @@ const ADMIN_TABS: {
 export function AdminMobileNav({
   activeTab,
   onTabChange,
-  pendingTeamsCount,
   onLogout,
 }: AdminMobileNavProps) {
   return (
@@ -67,7 +65,6 @@ export function AdminMobileNav({
         {/* 4 main tab buttons */}
         {ADMIN_TABS.map(({ key, label, icon: Icon }) => {
           const isActive = activeTab === key;
-          const showBadge = key === "teams" && pendingTeamsCount > 0;
 
           return (
             <button
@@ -87,13 +84,6 @@ export function AdminMobileNav({
                   className="absolute top-0 left-1/2 -translate-x-1/2 h-0.5 w-8 bg-brick rounded-full"
                   style={{ boxShadow: "0 0 6px rgba(185,55,35,0.7)" }}
                 />
-              )}
-
-              {/* Badge for pending teams */}
-              {showBadge && (
-                <span className="absolute top-2 right-[calc(50%-0.75rem)] min-w-[1rem] h-4 px-0.5 flex items-center justify-center rounded-full bg-brick text-sand text-[0.5rem] font-bold font-mono border border-charcoal animate-pulse">
-                  {pendingTeamsCount > 9 ? "9+" : pendingTeamsCount}
-                </span>
               )}
 
               <Icon

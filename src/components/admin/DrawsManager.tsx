@@ -6,6 +6,7 @@ import {
   dbSaveMainDraw,
   dbDeleteMainDraw,
   getCachedMainDraw,
+  clearMainDrawCache,
 } from "@/lib/supabase-service";
 
 export type BracketMatch = {
@@ -90,6 +91,7 @@ export function saveMainDrawMatches(slug: string, catId: string, matches: Knocko
 }
 
 export function resetMainDrawMatches(slug: string, catId: string) {
+  clearMainDrawCache(slug, catId);
   try {
     dbDeleteMainDraw(slug, catId).catch(() => {});
     try {

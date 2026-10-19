@@ -756,19 +756,35 @@ export function syncDrawnBracketsToLiveMatches(
 }
 
 /**
- * Removes all non-final matches belonging to a category.
- * Used when all players/teams in a category are deleted.
+ * Removes matches belonging to a category.
+ * When purgeFinalMatches is true (e.g. on full draw reset), all matches including completed ones are wiped.
  */
-export function purgeMatchesForCategory(tournamentSlug: string, categoryId: string): void {
+export function purgeMatchesForCategory(
+  tournamentSlug: string,
+  categoryId: string,
+  purgeFinalMatches = false
+): void {
   const current = getMatches();
   const deletedMatchIds: string[] = [];
 
-  const retained = current.filter((m) => {
-    const isThisTourneyAndCat =
-      (m.tournamentSlug === tournamentSlug || (!m.tournamentSlug && m.id.includes(tournamentSlug))) &&
-      (m.categoryId === categoryId || (!m.categoryId && m.id.includes(categoryId)));
+  const cleanCat = categoryId.trim().toLowerCase();
+  const cleanTourn = tournamentSlug.trim().toLowerCase();
 
-    if (isThisTourneyAndCat && m.status !== "final") {
+  const retained = current.filter((m) => {
+    const isThisTourney =
+      !m.tournamentSlug ||
+      m.tournamentSlug.toLowerCase() === cleanTourn ||
+      m.id.toLowerCase().includes(cleanTourn);
+
+    const mCat = (m.categoryId || "").trim().toLowerCase();
+    const isThisCat = mCat === cleanCat || m.id.toLowerCase().includes(cleanCat);
+
+    const isThisTourneyAndCat = isThisTourney && isThisCat;
+
+    if (isThisTourneyAndCat) {
+      if (!purgeFinalMatches && m.status === "final") {
+        return true;
+      }
       deletedMatchIds.push(m.id);
       return false;
     }

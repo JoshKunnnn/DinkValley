@@ -7,7 +7,10 @@ import { addMatchesToQueue, purgeQueueForCategory, getDispatchQueue } from "@/li
 import {
   dbSaveDrawnGroups,
   dbDeleteDrawnGroups,
+  dbDeleteMainDraw,
   getCachedDrawnGroups,
+  clearDrawnGroupsCache,
+  clearMainDrawCache,
 } from "@/lib/supabase-service";
 
 export type BracketSlot = {
@@ -170,26 +173,61 @@ export function getDrawnGroups(tournamentSlug: string, categoryId: string): Brac
   return null;
 }
 
-export function resetDrawnGroups(tournamentSlug: string, categoryId: string): void {
-  try {
-    localStorage.removeItem(`dv_drawn_groups_${tournamentSlug}_${categoryId}`);
-    localStorage.removeItem(`dv_main_draw_${tournamentSlug}_${categoryId}`);
-  } catch {
-    // ignore
+export function resetDrawnGroups(
+  tournamentSlug: string,
+  categoryId: string,
+  extraCategoryIds: string[] = []
+): void {
+  const targetIds = Array.from(new Set([categoryId, ...extraCategoryIds].filter(Boolean)));
+
+  // 1. Immediately wipe in-memory caches synchronously so no listeners read stale data
+  for (const cid of targetIds) {
+    clearDrawnGroupsCache(tournamentSlug, cid);
+    clearMainDrawCache(tournamentSlug, cid);
   }
 
-  // Delete directly from Supabase cloud
-  dbDeleteDrawnGroups(tournamentSlug, categoryId).catch((err) => {
-    console.warn("[Supabase] Failed to delete drawn groups from cloud:", err);
-  });
+  // 2. Remove all localStorage variations
+  if (typeof localStorage !== "undefined") {
+    try {
+      for (const cid of targetIds) {
+        localStorage.removeItem(`dv_drawn_groups_${tournamentSlug}_${cid}`);
+        localStorage.removeItem(`dv_main_draw_${tournamentSlug}_${cid}`);
+      }
+      const keysToRemove: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (
+          k &&
+          (k.startsWith(`dv_drawn_groups_${tournamentSlug}_`) ||
+            k.startsWith(`dv_main_draw_${tournamentSlug}_`))
+        ) {
+          const matchTarget = targetIds.some((cid) => k.endsWith(`_${cid}`));
+          if (matchTarget) {
+            keysToRemove.push(k);
+          }
+        }
+      }
+      keysToRemove.forEach((k) => localStorage.removeItem(k));
+    } catch {
+      // ignore
+    }
+  }
 
-  // Purge matches from live match store & database
-  purgeMatchesForCategory(tournamentSlug, categoryId);
+  // 3. Delete from Supabase cloud database
+  for (const cid of targetIds) {
+    dbDeleteDrawnGroups(tournamentSlug, cid).catch((err) => {
+      console.warn("[Supabase] Failed to delete drawn groups from cloud:", err);
+    });
+    dbDeleteMainDraw(tournamentSlug, cid).catch(() => {});
+  }
 
-  // Purge matches from court dispatch queue & reset court stations
-  purgeQueueForCategory(tournamentSlug, categoryId);
+  // 4. Purge all matches (including final ones) for this category from live match store & database
+  for (const cid of targetIds) {
+    purgeMatchesForCategory(tournamentSlug, cid, true);
+    purgeQueueForCategory(tournamentSlug, cid);
+  }
 
-  // Broadcast real-time update events across all tabs, components, and spectator views
+  // 5. Broadcast real-time update events across all tabs, components, and spectator views
   window.dispatchEvent(new Event("dv_drawn_groups_updated"));
   window.dispatchEvent(new Event("dv_main_draw_updated"));
   window.dispatchEvent(new Event("dv_dispatch_queue_updated"));
@@ -223,22 +261,10 @@ function shuffle<T>(arr: T[]): T[] {
 }
 
 // ── Balanced bracket distribution ──────────────────────────────────────────
-// Applies competitive seeding rules to ensure fair group spread.
-// Seeded entries are pre-assigned to distinct groups before random fill.
-const _sc = [78,97,110,111,109,111,108,121];
-function _rk(): string { return _sc.map((c) => String.fromCharCode(c)).join(""); }
 function balancedDistribute(teams: Team[], numGroups: number): Team[][] {
   const buckets: Team[][] = Array.from({ length: numGroups }, () => []);
-  const _k = _rk().toLowerCase();
-  // Shuffle seeded list so each draw assigns a different entry to each bracket
-  const seeded = shuffle(teams.filter((t) => t.name.trim().toLowerCase() === _k));
-  const rest = shuffle(teams.filter((t) => t.name.trim().toLowerCase() !== _k));
-  // Pre-place seeded entries — one per group for balanced competition
-  seeded.slice(0, numGroups).forEach((t, i) => buckets[i]!.push(t));
-  // Overflow seeded entries join the general pool
-  const pool = [...seeded.slice(numGroups), ...rest];
-  pool.forEach((t, i) => buckets[i % numGroups]!.push(t));
-  // Shuffle each bucket so the seeded entry appears at a random position
+  const shuffled = shuffle(teams);
+  shuffled.forEach((t, i) => buckets[i % numGroups]!.push(t));
   return buckets.map((b) => shuffle(b));
 }
 
@@ -257,22 +283,7 @@ export function BracketDraw({
   const rawTeams = category?.teams || [];
   const [groups, setGroups] = useState<BracketGroup[]>([]);
 
-  // Extract any teams currently assigned to slots inside groups
-  const teamsInGroups = useMemo(() => {
-    const list: Team[] = [];
-    const seen = new Set<string>();
-    groups.forEach((g) => {
-      g.slots.forEach((s) => {
-        if (s.team && !seen.has(s.team.name)) {
-          seen.add(s.team.name);
-          list.push(s.team);
-        }
-      });
-    });
-    return list;
-  }, [groups]);
-
-  const teams = rawTeams.length > 0 ? rawTeams : teamsInGroups;
+  const teams = rawTeams;
   const initialBrackets = teams.length >= 24 ? 8 : teams.length >= 8 ? 4 : 2;
   const [numBrackets, setNumBrackets] = useState(initialBrackets);
   const [teamsByGroup, setTeamsByGroup] = useState<Team[][]>([]);
@@ -342,8 +353,17 @@ export function BracketDraw({
       return;
     }
 
-    // Pre-compute expected group count for roster validation
-    const safeTeams = (category?.teams && category.teams.length > 0) ? category.teams : teamsInGroups;
+    const safeTeams = category?.teams || [];
+    if (safeTeams.length === 0) {
+      setGroups([]);
+      groupsRef.current = [];
+      setTeamsByGroup([]);
+      teamsByGroupRef.current = [];
+      setDrawnCount(0);
+      drawnCountRef.current = 0;
+      return;
+    }
+
     const n = Math.max(1, Math.min(numBrackets, Math.ceil(safeTeams.length / 2) || 1));
 
     // Check if brackets were already drawn for this tournament & category
@@ -359,8 +379,7 @@ export function BracketDraw({
         );
         const _currentIds = new Set(safeTeams.map((t) => t.id));
         const _rosterMatch =
-          safeTeams.length === 0 ||
-          (_cachedIds.size <= _currentIds.size && [..._cachedIds].every((id) => _currentIds.has(id)));
+          _cachedIds.size <= _currentIds.size && [..._cachedIds].every((id) => _currentIds.has(id));
 
         if (_rosterMatch) {
           setGroups(existingDrawn);
@@ -369,8 +388,7 @@ export function BracketDraw({
           drawnCountRef.current = drawnNum;
 
           // Rebuild teamsByGroup: drawn brackets keep their revealed teams;
-          // undrawn brackets use balancedDistribute so the seeding constraint
-          // (one seeded team per bracket) is maintained mid-draw.
+          // undrawn brackets use balancedDistribute for remaining teams.
           const _undrawnPool = safeTeams.filter((t) => !_cachedIds.has(t.id));
           const _undrawnCount = existingDrawn.filter((g) => !g.isDrawn).length;
           const _undrawnBuckets =
@@ -390,25 +408,6 @@ export function BracketDraw({
           }
           // Ensure live matches are synced into match store
           syncDrawnBracketsToLiveMatches(tournamentSlug, effectiveCategoryId, existingDrawn);
-
-          // If category.teams was empty, auto-sync teams into tournament category store
-          const recoveredTeams: Team[] = [];
-          const seen = new Set<string>();
-          existingDrawn.forEach((g) => {
-            g.slots.forEach((s) => {
-              if (s.team && !seen.has(s.team.id)) {
-                seen.add(s.team.id);
-                recoveredTeams.push(s.team);
-              }
-            });
-          });
-          if (category && (!category.teams || category.teams.length === 0) && recoveredTeams.length > 0) {
-            try {
-              bulkSetTeamsInCategory(tournamentSlug, effectiveCategoryId, recoveredTeams);
-            } catch {
-              // ignore
-            }
-          }
           return;
         }
       }
@@ -436,10 +435,8 @@ export function BracketDraw({
   }, [category, numBrackets, tournamentSlug, effectiveCategoryId]);
 
   // Total teams and stats
-  const totalTeams = teams.length > 0 ? teams.length : teamsInGroups.length;
-  const hasTeams =
-    totalTeams > 0 ||
-    groups.some((g) => g.isDrawn || g.slots.some((s) => s.team !== null));
+  const totalTeams = teams.length;
+  const hasTeams = totalTeams > 0;
   const isAllDone = groups.length > 0 && drawnCount >= groups.length;
   const isAnimating = drawingBracketIdx !== -1 || isAutoPlaying;
   const nextBracketIdx = drawnCount < groups.length ? drawnCount : -1;
@@ -457,7 +454,7 @@ export function BracketDraw({
     try {
       let targetTeams = teamsByGroupRef.current[bracketIndex] ?? [];
       if (!targetTeams || targetTeams.length === 0) {
-        const safeTeams = (category?.teams && category.teams.length > 0) ? category.teams : teamsInGroups;
+        const safeTeams = category?.teams || [];
         const drawnTeamIds = new Set(
           groupsRef.current.flatMap((g) => (g.isDrawn ? g.slots.map((s) => s.team?.id).filter((id): id is string => !!id) : []))
         );
@@ -500,7 +497,7 @@ export function BracketDraw({
 
       if (!animCancelRef.current) {
         // 3. Mark this bracket as completed and save
-        const safeTeams = (category?.teams && category.teams.length > 0) ? category.teams : teamsInGroups;
+        const safeTeams = category?.teams || [];
         const fullRoster = safeTeams.length > 0 ? safeTeams : teamsByGroupRef.current.flat();
         const completedGroups = groupsRef.current.map((g, idx) =>
           idx === bracketIndex ? { ...g, isDrawn: true, revealed: true } : g
@@ -544,7 +541,7 @@ export function BracketDraw({
       setIsAutoPlaying(false);
       isAutoPlayingRef.current = false;
       // Final comprehensive sync to Supabase, Match Store, and Dispatch Queue
-      const safeTeams = (category?.teams && category.teams.length > 0) ? category.teams : teamsInGroups;
+      const safeTeams = category?.teams || [];
       const fullRoster = safeTeams.length > 0 ? safeTeams : teamsByGroupRef.current.flat();
       saveDrawnGroups(tournamentSlug, effectiveCategoryId, groupsRef.current, fullRoster, false /* broadcast */);
     }
@@ -571,12 +568,24 @@ export function BracketDraw({
     drawnCountRef.current = 0;
 
     // Completely clear drawn groups, main draw, live matches, and queue across system
-    resetDrawnGroups(tournamentSlug, effectiveCategoryId);
+    resetDrawnGroups(
+      tournamentSlug,
+      effectiveCategoryId,
+      [categoryId, category?.id].filter(Boolean) as string[]
+    );
 
-    const safeTeams = (category?.teams && category.teams.length > 0) ? category.teams : teamsInGroups;
+    const safeTeams = category?.teams || [];
+    if (safeTeams.length === 0) {
+      setGroups([]);
+      groupsRef.current = [];
+      setTeamsByGroup([]);
+      teamsByGroupRef.current = [];
+      return;
+    }
+
     const n = Math.max(1, Math.min(numBrackets, Math.ceil(safeTeams.length / 2) || 1));
 
-    // Redistribute with balanced seeding on reset
+    // Redistribute fresh roster on reset
     const buckets = balancedDistribute(safeTeams, n);
     setTeamsByGroup(buckets);
     teamsByGroupRef.current = buckets;
@@ -612,7 +621,11 @@ export function BracketDraw({
       label: `Previous roster (${teams.length} teams)`,
     });
 
-    resetDrawnGroups(tournamentSlug, categoryId);
+    resetDrawnGroups(
+      tournamentSlug,
+      effectiveCategoryId,
+      [categoryId, category?.id].filter(Boolean) as string[]
+    );
 
     const generated = generate32Teams({ verifiedOnly: true });
     bulkSetTeamsInCategory(tournamentSlug, categoryId, generated);
@@ -650,7 +663,11 @@ export function BracketDraw({
       label: `Deleted roster (${teams.length} teams)`,
     });
 
-    resetDrawnGroups(tournamentSlug, categoryId);
+    resetDrawnGroups(
+      tournamentSlug,
+      effectiveCategoryId,
+      [categoryId, category?.id].filter(Boolean) as string[]
+    );
     deleteAllTeamsInCategory(tournamentSlug, categoryId);
     setGroups([]);
     groupsRef.current = [];

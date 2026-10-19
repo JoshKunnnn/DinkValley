@@ -93,72 +93,7 @@ export function slugify(text: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
-export type ExistingClubTeam = {
-  name: string;
-  club?: string;
-  players: string[];
-  appearancesCount: number;
-};
 
-/**
- * Extract unique existing teams across all tournaments and categories.
- */
-export function getUniqueClubTeams(): ExistingClubTeam[] {
-  const tournaments = getTournaments();
-  const map = new Map<string, ExistingClubTeam>();
-
-  tournaments.forEach((tourn) => {
-    tourn.categories?.forEach((cat) => {
-      // Collect from verified teams
-      cat.teams?.forEach((team) => {
-        const key = team.name.trim().toLowerCase();
-        if (!key) return;
-        const existing = map.get(key);
-        if (!existing) {
-          map.set(key, {
-            name: team.name.trim(),
-            club: team.club || "Dink Valley",
-            players: team.players ? [...team.players] : [],
-            appearancesCount: 1,
-          });
-        } else {
-          existing.appearancesCount += 1;
-          if (team.club && (!existing.club || existing.club === "Dink Valley")) {
-            existing.club = team.club;
-          }
-          team.players?.forEach((p) => {
-            if (p && !existing.players.includes(p)) {
-              existing.players.push(p);
-            }
-          });
-        }
-      });
-
-      // Collect from pending teams
-      cat.pendingTeams?.forEach((team) => {
-        const key = team.name.trim().toLowerCase();
-        if (!key) return;
-        const existing = map.get(key);
-        if (!existing) {
-          map.set(key, {
-            name: team.name.trim(),
-            club: team.club || "Dink Valley",
-            players: team.players ? [...team.players] : [],
-            appearancesCount: 1,
-          });
-        } else {
-          team.players?.forEach((p) => {
-            if (p && !existing.players.includes(p)) {
-              existing.players.push(p);
-            }
-          });
-        }
-      });
-    });
-  });
-
-  return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
-}
 
 export type NewTournamentInput = {
   name: string;
@@ -307,15 +242,22 @@ export function addCategoryToTournament(tournamentSlug: string, category: Catego
 
 /**
  * Add a team to a specific category within a tournament.
+ * All added teams are confirmed in the roster with paid status by default.
  */
 export function addTeamToCategory(tournamentSlug: string, categoryId: string, team: Team): Tournament | undefined {
   const current = getTournaments();
   const tournament = current.find((t) => t.slug === tournamentSlug);
   if (!tournament) return undefined;
 
+  const normalizedTeam: Team = {
+    ...team,
+    paid: team.paid ?? true,
+    paymentStatus: team.paymentStatus ?? "Verified",
+  };
+
   const categories = tournament.categories.map((c) => {
     if (c.id === categoryId) {
-      const teams = [...c.teams, team];
+      const teams = [...c.teams.filter((t) => t.id !== team.id), normalizedTeam];
       return { ...c, teams };
     }
     return c;
@@ -325,29 +267,14 @@ export function addTeamToCategory(tournamentSlug: string, categoryId: string, te
 }
 
 /**
- * Add a pending team registration awaiting admin verification.
+ * Add a team registration directly into category teams (legacy pending route now adds directly).
  */
 export function addPendingRegistration(tournamentSlug: string, categoryId: string, team: Team): Tournament | undefined {
-  const current = getTournaments();
-  const tournament = current.find((t) => t.slug === tournamentSlug);
-  if (!tournament) return undefined;
-
-  const categories = tournament.categories.map((c) => {
-    if (c.id === categoryId) {
-      const pendingTeams = [
-        ...(c.pendingTeams || []).filter((t) => t.id !== team.id),
-        { ...team, paid: false, paymentStatus: "Pending" as const },
-      ];
-      return { ...c, pendingTeams };
-    }
-    return c;
-  });
-
-  return updateTournament(tournamentSlug, { categories });
+  return addTeamToCategory(tournamentSlug, categoryId, team);
 }
 
 /**
- * Approve a pending registration, moving it to verified category teams.
+ * Approve a pending registration (retained for backward compatibility).
  */
 export function approvePendingRegistration(tournamentSlug: string, categoryId: string, teamId: string): Tournament | undefined {
   const current = getTournaments();
@@ -356,30 +283,10 @@ export function approvePendingRegistration(tournamentSlug: string, categoryId: s
 
   const categories = tournament.categories.map((c) => {
     if (c.id === categoryId) {
-      const pending = c.pendingTeams || [];
-      const target = pending.find((t) => t.id === teamId);
-      const remainingPending = pending.filter((t) => t.id !== teamId);
-
-      if (target) {
-        const verifiedTeam: Team = {
-          ...target,
-          paid: true,
-          paymentStatus: "Verified",
-        };
-        const teams = [...c.teams.filter((t) => t.id !== teamId), verifiedTeam];
-        return { ...c, teams, pendingTeams: remainingPending };
-      }
-
-      // If team was already in teams as unpaid, mark it verified
-      const existingInTeams = c.teams.find((t) => t.id === teamId);
-      if (existingInTeams) {
-        const teams = c.teams.map((t) =>
-          t.id === teamId ? { ...t, paid: true, paymentStatus: "Verified" as const } : t
-        );
-        return { ...c, teams, pendingTeams: remainingPending };
-      }
-
-      return { ...c, pendingTeams: remainingPending };
+      const teams = c.teams.map((t) =>
+        t.id === teamId ? { ...t, paid: true, paymentStatus: "Verified" as const } : t
+      );
+      return { ...c, teams };
     }
     return c;
   });
@@ -388,27 +295,10 @@ export function approvePendingRegistration(tournamentSlug: string, categoryId: s
 }
 
 /**
- * Reject / decline a pending registration.
+ * Reject / decline a team registration.
  */
 export function rejectPendingRegistration(tournamentSlug: string, categoryId: string, teamId: string): Tournament | undefined {
-  const current = getTournaments();
-  const tournament = current.find((t) => t.slug === tournamentSlug);
-  if (!tournament) return undefined;
-
-  const categories = tournament.categories.map((c) => {
-    if (c.id === categoryId) {
-      const pendingTeams = (c.pendingTeams || []).filter((t) => t.id !== teamId);
-      return { ...c, pendingTeams };
-    }
-    return c;
-  });
-
-  // Delete from Supabase in background
-  dbDeleteTeam(teamId).catch((err) => {
-    console.warn("[Database] Failed to delete rejected team:", err);
-  });
-
-  return updateTournament(tournamentSlug, { categories });
+  return removeTeamFromCategory(tournamentSlug, categoryId, teamId);
 }
 
 /**
@@ -423,13 +313,12 @@ export function removeTeamFromCategory(tournamentSlug: string, categoryId: strin
 
   const categories = tournament.categories.map((c) => {
     if (c.id === categoryId) {
-      const targetTeam = c.teams.find((t) => t.id === teamId) || (c.pendingTeams || []).find((t) => t.id === teamId);
+      const targetTeam = c.teams.find((t) => t.id === teamId);
       if (targetTeam) {
         removedTeamName = targetTeam.name;
       }
       const teams = c.teams.filter((t) => t.id !== teamId);
-      const pendingTeams = (c.pendingTeams || []).filter((t) => t.id !== teamId);
-      return { ...c, teams, pendingTeams };
+      return { ...c, teams };
     }
     return c;
   });
@@ -509,7 +398,7 @@ export function deleteAllTeamsInCategory(
 
   // Auto delete matches in queue and active matches for this category
   purgeQueueForCategory(tournamentSlug, categoryId);
-  purgeMatchesForCategory(tournamentSlug, categoryId);
+  purgeMatchesForCategory(tournamentSlug, categoryId, true);
 
   // Delete drawn groups and teams from Supabase
   dbDeleteDrawnGroups(tournamentSlug, categoryId).catch(() => {});

@@ -264,7 +264,6 @@ export function TournamentsManager({
       (t.categories || []).map((c) => ({
         ...c,
         teams: c.teams || [],
-        pendingTeams: c.pendingTeams || [],
         pools: c.pools || [],
         standings: c.standings || [],
         playoffs: c.playoffs || [],

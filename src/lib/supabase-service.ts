@@ -8,6 +8,48 @@ const _drawnGroupsCache = new Map<string, any[]>();
 const _mainDrawCache = new Map<string, any[]>();
 let _dispatchQueueCache: any[] = [];
 
+export function clearDrawnGroupsCache(tournamentSlug: string, categoryId?: string): void {
+  if (!tournamentSlug) return;
+  if (!categoryId) {
+    for (const key of _drawnGroupsCache.keys()) {
+      if (key.startsWith(`${tournamentSlug}_`)) {
+        _drawnGroupsCache.delete(key);
+      }
+    }
+    return;
+  }
+  const cleanCat = categoryId.trim().toLowerCase();
+  for (const key of _drawnGroupsCache.keys()) {
+    if (key.startsWith(`${tournamentSlug}_`)) {
+      const storedCat = key.substring(`${tournamentSlug}_`.length).trim().toLowerCase();
+      if (storedCat === cleanCat) {
+        _drawnGroupsCache.delete(key);
+      }
+    }
+  }
+}
+
+export function clearMainDrawCache(tournamentSlug: string, categoryId?: string): void {
+  if (!tournamentSlug) return;
+  if (!categoryId) {
+    for (const key of _mainDrawCache.keys()) {
+      if (key.startsWith(`${tournamentSlug}_`)) {
+        _mainDrawCache.delete(key);
+      }
+    }
+    return;
+  }
+  const cleanCat = categoryId.trim().toLowerCase();
+  for (const key of _mainDrawCache.keys()) {
+    if (key.startsWith(`${tournamentSlug}_`)) {
+      const storedCat = key.substring(`${tournamentSlug}_`.length).trim().toLowerCase();
+      if (storedCat === cleanCat) {
+        _mainDrawCache.delete(key);
+      }
+    }
+  }
+}
+
 export function getCachedDrawnGroups(tournamentSlug: string, categoryId: string): any[] | null {
   if (!tournamentSlug || !categoryId) return null;
   // 1. Direct match
@@ -16,16 +58,12 @@ export function getCachedDrawnGroups(tournamentSlug: string, categoryId: string)
     return direct;
   }
 
-  // 2. Flexible cross-match across tournament entries (resolving UUID vs slug)
+  // 2. Exact case-insensitive match on category ID (prevent cross-category fuzzy bleeding)
+  const cleanCat = categoryId.trim().toLowerCase();
   for (const [key, val] of _drawnGroupsCache.entries()) {
     if (key.startsWith(`${tournamentSlug}_`)) {
-      const storedCat = key.substring(`${tournamentSlug}_`.length);
-      if (
-        storedCat === categoryId ||
-        storedCat.toLowerCase() === categoryId.toLowerCase() ||
-        storedCat.includes(categoryId) ||
-        categoryId.includes(storedCat)
-      ) {
+      const storedCat = key.substring(`${tournamentSlug}_`.length).trim().toLowerCase();
+      if (storedCat === cleanCat) {
         if (Array.isArray(val) && val.length > 0) {
           return val;
         }
@@ -185,8 +223,11 @@ export async function dbGetTournaments(): Promise<Tournament[]> {
           }
         }
 
-        const verifiedTeams = teams.filter((tm) => tm.paid === true || tm.paymentStatus === "Verified");
-        const pendingTeams = teams.filter((tm) => tm.paid !== true && tm.paymentStatus !== "Verified");
+        const allTeams = teams.map((tm) => ({
+          ...tm,
+          paid: tm.paid ?? true,
+          paymentStatus: (tm.paymentStatus as Team["paymentStatus"]) || "Verified",
+        }));
 
         return {
           id: c.category_slug || c.id,
@@ -194,8 +235,8 @@ export async function dbGetTournaments(): Promise<Tournament[]> {
           level: c.level as Category["level"],
           division: c.division as Category["division"],
           fee: c.entry_fee || undefined,
-          teams: verifiedTeams,
-          pendingTeams: pendingTeams,
+          teams: allTeams,
+          pendingTeams: [],
           pools: [],
           standings: [],
           playoffs: [],
@@ -318,21 +359,14 @@ export async function dbSaveTournament(t: Tournament): Promise<boolean> {
         continue;
       }
 
-      // 3. Sync teams: remove previous teams for this category and insert current roster (verified & pending)
+      // 3. Sync teams: remove previous teams for this category and insert current roster
       await supabase.from("teams").delete().eq("category_id", catRow.id);
 
-      const allCategoryTeams = [
-        ...(cat.teams || []).map((tm) => ({
-          ...tm,
-          paid: tm.paid ?? true,
-          paymentStatus: tm.paymentStatus || "Verified",
-        })),
-        ...(cat.pendingTeams || []).map((tm) => ({
-          ...tm,
-          paid: false,
-          paymentStatus: "Pending" as const,
-        })),
-      ];
+      const allCategoryTeams = (cat.teams || []).map((tm) => ({
+        ...tm,
+        paid: tm.paid ?? true,
+        paymentStatus: tm.paymentStatus || "Verified",
+      }));
 
       if (allCategoryTeams.length > 0) {
         const isUuid = (id?: string) =>
@@ -348,7 +382,7 @@ export async function dbSaveTournament(t: Tournament): Promise<boolean> {
           paid: Boolean(tm.paid),
           payment_proof_url: tm.paymentProofUrl || null,
           payment_ref: tm.paymentRef || null,
-          payment_status: tm.paymentStatus || "Pending",
+          payment_status: tm.paymentStatus || "Verified",
         }));
 
         const { error: teamErr } = await supabase.from("teams").insert(teamsToInsert);
@@ -903,9 +937,10 @@ export async function dbDeleteDrawnGroups(
   tournamentSlug: string,
   categoryId: string
 ): Promise<boolean> {
-  try {
-    _drawnGroupsCache.delete(`${tournamentSlug}_${categoryId}`);
+  // Synchronously wipe in-memory cache immediately to prevent resurrecting stale data
+  clearDrawnGroupsCache(tournamentSlug, categoryId);
 
+  try {
     const { data: tourney } = await supabase
       .from("tournaments")
       .select("id, rules")
@@ -930,8 +965,8 @@ export async function dbDeleteDrawnGroups(
       }
     }
 
-    _drawnGroupsCache.delete(`${tournamentSlug}_${catSlug}`);
-    _drawnGroupsCache.delete(`${tournamentSlug}_${catUuid}`);
+    clearDrawnGroupsCache(tournamentSlug, catSlug);
+    clearDrawnGroupsCache(tournamentSlug, catUuid);
 
     if (typeof window !== "undefined") {
       window.dispatchEvent(new Event("dv_drawn_groups_updated"));
@@ -1008,12 +1043,10 @@ export async function dbDeleteMainDraw(
   tournamentSlug: string,
   categoryId: string
 ): Promise<boolean> {
-  try {
-    _mainDrawCache.delete(`${tournamentSlug}_${categoryId}`);
-    if (typeof window !== "undefined") {
-      window.dispatchEvent(new Event("dv_main_draw_updated"));
-    }
+  // Synchronously wipe in-memory cache immediately
+  clearMainDrawCache(tournamentSlug, categoryId);
 
+  try {
     const { data: tourney } = await supabase
       .from("tournaments")
       .select("id, rules")
@@ -1022,10 +1055,35 @@ export async function dbDeleteMainDraw(
 
     if (!tourney) return false;
 
+    let catSlug = categoryId;
+    let catUuid = categoryId;
+    if (tourney.id) {
+      const { data: catRow } = await supabase
+        .from("categories")
+        .select("id, category_slug")
+        .eq("tournament_id", tourney.id)
+        .or(`id.eq.${categoryId},category_slug.eq.${categoryId}`)
+        .maybeSingle();
+
+      if (catRow) {
+        catUuid = catRow.id;
+        catSlug = catRow.category_slug;
+      }
+    }
+
+    clearMainDrawCache(tournamentSlug, catSlug);
+    clearMainDrawCache(tournamentSlug, catUuid);
+
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new Event("dv_main_draw_updated"));
+    }
+
     if (tourney.rules && typeof tourney.rules === "object" && !Array.isArray(tourney.rules)) {
       const existing = tourney.rules as any;
       const mainDraw = { ...(existing.mainDraw || {}) };
       delete mainDraw[categoryId];
+      delete mainDraw[catSlug];
+      delete mainDraw[catUuid];
       const updatedMeta = { ...existing, mainDraw };
 
       const { error } = await supabase

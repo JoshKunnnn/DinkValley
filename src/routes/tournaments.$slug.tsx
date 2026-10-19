@@ -552,11 +552,6 @@ function TournamentPage() {
                         <span className="text-xs font-mono text-muted-foreground">
                           ({percentFilled}% filled)
                         </span>
-                        {category.pendingTeams && category.pendingTeams.length > 0 && (
-                          <span className="text-xs font-mono text-brick font-semibold">
-                            &middot; {category.pendingTeams.length} pending verification
-                          </span>
-                        )}
                       </div>
                     </div>
 
