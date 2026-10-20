@@ -780,7 +780,8 @@ export async function dbUpdateCourtStation(
 
     await supabase
       .from("court_stations")
-      .update({
+      .upsert({
+        court_name: courtName,
         ...(dbStatus !== undefined ? { status: dbStatus } : {}),
         ...(updates.currentMatchId !== undefined ? { current_match_id: updates.currentMatchId } : {}),
         ...(updates.onDeckMatchId !== undefined ? { on_deck_match_id: updates.onDeckMatchId } : {}),
@@ -790,8 +791,7 @@ export async function dbUpdateCourtStation(
           : {}),
         ...(updates.maintenanceNote !== undefined ? { maintenance_note: updates.maintenanceNote } : {}),
         updated_at: new Date().toISOString(),
-      })
-      .eq("court_name", courtName);
+      }, { onConflict: "court_name" });
   } catch (err) {
     console.warn("[Supabase] Failed to update court station:", err);
   }

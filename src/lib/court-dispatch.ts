@@ -9,6 +9,7 @@ import {
   dbSaveDispatchQueue,
   dbDeleteDispatchQueue,
   getCachedDispatchQueue,
+  dbSaveMatch,
 } from "./supabase-service";
 import { isMatchInSameBracket } from "./bracket-utils";
 
@@ -218,13 +219,27 @@ export function reconcileCourtStations(
           modified = true;
         }
       }
-    } else if (st.status === "available" && st.currentMatchId) {
-      stations[c] = {
-        ...st,
-        currentMatchId: null,
-        dispatchedAt: null,
-      };
-      modified = true;
+    } else if (st.status === "available") {
+      // If station was marked available locally, but there IS an active match on this court from the database:
+      const liveOnCourt = matches.find(
+        (m) => m.court === c && (m.status === "live" || m.status === "scheduled")
+      );
+      if (liveOnCourt) {
+        stations[c] = {
+          ...st,
+          currentMatchId: liveOnCourt.id,
+          status: liveOnCourt.status === "live" ? "live" : "warmup",
+          dispatchedAt: liveOnCourt.startedAt ?? Date.now(),
+        };
+        modified = true;
+      } else if (st.currentMatchId) {
+        stations[c] = {
+          ...st,
+          currentMatchId: null,
+          dispatchedAt: null,
+        };
+        modified = true;
+      }
     }
   }
 
@@ -236,8 +251,8 @@ export function reconcileCourtStations(
     if (m.court && FACILITY_COURTS.includes(m.court as FacilityCourt)) {
       const st = stations[m.court as FacilityCourt];
       const isStationAssigned = st && st.currentMatchId === m.id && st.status !== "available";
-      if (!isStationAssigned) {
-        // Match claims to be on a facility court, but the court station is not playing it: move to Queue
+      // Only move to Queue if the court station is actively occupied by a DIFFERENT match
+      if (!isStationAssigned && st && st.currentMatchId && st.currentMatchId !== m.id) {
         matches[i] = {
           ...m,
           court: "Queue",
@@ -436,6 +451,8 @@ export function dispatchMatchToCourt(
       return {
         ...m,
         tournamentSlug: match.tournamentSlug ?? m.tournamentSlug,
+        categoryId: match.categoryId ?? m.categoryId,
+        stage: match.stage ?? m.stage,
         court,
         status: startImmediately ? ("live" as const) : ("scheduled" as const),
         startedAt: startImmediately ? (m.startedAt ?? now) : m.startedAt,
@@ -456,6 +473,8 @@ export function dispatchMatchToCourt(
     updatedMatches.push({
       id: match.id,
       tournamentSlug: match.tournamentSlug,
+      categoryId: match.categoryId,
+      stage: match.stage || "Pool Play",
       court,
       teamAName: match.teamAName,
       teamAPlayers: match.teamAPlayers ?? [],
@@ -477,6 +496,14 @@ export function dispatchMatchToCourt(
   }
 
   saveMatches(updatedMatches);
+
+  // Directly save the dispatched match to Supabase for immediate cross-device sync
+  const dispatchedRecord = updatedMatches.find((m) => m.id === match.id);
+  if (dispatchedRecord) {
+    dbSaveMatch(dispatchedRecord, match.tournamentSlug).catch((err: unknown) =>
+      console.warn("[Supabase] Direct match dispatch save failed:", err)
+    );
+  }
 
   // Update Court Station
   const stations = getCourtStations();

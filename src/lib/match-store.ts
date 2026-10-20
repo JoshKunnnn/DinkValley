@@ -134,27 +134,21 @@ export function enforceFourCourtCapacity(matches: LiveMatch[]): { sanitized: Liv
       }
     }
 
-    // If match is not actively assigned to a court station, ensure court is Queue and not live
-    let updatedStatus = match.status;
-    let updatedStartedAt = match.startedAt;
-    if (!stationMatchIds.has(match.id)) {
-      if (cleanCourt !== "Queue") {
-        cleanCourt = "Queue";
-        modified = true;
-      }
-      if (match.status === "live") {
-        updatedStatus = "scheduled";
-        updatedStartedAt = undefined;
-        modified = true;
-      }
-    } else if (cleanCourt !== "Queue") {
-      // For active/dispatched matches: ensure only 1 match per court
+    // For active/dispatched matches: ensure only 1 match per facility court (Courts 1–4)
+    if (cleanCourt !== "Queue") {
       if (occupiedCourts.has(cleanCourt)) {
         cleanCourt = "Queue";
         modified = true;
       } else {
         occupiedCourts.add(cleanCourt);
       }
+    }
+
+    let updatedStatus = match.status;
+    let updatedStartedAt = match.startedAt;
+    if (cleanCourt === "Queue" && rawCourt !== "Queue" && match.status === "live") {
+      updatedStatus = "scheduled";
+      updatedStartedAt = undefined;
     }
 
     if (cleanCourt !== rawCourt || updatedStatus !== match.status) {

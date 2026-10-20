@@ -47,10 +47,11 @@ import {
   setCourtActiveBracket,
   getCourtActiveBracket,
   isStageMatchingBracket,
+  hydrateCourtStationsFromCloud,
 } from "@/lib/court-dispatch";
 import { getDrawnGroups } from "@/components/admin/BracketDraw";
 import { getMainDrawMatches } from "@/components/admin/DrawsManager";
-import { dbUpdateCourtStation } from "@/lib/supabase-service";
+import { dbUpdateCourtStation, dbSubscribeToLive } from "@/lib/supabase-service";
 
 /**
  * Computes all unassigned matches for a category from drawn groups, direct roster buckets, or main draw playoffs.
@@ -330,10 +331,56 @@ export function CourtDispatch({
     refreshMatches();
   }, [refreshMatches, tournamentSlug, tournament.categories, categoryId]);
 
-  // Initial reconciliation on mount to resolve any stale court station data
+  // Cross-device Realtime Sync: Hydrates court stations from Supabase and listens for cloud updates
   useEffect(() => {
-    reconcileCourtStations();
-  }, []);
+    let mounted = true;
+
+    // 1. Initial Cloud Hydration on mount
+    hydrateCourtStationsFromCloud().then((cloudStations) => {
+      if (mounted) {
+        setStations(cloudStations);
+        reconcileCourtStations(cloudStations);
+      }
+    });
+
+    // 2. Realtime listener for cross-device sync (e.g. desktop admin dispatches court, mobile reflects in real-time)
+    const unsubRealtime = dbSubscribeToLive(
+      () => {
+        // Matches or tournament state changed in cloud database
+        refreshMatches();
+        hydrateCourtStationsFromCloud().then((cloudStations) => {
+          if (mounted) {
+            setStations(cloudStations);
+          }
+        });
+      },
+      () => {
+        // Court stations changed in cloud database
+        hydrateCourtStationsFromCloud().then((cloudStations) => {
+          if (mounted) {
+            setStations(cloudStations);
+            refreshMatches();
+          }
+        });
+      }
+    );
+
+    // 3. Periodic 3s poll fallback to guarantee sync on mobile browsers where WebSockets may sleep
+    const pollInterval = setInterval(() => {
+      hydrateCourtStationsFromCloud().then((cloudStations) => {
+        if (mounted) {
+          setStations(cloudStations);
+        }
+      });
+      refreshMatches();
+    }, 3000);
+
+    return () => {
+      mounted = false;
+      unsubRealtime();
+      clearInterval(pollInterval);
+    };
+  }, [refreshMatches]);
 
   // Detect newly concluded matches (e.g. from Umpire) to notify organizer that next matchups can be added
   const prevMatchesRef = useRef<LiveMatch[]>(matches);
@@ -435,11 +482,7 @@ export function CourtDispatch({
 
     for (const court of FACILITY_COURTS) {
       const station = stations[court];
-      if (station.status === "available" && !station.currentMatchId) {
-        map[court] = null;
-        continue;
-      }
-      if (station.currentMatchId) {
+      if (station?.currentMatchId) {
         const found = matches.find((m) => m.id === station.currentMatchId && m.status !== "final");
         if (found) {
           map[court] = found;
@@ -450,7 +493,9 @@ export function CourtDispatch({
       const active = matches.find((m) => m.court === court && (m.status === "live" || m.status === "scheduled"));
       if (active) {
         map[court] = active;
+        continue;
       }
+      map[court] = null;
     }
 
     return map;
