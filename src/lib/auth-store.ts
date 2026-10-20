@@ -1,6 +1,11 @@
 import { supabase } from "@/integrations/supabase/client";
 import { getAccessCodes, saveAccessCodes, validateAndUseCode, validateAndUseCodeAsync } from "./access-codes";
-import { dbCheckAccessCode } from "./supabase-service";
+import {
+  dbCheckAccessCode,
+  dbSaveCloudStaffAccount,
+  dbSyncCloudStaffAccounts,
+  type CloudStaffUser,
+} from "./supabase-service";
 
 export type StaffRole = "admin" | "umpire";
 
@@ -60,6 +65,30 @@ export function saveStaffUsers(users: StaffUser[]): void {
   } catch {
     // ignore
   }
+}
+
+/**
+ * Merge cloud accounts into local storage safely without duplicating emails.
+ */
+export function mergeAndSaveStaffUsers(cloudUsers: (StaffUser | CloudStaffUser)[]): StaffUser[] {
+  const localUsers = getStaffUsers();
+  const map = new Map<string, StaffUser>();
+  localUsers.forEach((u) => map.set(u.email.toLowerCase(), u));
+  cloudUsers.forEach((cu) => {
+    const emailKey = cu.email.toLowerCase();
+    const existing = map.get(emailKey);
+    map.set(emailKey, {
+      name: cu.name || existing?.name || "Official",
+      email: emailKey,
+      password: cu.password || existing?.password || "",
+      role: cu.role,
+      accessCode: cu.accessCode || existing?.accessCode,
+      certifiedAt: cu.certifiedAt || existing?.certifiedAt,
+    });
+  });
+  const merged = Array.from(map.values());
+  saveStaffUsers(merged);
+  return merged;
 }
 
 export function getAuthenticatedStaff(): { role: StaffRole; name: string } | null {
@@ -185,12 +214,29 @@ export async function loginWithCredentials(
     // continue to local credential store below
   }
 
-  // 2. Fallback local / demo accounts for offline compatibility
-  const users = getStaffUsers();
+  // 2. Check local accounts
+  let users = getStaffUsers();
   let user = users.find(
     (u) => u.email.toLowerCase() === cleanEmail && u.password === cleanPassword
   );
 
+  // 3. If not found locally, fetch latest accounts from Supabase cloud
+  // (allows accounts created on mobile to authenticate on PC and vice versa)
+  if (!user) {
+    try {
+      const cloudAccounts = await dbSyncCloudStaffAccounts(users);
+      if (Array.isArray(cloudAccounts) && cloudAccounts.length > 0) {
+        users = mergeAndSaveStaffUsers(cloudAccounts);
+        user = users.find(
+          (u) => u.email.toLowerCase() === cleanEmail && u.password === cleanPassword
+        );
+      }
+    } catch (err) {
+      console.warn("[Auth] Cloud staff account sync during login notice:", err);
+    }
+  }
+
+  // 4. Fallback default system accounts
   if (!user) {
     if (cleanEmail === "admin@dinkvalley.com" && cleanPassword === "admin123") {
       user = {
@@ -305,6 +351,28 @@ export async function registerStaffAccount(data: {
   }
   saveStaffUsers(users);
 
+  // 4. Save to Supabase Cloud so the account is immediately active across all devices (Mobile <-> PC)
+  try {
+    await dbSaveCloudStaffAccount(newUser);
+  } catch (err) {
+    console.warn("[Auth] Failed to sync new staff account to cloud:", err);
+  }
+
   setStaffSession(finalRole, cleanName);
   return { success: true, role: finalRole };
+}
+
+// Background auto-sync on initialization to ensure cross-device parity
+if (typeof window !== "undefined") {
+  setTimeout(async () => {
+    try {
+      const localUsers = getStaffUsers();
+      const cloudUsers = await dbSyncCloudStaffAccounts(localUsers);
+      if (Array.isArray(cloudUsers) && cloudUsers.length > 0) {
+        mergeAndSaveStaffUsers(cloudUsers);
+      }
+    } catch {
+      // background sync catch
+    }
+  }, 400);
 }

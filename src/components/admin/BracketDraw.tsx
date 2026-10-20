@@ -1243,9 +1243,17 @@ function TeamSlot({
             <span className="block font-semibold text-foreground truncate text-xs sm:text-sm">
               {slot.team.name}
             </span>
-            <span className="block text-[0.65rem] text-foreground/80 font-bold truncate">
-              {slot.team.players.join(" & ")}
-            </span>
+            <div className="flex items-center gap-1.5 text-[0.65rem] text-foreground/80 font-medium truncate mt-0.5">
+              <span className="truncate">{slot.team.players.join(" & ")}</span>
+              {slot.team.club && (
+                <>
+                  <span className="text-muted-foreground/40 shrink-0">•</span>
+                  <span className="text-[0.6rem] px-1.5 py-0.2 rounded bg-charcoal/40 text-sand/80 border border-border/60 shrink-0 font-medium">
+                    {slot.team.club}
+                  </span>
+                </>
+              )}
+            </div>
           </>
         ) : (
           <div className="space-y-1.5 py-0.5">

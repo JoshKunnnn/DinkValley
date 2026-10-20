@@ -196,7 +196,9 @@ export function validateAndUseCode(
       };
     }
 
-    if (match.isUsed) {
+    const isMasterCode = ["DV-ADMIN", "DV-ADMIN-2026", "UMP-2026", "DV-UMPIRE-2026"].includes(cleanCode);
+
+    if (match.isUsed && !isMasterCode) {
       return {
         valid: false,
         role: effectiveRole,

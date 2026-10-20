@@ -211,12 +211,48 @@ export function SimpleBracketView({
       .map((s) => s.team)
       .filter((t): t is Team => t !== null);
 
+    const categoryTeams = category?.teams || [];
     const items: SimpleMatchItem[] = [];
-    const tableMap = new Map<string, { name: string; w: number; l: number; pd: number }>();
-    teams.forEach((t) => tableMap.set(t.name, { name: t.name, w: 0, l: 0, pd: 0 }));
+    const tableMap = new Map<
+      string,
+      {
+        name: string;
+        w: number;
+        l: number;
+        pd: number;
+        team?: Team | undefined;
+        players?: string[] | undefined;
+        club?: string | undefined;
+      }
+    >();
+
+    teams.forEach((t) => {
+      const fullTeam =
+        categoryTeams.find(
+          (ct) => ct.id === t.id || ct.name.toLowerCase() === t.name.toLowerCase()
+        ) || t;
+      tableMap.set(t.name, {
+        name: t.name,
+        w: 0,
+        l: 0,
+        pd: 0,
+        team: fullTeam,
+        players: fullTeam.players,
+        club: fullTeam.club,
+      });
+    });
 
     const pairs = generateBalancedRoundRobinPairs(teams);
     pairs.forEach(([a, b], pIdx) => {
+      const teamAModel =
+        categoryTeams.find(
+          (ct) => ct.id === a.id || ct.name.toLowerCase() === a.name.toLowerCase()
+        ) || a;
+      const teamBModel =
+        categoryTeams.find(
+          (ct) => ct.id === b.id || ct.name.toLowerCase() === b.name.toLowerCase()
+        ) || b;
+
       const live = findLiveMatchForTeams(matches, a.name, b.name);
       const flipped = live ? live.teamAName !== a.name : false;
       const scoreA = live ? (flipped ? live.score.teamBScore : live.score.teamAScore) : 0;
@@ -257,8 +293,8 @@ export function SimpleBracketView({
         key: `${currentGroup.letter}-${a.id}-${b.id}-${pIdx}`,
         teamAName: a.name,
         teamBName: b.name,
-        teamA: a,
-        teamB: b,
+        teamA: teamAModel,
+        teamB: teamBModel,
         status: statusKind,
         scoreA,
         scoreB,
@@ -481,7 +517,7 @@ export function SimpleBracketView({
                           className={`w-6 h-6 rounded-full flex items-center justify-center font-mono text-xs font-bold ${
                             isAdvancing
                               ? "bg-pickle text-sand"
-                              : "bg-charcoal text-sand/60"
+                              : "bg-charcoal text-sand"
                           }`}
                         >
                           #{rank + 1}
@@ -497,8 +533,23 @@ export function SimpleBracketView({
                               </span>
                             )}
                           </div>
+                          {((team.players && team.players.length > 0) || team.club) && (
+                            <div className="flex items-center gap-1.5 text-xs text-foreground/80 truncate mt-0.5 font-normal">
+                              {team.players && team.players.length > 0 && (
+                                <span className="truncate">{team.players.join(" & ")}</span>
+                              )}
+                              {team.club && (
+                                <>
+                                  <span className="text-muted-foreground/50 shrink-0">•</span>
+                                  <span className="text-[0.65rem] px-1.5 py-0.2 rounded bg-charcoal text-sand border border-white/20 shrink-0 font-bold">
+                                    {team.club}
+                                  </span>
+                                </>
+                              )}
+                            </div>
+                          )}
                           {isAdvancing && (
-                            <span className="text-[0.65rem] font-bold uppercase tracking-wider text-pickle block">
+                            <span className="text-[0.65rem] font-bold uppercase tracking-wider text-pickle block mt-0.5">
                               Advances to Finals
                             </span>
                           )}
@@ -508,7 +559,7 @@ export function SimpleBracketView({
                       <div className="flex items-center gap-3 sm:gap-4 font-mono text-xs sm:text-sm shrink-0">
                         <div className="w-14 flex items-center justify-center gap-1.5">
                           <span className="text-pickle font-bold">{team.w}W</span>
-                          <span className="text-foreground/50">{team.l}L</span>
+                          <span className="text-foreground/80 font-bold">{team.l}L</span>
                         </div>
                         <span
                           className={`w-12 text-right font-bold ${
@@ -516,7 +567,7 @@ export function SimpleBracketView({
                               ? "text-pickle"
                               : team.pd < 0
                                 ? "text-red-400"
-                                : "text-foreground/60"
+                                : "text-foreground/80 font-bold"
                           }`}
                         >
                           {team.pd > 0 ? `+${team.pd}` : team.pd}
@@ -557,6 +608,10 @@ export function SimpleBracketView({
                   teamBName: m.teamBName,
                   teamA: m.teamA,
                   teamB: m.teamB,
+                  teamAPlayers: m.teamA?.players,
+                  teamAClub: m.teamA?.club,
+                  teamBPlayers: m.teamB?.players,
+                  teamBClub: m.teamB?.club,
                   court: m.court,
                   round: m.round,
                 }))}
@@ -576,6 +631,10 @@ export function SimpleBracketView({
                   teamBName: m.teamBName,
                   teamA: m.teamA,
                   teamB: m.teamB,
+                  teamAPlayers: m.teamA?.players,
+                  teamAClub: m.teamA?.club,
+                  teamBPlayers: m.teamB?.players,
+                  teamBClub: m.teamB?.club,
                   scoreA: m.scoreA,
                   scoreB: m.scoreB,
                   winnerName: m.winnerName || (m.scoreA > m.scoreB ? m.teamAName : m.teamBName),
@@ -666,17 +725,34 @@ function renderMatchCard(
               : "bg-background border border-transparent"
           } ${m.teamA ? "cursor-pointer hover:bg-pickle/10" : ""}`}
         >
-          <span
-            className={`text-base sm:text-lg truncate ${
-              m.winnerName === m.teamAName
-                ? "text-pickle font-bold"
-                : m.status === "done" && m.winnerName && m.winnerName !== m.teamAName
-                  ? "text-foreground/55"
-                  : "text-foreground font-semibold"
-            }`}
-          >
-            {m.teamAName}
-          </span>
+          <div className="min-w-0">
+            <span
+              className={`text-base sm:text-lg truncate block ${
+                m.winnerName === m.teamAName
+                  ? "text-pickle font-bold"
+                  : m.status === "done" && m.winnerName && m.winnerName !== m.teamAName
+                    ? "text-foreground/75 font-semibold"
+                    : "text-foreground font-semibold"
+              }`}
+            >
+              {m.teamAName}
+            </span>
+            {((m.teamA?.players && m.teamA.players.length > 0) || m.teamA?.club) && (
+              <div className="flex items-center gap-1.5 text-xs text-foreground/80 truncate mt-0.5 font-normal">
+                {m.teamA?.players && m.teamA.players.length > 0 && (
+                  <span className="truncate">{m.teamA.players.join(" & ")}</span>
+                )}
+                {m.teamA?.club && (
+                  <>
+                    <span className="text-muted-foreground/50 shrink-0">•</span>
+                    <span className="text-[0.65rem] px-1.5 py-0.2 rounded bg-charcoal text-sand border border-white/20 shrink-0 font-bold">
+                      {m.teamA.club}
+                    </span>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
           <span className="font-display text-xl sm:text-2xl text-foreground font-bold shrink-0">
             {m.status === "next" ? "-" : m.scoreA}
           </span>
@@ -691,17 +767,34 @@ function renderMatchCard(
               : "bg-background border border-transparent"
           } ${m.teamB ? "cursor-pointer hover:bg-pickle/10" : ""}`}
         >
-          <span
-            className={`text-base sm:text-lg truncate ${
-              m.winnerName === m.teamBName
-                ? "text-pickle font-bold"
-                : m.status === "done" && m.winnerName && m.winnerName !== m.teamBName
-                  ? "text-foreground/55"
-                  : "text-foreground font-semibold"
-            }`}
-          >
-            {m.teamBName}
-          </span>
+          <div className="min-w-0">
+            <span
+              className={`text-base sm:text-lg truncate block ${
+                m.winnerName === m.teamBName
+                  ? "text-pickle font-bold"
+                  : m.status === "done" && m.winnerName && m.winnerName !== m.teamBName
+                    ? "text-foreground/75 font-semibold"
+                    : "text-foreground font-semibold"
+              }`}
+            >
+              {m.teamBName}
+            </span>
+            {((m.teamB?.players && m.teamB.players.length > 0) || m.teamB?.club) && (
+              <div className="flex items-center gap-1.5 text-xs text-foreground/80 truncate mt-0.5 font-normal">
+                {m.teamB?.players && m.teamB.players.length > 0 && (
+                  <span className="truncate">{m.teamB.players.join(" & ")}</span>
+                )}
+                {m.teamB?.club && (
+                  <>
+                    <span className="text-muted-foreground/50 shrink-0">•</span>
+                    <span className="text-[0.65rem] px-1.5 py-0.2 rounded bg-charcoal text-sand border border-white/20 shrink-0 font-bold">
+                      {m.teamB.club}
+                    </span>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
           <span className="font-display text-xl sm:text-2xl text-foreground font-bold shrink-0">
             {m.status === "next" ? "-" : m.scoreB}
           </span>

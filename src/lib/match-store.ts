@@ -39,8 +39,10 @@ export type LiveMatch = {
   court: string;
   teamAName: string;
   teamAPlayers: string[];
+  teamAClub?: string | undefined;
   teamBName: string;
   teamBPlayers: string[];
+  teamBClub?: string | undefined;
   status: MatchStatus;
   score: LiveScore;
   winnerTeam: string | undefined;
@@ -695,7 +697,7 @@ export function syncDrawnBracketsToLiveMatches(
   categoryId: string,
   drawnGroups: {
     letter: string;
-    slots: { team: { id: string; name: string; players: string[] } | null }[];
+    slots: { team: { id: string; name: string; players: string[]; club?: string | undefined } | null }[];
   }[],
 ): LiveMatch[] {
   const currentMatches = getMatches();
@@ -705,7 +707,7 @@ export function syncDrawnBracketsToLiveMatches(
   for (const group of drawnGroups) {
     const teams = group.slots
       .map((s) => s.team)
-      .filter((t): t is { id: string; name: string; players: string[] } => t !== null);
+      .filter((t): t is { id: string; name: string; players: string[]; club?: string | undefined } => t !== null);
 
     const pairs = generateBalancedRoundRobinPairs(teams);
     pairs.forEach(([teamA, teamB], pIdx) => {
@@ -721,6 +723,8 @@ export function syncDrawnBracketsToLiveMatches(
           categoryId: categoryId || existing.categoryId,
           stage: existing.stage || `Bracket ${group.letter} (Pool Play)`,
           bracketLetter: existing.bracketLetter || group.letter,
+          teamAClub: existing.teamAClub || teamA.club,
+          teamBClub: existing.teamBClub || teamB.club,
         });
       } else {
         newMatches.push({
@@ -728,8 +732,10 @@ export function syncDrawnBracketsToLiveMatches(
           court: courtName,
           teamAName: teamA.name,
           teamAPlayers: teamA.players,
+          teamAClub: teamA.club,
           teamBName: teamB.name,
           teamBPlayers: teamB.players,
+          teamBClub: teamB.club,
           status: "scheduled",
           score: createInitialScore(),
           winnerTeam: undefined,

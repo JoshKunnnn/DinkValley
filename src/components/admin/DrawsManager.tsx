@@ -1148,8 +1148,16 @@ export function DrawsManager({
                                     <div className="font-semibold text-foreground truncate max-w-[140px] sm:max-w-[180px]">
                                       {row.team.name}
                                     </div>
-                                    <div className="text-[0.65rem] text-muted-foreground truncate">
-                                      {row.team.players.join(" & ")}
+                                    <div className="flex items-center gap-1.5 text-[0.65rem] text-muted-foreground truncate mt-0.5">
+                                      <span className="truncate">{row.team.players.join(" & ")}</span>
+                                      {row.team.club && (
+                                        <>
+                                          <span className="text-muted-foreground/40 shrink-0">•</span>
+                                          <span className="text-[0.6rem] px-1.5 py-0.2 rounded bg-charcoal/40 text-sand/80 border border-border/60 shrink-0 font-medium">
+                                            {row.team.club}
+                                          </span>
+                                        </>
+                                      )}
                                     </div>
                                   </td>
                                   <td className="py-2 px-1 text-center">{row.played}</td>
@@ -1205,8 +1213,16 @@ export function DrawsManager({
                                     <div className="font-semibold text-xs text-foreground truncate">
                                       {row.team.name}
                                     </div>
-                                    <div className="text-[0.62rem] text-muted-foreground truncate">
-                                      {row.team.players.join(" & ")}
+                                    <div className="flex items-center gap-1 text-[0.62rem] text-muted-foreground truncate mt-0.5">
+                                      <span className="truncate">{row.team.players.join(" & ")}</span>
+                                      {row.team.club && (
+                                        <>
+                                          <span className="text-muted-foreground/40 shrink-0">•</span>
+                                          <span className="text-[0.6rem] px-1 py-0.2 rounded bg-charcoal/40 text-sand/80 border border-border/60 shrink-0 font-medium">
+                                            {row.team.club}
+                                          </span>
+                                        </>
+                                      )}
                                     </div>
                                   </div>
                                 </div>

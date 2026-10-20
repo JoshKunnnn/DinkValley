@@ -1371,3 +1371,172 @@ export async function dbRevokeAccessCode(id: string): Promise<boolean> {
   }
 }
 
+/**
+ * Cloud Staff User Representation
+ */
+export type CloudStaffUser = {
+  name: string;
+  email: string;
+  password?: string | undefined;
+  passwordHash?: string | undefined;
+  role: "admin" | "umpire";
+  accessCode?: string | undefined;
+  certifiedAt?: string | undefined;
+};
+
+/**
+ * Fetch all registered staff accounts from Supabase cloud.
+ */
+export async function dbGetCloudStaffAccounts(): Promise<CloudStaffUser[]> {
+  try {
+    const { data: tourney } = await supabase
+      .from("tournaments")
+      .select("rules")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (!tourney?.rules || typeof tourney.rules !== "object" || Array.isArray(tourney.rules)) {
+      return [];
+    }
+
+    const map = (tourney.rules as any).staffAccounts;
+    if (map && typeof map === "object" && !Array.isArray(map)) {
+      return Object.values(map) as CloudStaffUser[];
+    }
+    return [];
+  } catch (err) {
+    console.warn("[Supabase] Failed to fetch cloud staff accounts:", err);
+    return [];
+  }
+}
+
+/**
+ * Save or update a registered staff account in Supabase cloud.
+ */
+export async function dbSaveCloudStaffAccount(user: CloudStaffUser): Promise<boolean> {
+  try {
+    const { data: tourney } = await supabase
+      .from("tournaments")
+      .select("id, rules")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (!tourney) return false;
+
+    const existingRules =
+      tourney.rules && typeof tourney.rules === "object" && !Array.isArray(tourney.rules)
+        ? (tourney.rules as any)
+        : { rules: [] };
+
+    const currentStaffMap = existingRules.staffAccounts || {};
+    const updatedStaffMap = {
+      ...currentStaffMap,
+      [user.email.toLowerCase()]: {
+        ...user,
+        email: user.email.toLowerCase(),
+      },
+    };
+
+    const updatedRules = {
+      ...existingRules,
+      staffAccounts: updatedStaffMap,
+    };
+
+    const { error } = await supabase
+      .from("tournaments")
+      .update({ rules: updatedRules, updated_at: new Date().toISOString() })
+      .eq("id", tourney.id);
+
+    if (error) {
+      console.warn("[Supabase] Error saving staff account to cloud:", error.message);
+      return false;
+    }
+
+    // Also mark access code as used in access_codes table if applicable
+    if (user.accessCode) {
+      try {
+        await supabase
+          .from("access_codes")
+          .update({
+            used_at: new Date().toISOString(),
+            used_by_email: user.email.toLowerCase(),
+          })
+          .eq("code", user.accessCode.trim().toUpperCase());
+      } catch {
+        // ignore
+      }
+    }
+
+    return true;
+  } catch (err) {
+    console.warn("[Supabase] Unexpected error saving cloud staff account:", err);
+    return false;
+  }
+}
+
+/**
+ * Two-way merge of local staff accounts and Supabase cloud staff accounts.
+ */
+export async function dbSyncCloudStaffAccounts(localUsers: CloudStaffUser[]): Promise<CloudStaffUser[]> {
+  try {
+    const { data: tourney } = await supabase
+      .from("tournaments")
+      .select("id, rules")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (!tourney) return localUsers;
+
+    const existingRules =
+      tourney.rules && typeof tourney.rules === "object" && !Array.isArray(tourney.rules)
+        ? (tourney.rules as any)
+        : { rules: [] };
+
+    const cloudStaffMap: Record<string, CloudStaffUser> = {
+      ...(existingRules.staffAccounts || {}),
+    };
+
+    let needsCloudUpdate = false;
+
+    // Check if any local users are not in cloud
+    for (const u of localUsers) {
+      const emailKey = u.email.toLowerCase();
+      if (!cloudStaffMap[emailKey]) {
+        cloudStaffMap[emailKey] = {
+          ...u,
+          email: emailKey,
+        };
+        needsCloudUpdate = true;
+      } else if (u.password && !cloudStaffMap[emailKey].password) {
+        cloudStaffMap[emailKey].password = u.password;
+        needsCloudUpdate = true;
+      }
+    }
+
+    if (needsCloudUpdate) {
+      const updatedRules = {
+        ...existingRules,
+        staffAccounts: cloudStaffMap,
+      };
+
+      try {
+        await supabase
+          .from("tournaments")
+          .update({ rules: updatedRules, updated_at: new Date().toISOString() })
+          .eq("id", tourney.id);
+      } catch {
+        // ignore
+      }
+    }
+
+    return Object.values(cloudStaffMap);
+  } catch (err) {
+    console.warn("[Supabase] Failed to sync staff accounts:", err);
+    return localUsers;
+  }
+}
+
+

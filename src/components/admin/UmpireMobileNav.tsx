@@ -9,12 +9,11 @@
 
 import {
   Swords,
-  LayoutDashboard,
-  Tv2,
+  Trophy,
   LogOut,
 } from "lucide-react";
 
-type UmpireTab = "desk" | "console" | "scoreboard";
+type UmpireTab = "console" | "results" | "scoreboard" | "desk";
 
 interface UmpireMobileNavProps {
   activeTab: UmpireTab;
@@ -28,9 +27,8 @@ const UMPIRE_TABS: {
   label: string;
   icon: React.ElementType;
 }[] = [
-  { key: "desk", label: "Desk", icon: LayoutDashboard },
-  { key: "console", label: "Console", icon: Swords },
-  { key: "scoreboard", label: "Scores", icon: Tv2 },
+  { key: "console", label: "Courts", icon: Swords },
+  { key: "results", label: "Results", icon: Trophy },
 ];
 
 export function UmpireMobileNav({
@@ -53,7 +51,7 @@ export function UmpireMobileNav({
           relative
           bg-charcoal/96 backdrop-blur-md
           border-t border-white/10
-          grid grid-cols-4
+          grid grid-cols-3
           pb-[env(safe-area-inset-bottom,0.75rem)]
         "
         style={{ boxShadow: "0 -4px 24px rgba(0,0,0,0.5)" }}
@@ -96,12 +94,12 @@ export function UmpireMobileNav({
                 className={
                   isActive
                     ? "text-pickle drop-shadow-[0_0_4px_rgba(34,197,94,0.7)] transition-colors"
-                    : "text-sand/50 transition-colors"
+                    : "text-sand/80 transition-colors"
                 }
               />
               <span
                 className={`text-[0.6rem] font-bold uppercase tracking-wider leading-none transition-colors ${
-                  isActive ? "text-pickle" : "text-sand/50"
+                  isActive ? "text-pickle" : "text-sand/80"
                 }`}
               >
                 {label}
@@ -117,8 +115,8 @@ export function UmpireMobileNav({
           onClick={onLogout}
           className="relative flex flex-col items-center justify-center gap-1 pt-3 pb-1 cursor-pointer select-none transition-all"
         >
-          <LogOut size={20} strokeWidth={1.5} className="text-sand/40 hover:text-brick transition-colors" />
-          <span className="text-[0.6rem] font-bold uppercase tracking-wider leading-none text-sand/40">
+          <LogOut size={20} strokeWidth={1.5} className="text-sand/70 hover:text-brick transition-colors" />
+          <span className="text-[0.6rem] font-bold uppercase tracking-wider leading-none text-sand/70">
             Exit
           </span>
         </button>

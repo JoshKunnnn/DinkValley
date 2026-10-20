@@ -8,6 +8,10 @@ export type FinishedMatchResult = {
   teamBName: string;
   teamA?: Team | null | undefined;
   teamB?: Team | null | undefined;
+  teamAPlayers?: string[] | undefined;
+  teamAClub?: string | undefined;
+  teamBPlayers?: string[] | undefined;
+  teamBClub?: string | undefined;
   scoreA: number;
   scoreB: number;
   winnerName: string;
@@ -109,6 +113,18 @@ export function FinalResultsView({
           const margin = Math.abs(r.scoreA - r.scoreB);
           const formattedCourt = formatCourtName(r.court);
 
+          const playersA =
+            (r.teamAPlayers && r.teamAPlayers.length > 0)
+              ? r.teamAPlayers
+              : r.teamA?.players;
+          const clubA = r.teamAClub || r.teamA?.club;
+
+          const playersB =
+            (r.teamBPlayers && r.teamBPlayers.length > 0)
+              ? r.teamBPlayers
+              : r.teamB?.players;
+          const clubB = r.teamBClub || r.teamB?.club;
+
           return (
             <div
               key={r.key}
@@ -155,17 +171,34 @@ export function FinalResultsView({
                         Winner
                       </span>
                     )}
-                    <span
-                      className={`text-sm sm:text-base truncate ${
-                        isWinnerA ? "text-pickle font-bold" : "text-foreground/75"
-                      }`}
-                    >
-                      {r.teamAName}
-                    </span>
+                    <div className="min-w-0">
+                      <span
+                        className={`text-sm sm:text-base truncate block ${
+                          isWinnerA ? "text-pickle font-bold" : "text-foreground/75 font-semibold"
+                        }`}
+                      >
+                        {r.teamAName}
+                      </span>
+                      {((playersA && playersA.length > 0) || clubA) && (
+                        <div className="flex items-center gap-1.5 text-xs text-muted-foreground truncate mt-0.5 font-normal">
+                          {playersA && playersA.length > 0 && (
+                            <span className="truncate">{playersA.join(" & ")}</span>
+                          )}
+                          {clubA && (
+                            <>
+                              <span className="text-muted-foreground/50 shrink-0">•</span>
+                              <span className="text-[0.65rem] px-1.5 py-0.2 rounded bg-charcoal text-sand border border-white/20 shrink-0 font-bold">
+                                {clubA}
+                              </span>
+                            </>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   </div>
                   <span
                     className={`font-display text-xl sm:text-2xl font-bold shrink-0 ${
-                      isWinnerA ? "text-pickle" : "text-foreground/75"
+                      isWinnerA ? "text-pickle" : "text-foreground"
                     }`}
                   >
                     {r.scoreA}
@@ -183,17 +216,34 @@ export function FinalResultsView({
                 >
                   <div className="flex items-center gap-2 min-w-0">
                     {isWinnerB && (
-                      <span className="px-2 py-0.5 rounded text-[0.65rem] font-bold uppercase tracking-wider bg-pickle text-sand font-mono shrink-0">
+                      <span className="px-2 py-0.5 rounded text-[0.65rem] font-bold uppercase tracking-wider bg-pickle text-sand font-sans shrink-0">
                         Winner
                       </span>
                     )}
-                    <span
-                      className={`text-sm sm:text-base truncate ${
-                        isWinnerB ? "text-pickle font-bold" : "text-foreground/75"
-                      }`}
-                    >
-                      {r.teamBName}
-                    </span>
+                    <div className="min-w-0">
+                      <span
+                        className={`text-sm sm:text-base truncate block ${
+                          isWinnerB ? "text-pickle font-bold" : "text-foreground font-semibold"
+                        }`}
+                      >
+                        {r.teamBName}
+                      </span>
+                      {((playersB && playersB.length > 0) || clubB) && (
+                        <div className="flex items-center gap-1.5 text-xs text-muted-foreground truncate mt-0.5 font-normal">
+                          {playersB && playersB.length > 0 && (
+                            <span className="truncate">{playersB.join(" & ")}</span>
+                          )}
+                          {clubB && (
+                            <>
+                              <span className="text-muted-foreground/50 shrink-0">•</span>
+                              <span className="text-[0.65rem] px-1.5 py-0.2 rounded bg-charcoal text-sand border border-white/20 shrink-0 font-bold">
+                                {clubB}
+                              </span>
+                            </>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   </div>
                   <span
                     className={`font-display text-xl sm:text-2xl font-bold shrink-0 ${

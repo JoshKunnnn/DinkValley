@@ -49,8 +49,10 @@ export type QueueItem = {
   stage: string; // e.g. "Pool A - Round 1", "Quarterfinal 2"
   teamAName: string;
   teamAPlayers: string[];
+  teamAClub?: string | undefined;
   teamBName: string;
   teamBPlayers: string[];
+  teamBClub?: string | undefined;
   priority: number; // 1, 2, 3...
   status: "queued" | "on_deck" | "dispatched" | "live" | "completed";
   assignedCourt: FacilityCourt | null;
@@ -419,8 +421,10 @@ export function dispatchMatchToCourt(
     stage?: string | undefined;
     teamAName: string;
     teamAPlayers?: string[] | undefined;
+    teamAClub?: string | undefined;
     teamBName: string;
     teamBPlayers?: string[] | undefined;
+    teamBClub?: string | undefined;
   },
   umpire?: string | undefined,
   startImmediately = false,
@@ -432,8 +436,8 @@ export function dispatchMatchToCourt(
   }
 
   // Validate that neither team nor player is already live or on-deck on another court
-  const conflictA = checkSimultaneousPlayConflict(match.teamAName, match.teamAPlayers, match.tournamentSlug);
-  const conflictB = checkSimultaneousPlayConflict(match.teamBName, match.teamBPlayers, match.tournamentSlug);
+  const conflictA = checkSimultaneousPlayConflict(match.teamAName, match.teamAPlayers, match.tournamentSlug, match.teamAClub);
+  const conflictB = checkSimultaneousPlayConflict(match.teamBName, match.teamBPlayers, match.tournamentSlug, match.teamBClub);
   const conflict = conflictA || conflictB;
   if (conflict && conflict.court !== court) {
     console.warn(`[Dispatch Rejected] ${conflict.teamName} is already ${conflict.status} on ${conflict.court}`);
@@ -478,8 +482,10 @@ export function dispatchMatchToCourt(
       court,
       teamAName: match.teamAName,
       teamAPlayers: match.teamAPlayers ?? [],
+      teamAClub: match.teamAClub,
       teamBName: match.teamBName,
       teamBPlayers: match.teamBPlayers ?? [],
+      teamBClub: match.teamBClub,
       status: startImmediately ? "live" : "scheduled",
       score: {
         teamAScore: 0,
@@ -620,7 +626,7 @@ export function autoDispatchNext(court: FacilityCourt, tournamentSlug?: string, 
     .filter((q) => q.status === "queued" || q.status === "on_deck")
     .filter((q) => !tournamentSlug || !q.tournamentSlug || q.tournamentSlug === tournamentSlug)
     .filter((q) => isStageMatchingBracket(q.stage, activeBracket))
-    .filter((q) => !checkSimultaneousPlayConflict(q.teamAName, q.teamAPlayers, q.tournamentSlug || tournamentSlug) && !checkSimultaneousPlayConflict(q.teamBName, q.teamBPlayers, q.tournamentSlug || tournamentSlug))
+    .filter((q) => !checkSimultaneousPlayConflict(q.teamAName, q.teamAPlayers, q.tournamentSlug || tournamentSlug, q.teamAClub) && !checkSimultaneousPlayConflict(q.teamBName, q.teamBPlayers, q.tournamentSlug || tournamentSlug, q.teamBClub))
     .filter((q) => isMatchInSameBracket(q.tournamentSlug || tournamentSlug || "", q.categoryId || "", q.stage, q.teamAName, q.teamBName))
     .sort((a, b) => a.priority - b.priority);
 
@@ -634,8 +640,10 @@ export function autoDispatchNext(court: FacilityCourt, tournamentSlug?: string, 
     stage: nextMatch.stage,
     teamAName: nextMatch.teamAName,
     teamAPlayers: nextMatch.teamAPlayers,
+    teamAClub: nextMatch.teamAClub,
     teamBName: nextMatch.teamBName,
     teamBPlayers: nextMatch.teamBPlayers,
+    teamBClub: nextMatch.teamBClub,
   }, umpire);
 
   return nextMatch;
@@ -1103,28 +1111,76 @@ export type RestWarning = {
   court: string;
 };
 
+/**
+ * Determines whether two player entries refer to the exact same individual.
+ * Rule: Treat as the same person ONLY if BOTH their partner AND club match.
+ * If either their partner or club differs, they are considered different individuals.
+ */
+export function isSamePerson(
+  player1: string,
+  partner1: string | undefined,
+  club1: string | undefined,
+  player2: string,
+  partner2: string | undefined,
+  club2: string | undefined,
+): boolean {
+  const p1 = player1.trim().toLowerCase();
+  const p2 = player2.trim().toLowerCase();
+  if (!p1 || !p2 || p1 !== p2) return false;
+
+  const part1 = (partner1 ?? "").trim().toLowerCase();
+  const part2 = (partner2 ?? "").trim().toLowerCase();
+  const c1 = (club1 ?? "").trim().toLowerCase();
+  const c2 = (club2 ?? "").trim().toLowerCase();
+
+  // If partner is not the same, they are different players
+  if (part1 !== part2) return false;
+
+  // If club is not the same, they are different players
+  if (c1 !== c2) return false;
+
+  return true;
+}
+
 export function checkRestPeriodConflict(
   teamName: string,
   players?: string[],
   thresholdMinutes = 20,
+  club?: string,
 ): RestWarning | null {
   const matches = getMatches();
   const now = Date.now();
   const cleanTeam = teamName.trim().toLowerCase();
-  const cleanPlayers = (players ?? []).map((p) => p.trim().toLowerCase()).filter(Boolean);
+  const cleanPlayers = (players ?? []).map((p) => p.trim()).filter(Boolean);
 
   const finishedMatches = matches.filter((m) => {
     if (m.status !== "final" || !m.endedAt) return false;
 
     if (cleanPlayers.length > 0) {
-      const matchPlayers = [
-        ...(m.teamAPlayers ?? []).map((p) => p.trim().toLowerCase()),
-        ...(m.teamBPlayers ?? []).map((p) => p.trim().toLowerCase()),
-      ].filter(Boolean);
+      const teamAPlayers = (m.teamAPlayers ?? []).map((p) => p.trim()).filter(Boolean);
+      const teamBPlayers = (m.teamBPlayers ?? []).map((p) => p.trim()).filter(Boolean);
 
-      if (matchPlayers.length > 0) {
-        return cleanPlayers.some((p) => matchPlayers.includes(p));
+      for (let i = 0; i < cleanPlayers.length; i++) {
+        const player = cleanPlayers[i]!;
+        const candidatePartner = cleanPlayers.find((_, idx) => idx !== i) || "";
+
+        for (let j = 0; j < teamAPlayers.length; j++) {
+          const actPlayer = teamAPlayers[j]!;
+          const actPartner = teamAPlayers.find((_, idx) => idx !== j) || "";
+          if (isSamePerson(player, candidatePartner, club, actPlayer, actPartner, m.teamAClub)) {
+            return true;
+          }
+        }
+
+        for (let j = 0; j < teamBPlayers.length; j++) {
+          const actPlayer = teamBPlayers[j]!;
+          const actPartner = teamBPlayers.find((_, idx) => idx !== j) || "";
+          if (isSamePerson(player, candidatePartner, club, actPlayer, actPartner, m.teamBClub)) {
+            return true;
+          }
+        }
       }
+      return false;
     }
 
     const a = m.teamAName.trim().toLowerCase();
@@ -1165,8 +1221,10 @@ export type ActivePlayEngagement = {
   matchId: string;
   teamAName: string;
   teamAPlayers: string[];
+  teamAClub?: string | undefined;
   teamBName: string;
   teamBPlayers: string[];
+  teamBClub?: string | undefined;
 };
 
 export function getAllActiveParticipants(tournamentSlug?: string): ActivePlayEngagement[] {
@@ -1180,15 +1238,24 @@ export function getAllActiveParticipants(tournamentSlug?: string): ActivePlayEng
   const resolveMatchDetails = (
     matchId: string,
     courtFallback?: string,
-  ): { teamAName: string; teamAPlayers: string[]; teamBName: string; teamBPlayers: string[] } | null => {
+  ): {
+    teamAName: string;
+    teamAPlayers: string[];
+    teamAClub?: string | undefined;
+    teamBName: string;
+    teamBPlayers: string[];
+    teamBClub?: string | undefined;
+  } | null => {
     // 1. Check in matches store
     const inMatches = matches.find((m) => m.id === matchId && m.status !== "final");
     if (inMatches && inMatches.teamAName && inMatches.teamBName) {
       return {
         teamAName: inMatches.teamAName,
         teamAPlayers: inMatches.teamAPlayers ?? [],
+        teamAClub: inMatches.teamAClub,
         teamBName: inMatches.teamBName,
         teamBPlayers: inMatches.teamBPlayers ?? [],
+        teamBClub: inMatches.teamBClub,
       };
     }
 
@@ -1198,8 +1265,10 @@ export function getAllActiveParticipants(tournamentSlug?: string): ActivePlayEng
       return {
         teamAName: inQueue.teamAName,
         teamAPlayers: inQueue.teamAPlayers ?? [],
+        teamAClub: inQueue.teamAClub,
         teamBName: inQueue.teamBName,
         teamBPlayers: inQueue.teamBPlayers ?? [],
+        teamBClub: inQueue.teamBClub,
       };
     }
 
@@ -1210,8 +1279,10 @@ export function getAllActiveParticipants(tournamentSlug?: string): ActivePlayEng
         return {
           teamAName: byCourt.teamAName,
           teamAPlayers: byCourt.teamAPlayers ?? [],
+          teamAClub: byCourt.teamAClub,
           teamBName: byCourt.teamBName,
           teamBPlayers: byCourt.teamBPlayers ?? [],
+          teamBClub: byCourt.teamBClub,
         };
       }
     }
@@ -1235,8 +1306,10 @@ export function getAllActiveParticipants(tournamentSlug?: string): ActivePlayEng
                     return {
                       teamAName: teams[t1].name,
                       teamAPlayers: teams[t1].players ?? [],
+                      teamAClub: teams[t1].club,
                       teamBName: teams[t2].name,
                       teamBPlayers: teams[t2].players ?? [],
+                      teamBClub: teams[t2].club,
                     };
                   }
                 }
@@ -1294,8 +1367,10 @@ export function getAllActiveParticipants(tournamentSlug?: string): ActivePlayEng
         matchId: q.matchId,
         teamAName: q.teamAName,
         teamAPlayers: q.teamAPlayers ?? [],
+        teamAClub: q.teamAClub,
         teamBName: q.teamBName,
         teamBPlayers: q.teamBPlayers ?? [],
+        teamBClub: q.teamBClub,
       });
       processedCourtMatchIds.add(q.matchId);
     }
@@ -1317,8 +1392,10 @@ export function getAllActiveParticipants(tournamentSlug?: string): ActivePlayEng
           matchId: m.id,
           teamAName: m.teamAName,
           teamAPlayers: m.teamAPlayers ?? [],
+          teamAClub: m.teamAClub,
           teamBName: m.teamBName,
           teamBPlayers: m.teamBPlayers ?? [],
+          teamBClub: m.teamBClub,
         });
         processedCourtMatchIds.add(m.id);
       }
@@ -1332,42 +1409,61 @@ export function checkSimultaneousPlayConflict(
   teamName: string,
   players?: string[],
   tournamentSlug?: string,
+  club?: string,
 ): LiveConflict | null {
   const participants = getAllActiveParticipants(tournamentSlug);
   const cleanTeam = teamName.trim().toLowerCase();
-  const cleanPlayers = (players ?? []).map((p) => p.trim().toLowerCase()).filter(Boolean);
+  const cleanPlayers = (players ?? []).map((p) => p.trim()).filter(Boolean);
 
   for (const part of participants) {
     const partA = part.teamAName.trim().toLowerCase();
     const partB = part.teamBName.trim().toLowerCase();
 
-    const partAPlayers = (part.teamAPlayers ?? []).map((p) => p.trim().toLowerCase()).filter(Boolean);
-    const partBPlayers = (part.teamBPlayers ?? []).map((p) => p.trim().toLowerCase()).filter(Boolean);
-    const allPartPlayers = [...partAPlayers, ...partBPlayers];
+    const partAPlayers = (part.teamAPlayers ?? []).map((p) => p.trim()).filter(Boolean);
+    const partBPlayers = (part.teamBPlayers ?? []).map((p) => p.trim()).filter(Boolean);
 
-    // Priority 1: If candidate team has players specified,
-    // evaluate conflict strictly on individual player identity!
-    // Teams sharing a club or sponsor name (e.g. Nanomoly) with distinct rosters
-    // can play simultaneously on different courts without blocking each other.
+    // If candidate team has players specified, evaluate conflict strictly on individual player identity
+    // If players have the same name, but partner or club is NOT the same, they are DIFFERENT players!
     if (cleanPlayers.length > 0) {
-      for (const player of cleanPlayers) {
-        if (allPartPlayers.includes(player)) {
-          const origPlayer = (players ?? []).find((p) => p.trim().toLowerCase() === player) || player;
-          return {
-            teamName,
-            playerName: origPlayer,
-            isPlayerConflict: true,
-            court: part.court,
-            matchId: part.matchId,
-            status: part.state,
-          };
+      for (let i = 0; i < cleanPlayers.length; i++) {
+        const player = cleanPlayers[i]!;
+        const candidatePartner = cleanPlayers.find((_, idx) => idx !== i) || "";
+
+        // Check against active Team A players
+        for (let j = 0; j < partAPlayers.length; j++) {
+          const actPlayer = partAPlayers[j]!;
+          const actPartner = partAPlayers.find((_, idx) => idx !== j) || "";
+          if (isSamePerson(player, candidatePartner, club, actPlayer, actPartner, part.teamAClub)) {
+            return {
+              teamName,
+              playerName: player,
+              isPlayerConflict: true,
+              court: part.court,
+              matchId: part.matchId,
+              status: part.state,
+            };
+          }
+        }
+
+        // Check against active Team B players
+        for (let j = 0; j < partBPlayers.length; j++) {
+          const actPlayer = partBPlayers[j]!;
+          const actPartner = partBPlayers.find((_, idx) => idx !== j) || "";
+          if (isSamePerson(player, candidatePartner, club, actPlayer, actPartner, part.teamBClub)) {
+            return {
+              teamName,
+              playerName: player,
+              isPlayerConflict: true,
+              court: part.court,
+              matchId: part.matchId,
+              status: part.state,
+            };
+          }
         }
       }
 
-      // If active teams on this court both have known player rosters and none of cleanPlayers matched,
-      // there is NO player conflict (e.g. Nanomoly Team 1 vs Nanomoly Team 2 with different players).
-      // Only if an active team on court matches by name AND has NO player roster on file,
-      // fall back to treating it as a team conflict.
+      // If active teams on this court both have known player rosters and no player was the same person,
+      // there is NO player conflict (e.g. same name but different partner or club).
       const partTeamMatchesWithoutPlayers =
         (cleanTeam === partA && partAPlayers.length === 0) ||
         (cleanTeam === partB && partBPlayers.length === 0);

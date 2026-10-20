@@ -332,7 +332,7 @@ function TournamentPage() {
           <h1 className="mt-4 font-display text-4xl leading-tight text-sand sm:text-5xl md:text-7xl">
             {t.name}
           </h1>
-          <p className="mt-3 max-w-2xl text-sm text-sand/75 sm:text-base">{t.tagline}</p>
+          <p className="mt-3 max-w-2xl text-sm text-sand sm:text-base font-medium">{t.tagline}</p>
 
           {/* Info grid — 2 cols on mobile, 4 on large */}
           <dl className="mt-6 grid grid-cols-2 gap-3 sm:mt-8 sm:gap-4 lg:grid-cols-4">
@@ -343,7 +343,7 @@ function TournamentPage() {
               ["Format", t.format],
             ].map(([label, value]) => (
               <div key={label} className="border-l-2 border-pickle pl-3">
-                <dt className="text-[0.6rem] uppercase tracking-[0.2em] text-sand/60 sm:text-[0.65rem] sm:tracking-[0.22em]">
+                <dt className="text-xs uppercase tracking-wider text-sand/80 font-bold">
                   {label}
                 </dt>
                 <dd className="text-sm text-sand sm:text-base font-semibold">{value}</dd>
@@ -786,12 +786,12 @@ function LiveActionTicker({
         <div className="mx-auto max-w-6xl px-4 sm:px-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 text-xs">
           <div className="flex items-center gap-2">
             <span className="h-2 w-2 rounded-full bg-sand/40" />
-            <span className="uppercase tracking-widest font-mono text-[0.7rem] text-sand/70">
+            <span className="uppercase tracking-wider font-mono text-xs text-sand font-bold">
               Live Scoring Broadcast:
             </span>
             <span className="font-semibold text-sand">No matches currently in play</span>
           </div>
-          <div className="flex items-center gap-3 text-[0.65rem] uppercase tracking-wider text-sand/60">
+          <div className="flex items-center gap-3 text-xs uppercase tracking-wider text-sand/80 font-bold">
             <span>{scheduledMatchesCount} Scheduled</span>
             <span>&middot;</span>
             <span>{finalMatchesCount} Completed</span>
@@ -1896,8 +1896,27 @@ function BracketCard({
 
   // Compute live standings for this group from match-store
   const standings = useMemo(() => {
-    const map = new Map<string, { name: string; w: number; l: number; pd: number }>();
-    teams.forEach((t) => map.set(t.name, { name: t.name, w: 0, l: 0, pd: 0 }));
+    const map = new Map<
+      string,
+      {
+        name: string;
+        w: number;
+        l: number;
+        pd: number;
+        players?: string[] | undefined;
+        club?: string | undefined;
+      }
+    >();
+    teams.forEach((t) =>
+      map.set(t.name, {
+        name: t.name,
+        w: 0,
+        l: 0,
+        pd: 0,
+        players: t.players,
+        club: t.club,
+      })
+    );
 
     groupMatches.forEach((gm) => {
       const live = findLiveMatchForTeams(matches, gm.teamA.name, gm.teamB.name);
@@ -2068,7 +2087,7 @@ function BracketCard({
                               : "bg-card"
                           }`}
                       >
-                        <td className="px-3 py-2 font-semibold truncate max-w-[140px]">
+                        <td className="px-3 py-2 font-semibold">
                           <div className="flex items-center gap-1.5 truncate">
                             {isQualified && (
                               <span
@@ -2079,7 +2098,24 @@ function BracketCard({
                               </span>
                             )}
                             <span className="font-mono text-muted-foreground text-[0.65rem] shrink-0 w-3">{i + 1}.</span>
-                            <span className="truncate">{row.name}</span>
+                            <div className="min-w-0">
+                              <span className="truncate block text-xs">{row.name}</span>
+                              {((row.players && row.players.length > 0) || row.club) && (
+                                <div className="flex items-center gap-1 text-[0.62rem] text-muted-foreground truncate font-normal mt-0.5">
+                                  {row.players && row.players.length > 0 && (
+                                    <span className="truncate">{row.players.join(" & ")}</span>
+                                  )}
+                                  {row.club && (
+                                    <>
+                                      <span className="text-muted-foreground/50 shrink-0">•</span>
+                                      <span className="text-[0.55rem] px-1 py-0.2 rounded bg-charcoal text-sand border border-white/20 shrink-0 font-bold">
+                                        {row.club}
+                                      </span>
+                                    </>
+                                  )}
+                                </div>
+                              )}
+                            </div>
                           </div>
                         </td>
                         <td className="px-2 py-2 text-center font-mono font-bold text-pickle">{row.w}</td>

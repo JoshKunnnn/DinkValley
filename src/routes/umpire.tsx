@@ -51,24 +51,58 @@ export const Route = createFileRoute("/umpire")({
   component: Umpire,
 });
 
-type UmpireTab = "desk" | "console" | "scoreboard";
+type UmpireTab = "console" | "results" | "scoreboard" | "desk";
 
 function Umpire() {
   const navigate = useNavigate();
   const { tournaments } = useTournamentStore();
-  const [tournamentFilter, setTournamentFilter] = useState<string>("all");
-  const { matches, refresh, update, resetAll, isCloudSynced } = useMatchStore(
-    tournamentFilter === "all" ? undefined : tournamentFilter
+
+  // Active tournaments (strictly exclude completed tournaments)
+  const activeTournaments = useMemo(() => {
+    return tournaments.filter((t) => t.status !== "Completed");
+  }, [tournaments]);
+
+  // Primary active tournament: Live status takes priority, then Registration open
+  const defaultTournament = useMemo(() => {
+    return (
+      tournaments.find((t) => t.status === "Live") ||
+      tournaments.find((t) => t.status === "Registration open") ||
+      activeTournaments[0] ||
+      tournaments[0] ||
+      null
+    );
+  }, [tournaments, activeTournaments]);
+
+  const [tournamentFilter, setTournamentFilter] = useState<string>(() => defaultTournament?.slug ?? "");
+
+  useEffect(() => {
+    if (!tournamentFilter && defaultTournament?.slug) {
+      setTournamentFilter(defaultTournament.slug);
+    }
+  }, [defaultTournament, tournamentFilter]);
+
+  const activeTournamentSlug = tournamentFilter || defaultTournament?.slug || "";
+  const activeTournament = tournaments.find((t) => t.slug === activeTournamentSlug) || defaultTournament;
+
+  const { matches, update, isCloudSynced } = useMatchStore(
+    activeTournamentSlug || undefined
   );
+
+  // Filter matches strictly to the active event to guarantee no past event matches appear
+  const activeEventMatches = useMemo(() => {
+    if (!activeTournamentSlug) return matches;
+    return matches.filter((m) => {
+      if (m.tournamentSlug) {
+        return m.tournamentSlug === activeTournamentSlug;
+      }
+      return true;
+    });
+  }, [matches, activeTournamentSlug]);
 
   const [activeTab, setActiveTab] = useState<UmpireTab>("console");
   const [selectedMatchId, setSelectedMatchId] = useState<string | null>(null);
   const [umpireName, setUmpireName] = useState("Official");
   const [stations, setStations] = useState<Record<FacilityCourt, CourtStation>>(() => getCourtStations());
-  const [showQuickMatchModal, setShowQuickMatchModal] = useState(false);
-  const [preselectedCourt, setPreselectedCourt] = useState<FacilityCourt>("Court 1");
-  const [showResetConfirm, setShowResetConfirm] = useState(false);
-  const [showOverflow, setShowOverflow] = useState(false);
 
   // Load umpire identity
   useEffect(() => {
@@ -115,27 +149,11 @@ function Umpire() {
     setActiveTab("console");
   };
 
-  const handleClaimCourt = (court: FacilityCourt) => {
-    claimCourtStation(court, umpireName);
-    setStations(getCourtStations());
-  };
-
-  const handleReleaseCourt = (court: FacilityCourt) => {
-    releaseCourtStation(court);
-    setStations(getCourtStations());
-  };
-
-  const handleOpenQuickMatch = (court?: FacilityCourt) => {
-    if (court) setPreselectedCourt(court);
-    setShowQuickMatchModal(true);
-  };
-
-  const selectedMatch = matches.find((m) => m.id === selectedMatchId) ?? null;
+  const selectedMatch = activeEventMatches.find((m) => m.id === selectedMatchId) ?? null;
 
   const tabs: { key: UmpireTab; label: string }[] = [
-    { key: "console", label: "Live Console" },
-    { key: "desk", label: "Tournament Desk" },
-    { key: "scoreboard", label: "Live Scoreboard" },
+    { key: "console", label: "Court Supervision" },
+    { key: "results", label: "Match Results" },
   ];
 
   return (
@@ -176,74 +194,33 @@ function Umpire() {
               </div>
             </div>
 
-            {/* Tournament Selector & Actions */}
+            {/* Active Tournament Badge / Selector & Sign Out */}
             <div className="flex flex-wrap items-center gap-2">
-              <select
-                value={tournamentFilter}
-                onChange={(e) => setTournamentFilter(e.target.value)}
-                className="bg-charcoal border border-border text-sand text-xs font-semibold px-2.5 py-1.5 rounded-none focus:outline-none focus:border-pickle cursor-pointer"
-              >
-                <option value="all">All Tournaments & Facility</option>
-                {tournaments.map((t) => (
-                  <option key={t.slug} value={t.slug}>
-                    {t.name}
-                  </option>
-                ))}
-              </select>
+              {activeTournaments.length > 1 ? (
+                <select
+                  value={tournamentFilter}
+                  onChange={(e) => setTournamentFilter(e.target.value)}
+                  className="bg-charcoal border border-border text-sand text-xs font-semibold px-2.5 py-1.5 rounded-none focus:outline-none focus:border-pickle cursor-pointer"
+                >
+                  {activeTournaments.map((t) => (
+                    <option key={t.slug} value={t.slug}>
+                      {t.name} {t.status === "Live" ? "(Live)" : ""}
+                    </option>
+                  ))}
+                </select>
+              ) : activeTournament ? (
+                <div className="bg-charcoal border border-border text-sand text-xs font-semibold px-2.5 py-1.5 flex items-center gap-1.5">
+                  <span className="h-1.5 w-1.5 rounded-full bg-pickle animate-pulse" />
+                  <span className="truncate max-w-[200px] sm:max-w-none">{activeTournament.name}</span>
+                </div>
+              ) : null}
 
               <button
-                onClick={() => handleOpenQuickMatch()}
-                className="px-3 py-1.5 text-[0.65rem] font-bold uppercase tracking-widest bg-pickle text-sand hover:opacity-90 transition-opacity cursor-pointer flex items-center gap-1"
+                onClick={handleLogout}
+                className="px-3 py-1.5 text-[0.65rem] font-bold uppercase tracking-widest bg-brick/20 border border-brick/40 text-brick hover:bg-brick/30 transition-colors cursor-pointer"
               >
-                <span>+</span> Quick Match
+                Sign Out
               </button>
-
-              {/* Overflow menu — hides Clear + Sign Out on mobile */}
-              <div className="relative sm:contents">
-                {/* On sm+: always show these buttons inline */}
-                <button
-                  onClick={() => setShowResetConfirm(true)}
-                  className="hidden sm:block px-2.5 py-1.5 text-[0.65rem] font-bold uppercase tracking-widest border border-border text-sand/80 hover:border-sand hover:text-sand transition-colors cursor-pointer"
-                >
-                  Clear
-                </button>
-                <button
-                  onClick={handleLogout}
-                  className="hidden sm:block px-2.5 py-1.5 text-[0.65rem] font-bold uppercase tracking-widest bg-brick/20 border border-brick/40 text-brick hover:bg-brick/30 transition-colors cursor-pointer"
-                >
-                  Sign Out
-                </button>
-
-                {/* On mobile: overflow toggle */}
-                <button
-                  onClick={() => setShowOverflow((v) => !v)}
-                  className="sm:hidden px-2.5 py-1.5 text-[0.65rem] font-bold uppercase tracking-widest border border-border text-sand/80 hover:text-sand transition-colors cursor-pointer"
-                  aria-label="More options"
-                >
-                  ...
-                </button>
-
-                {/* Overflow dropdown */}
-                {showOverflow && (
-                  <div
-                    className="absolute right-0 top-full mt-1 z-50 flex flex-col bg-charcoal border border-border shadow-lg sm:hidden"
-                    onBlur={() => setShowOverflow(false)}
-                  >
-                    <button
-                      onClick={() => { setShowResetConfirm(true); setShowOverflow(false); }}
-                      className="px-4 py-2.5 text-left text-[0.65rem] font-bold uppercase tracking-widest text-sand/80 hover:text-sand hover:bg-charcoal/60 transition-colors cursor-pointer"
-                    >
-                      Clear All Matches
-                    </button>
-                    <button
-                      onClick={() => { handleLogout(); setShowOverflow(false); }}
-                      className="px-4 py-2.5 text-left text-[0.65rem] font-bold uppercase tracking-widest text-brick hover:bg-brick/10 transition-colors cursor-pointer"
-                    >
-                      Sign Out
-                    </button>
-                  </div>
-                )}
-              </div>
             </div>
           </div>
 
@@ -272,89 +249,29 @@ function Umpire() {
 
       {/* Main Content Area */}
       <div className="mx-auto max-w-6xl px-4 py-6">
-        {activeTab === "desk" && (
-          <TournamentDesk
-            matches={matches}
-            stations={stations}
-            currentUmpire={umpireName}
-            onSelectMatch={openConsole}
-            onClaimCourt={handleClaimCourt}
-            onReleaseCourt={handleReleaseCourt}
-            onOpenQuickMatch={handleOpenQuickMatch}
-            onUpdate={update}
-          />
-        )}
         {activeTab === "console" && (
           <UmpireConsole
             match={selectedMatch}
-            matches={matches}
+            matches={activeEventMatches}
             stations={stations}
             currentUmpire={umpireName}
+            activeTournament={activeTournament}
             onUpdate={update}
-            onSelectMatch={(id) => setSelectedMatchId(id)}
-            onBack={() => setActiveTab("desk")}
-            onOpenQuickMatch={() => handleOpenQuickMatch()}
+            onSelectMatch={(id) => setSelectedMatchId(id || null)}
+            onBack={() => setSelectedMatchId(null)}
+            onViewResults={() => setActiveTab("results")}
           />
         )}
-        {activeTab === "scoreboard" && (
-          <LiveScoreboard
-            matches={matches}
-            stations={stations}
+        {activeTab === "results" && (
+          <UmpireMatchResults
+            matches={activeEventMatches}
+            activeTournament={activeTournament}
             onSelectMatch={openConsole}
           />
         )}
       </div>
 
-      {/* Quick Match Modal */}
-      {showQuickMatchModal && (
-        <QuickMatchModal
-          defaultCourt={preselectedCourt}
-          currentUmpire={umpireName}
-          tournaments={tournaments}
-          matches={matches}
-          initialTournamentSlug={tournamentFilter === "all" ? "" : tournamentFilter}
-          onClose={() => setShowQuickMatchModal(false)}
-          onCreated={(matchId) => {
-            setShowQuickMatchModal(false);
-            refresh();
-            setStations(getCourtStations());
-            openConsole(matchId);
-          }}
-        />
-      )}
 
-      {/* Reset Confirmation Modal */}
-      {showResetConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-charcoal/90 backdrop-blur-sm p-4">
-          <div className="surface-card border-2 border-brick/60 max-w-sm w-full p-6 space-y-4">
-            <h3 className="font-display text-2xl text-foreground">Clear All Matches?</h3>
-            <p className="text-sm text-foreground/80">
-              This will remove all active and scheduled matches from the local store and database. This action cannot be undone.
-            </p>
-            <div className="flex gap-3 justify-end pt-2">
-              <button
-                onClick={() => setShowResetConfirm(false)}
-                className="px-4 py-2 text-xs font-bold uppercase tracking-widest border border-border text-foreground hover:border-foreground/50 transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => {
-                  resetAll();
-                  for (const court of FACILITY_COURTS) {
-                    vacateCourt(court);
-                  }
-                  setStations(getCourtStations());
-                  setShowResetConfirm(false);
-                }}
-                className="px-4 py-2 text-xs font-bold uppercase tracking-widest bg-brick text-sand hover:bg-brick-deep transition-colors cursor-pointer"
-              >
-                Confirm Clear
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* ── Mobile bottom nav (sm and below only) ── */}
       <UmpireMobileNav
@@ -940,19 +857,23 @@ function UmpireConsole({
   matches,
   stations,
   currentUmpire,
+  activeTournament,
   onUpdate,
   onSelectMatch,
   onBack,
   onOpenQuickMatch,
+  onViewResults,
 }: {
   match: LiveMatch | null;
   matches: LiveMatch[];
   stations?: Record<FacilityCourt, CourtStation>;
   currentUmpire: string;
+  activeTournament?: any;
   onUpdate: (matchId: string, updater: (m: LiveMatch) => LiveMatch) => void;
   onSelectMatch: (id: string) => void;
-  onBack: () => void;
-  onOpenQuickMatch: () => void;
+  onBack?: () => void;
+  onOpenQuickMatch?: () => void;
+  onViewResults?: () => void;
 }) {
   const [showEndConfirm, setShowEndConfirm] = useState(false);
   const [showResetTossConfirm, setShowResetTossConfirm] = useState(false);
@@ -1091,172 +1012,236 @@ function UmpireConsole({
   );
 
   if (!match) {
-    const liveMatches = dispatchedMatches.filter((m) => m.status === "live");
-    const scheduledMatches = dispatchedMatches.filter((m) => m.status === "scheduled");
+    // Completed matches strictly for active event
+    const completedMatches = matches
+      .filter((m) => m.status === "final")
+      .sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0));
 
     return (
-      <div className="space-y-6 max-w-2xl mx-auto">
+      <div className="space-y-8 max-w-6xl mx-auto">
         {/* Header */}
         <div className="border-b border-border pb-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
             <span className="text-xs font-bold uppercase tracking-[0.28em] text-pickle">
-              Live Console
+              Official Console
             </span>
             <h2 className="font-display text-3xl sm:text-4xl text-foreground mt-1">
-              Select a Match
+              Select Your Court
             </h2>
             <p className="text-sm text-foreground/80 mt-1">
-              Pick an active or scheduled match below to begin officiating.
+              Choose the court you are supervising. Matches are dispatched exclusively by the Tournament Director.
             </p>
           </div>
-          <button
-            onClick={onOpenQuickMatch}
-            className="px-4 py-2 text-xs font-bold uppercase tracking-widest bg-pickle text-sand hover:opacity-90 transition-opacity cursor-pointer w-fit"
-          >
-            + New Quick Match
-          </button>
+          {activeTournament && (
+            <div className="inline-flex items-center gap-2 px-3 py-1.5 bg-charcoal border border-border text-xs text-sand/80 font-mono w-fit">
+              <span className="h-2 w-2 rounded-full bg-pickle animate-pulse" />
+              <span>Active Event: <strong className="text-sand">{activeTournament.name}</strong></span>
+            </div>
+          )}
         </div>
 
-        {/* No matches at all */}
-        {dispatchedMatches.length === 0 && (
-          <div className="surface-card p-10 text-center border border-dashed border-border">
-            <span className="text-xs uppercase tracking-widest text-pickle font-bold block">No Dispatched Matches</span>
-            <p className="mt-2 text-sm text-foreground/70">
-              No matches have been dispatched yet. When an admin dispatches a match to a court, it will appear here.
-            </p>
-            <div className="flex flex-col sm:flex-row gap-2 justify-center mt-5">
-              <button
-                onClick={onOpenQuickMatch}
-                className="px-4 py-2.5 bg-pickle text-sand text-xs font-bold uppercase tracking-widest hover:opacity-90 transition-opacity cursor-pointer"
-              >
-                + New Quick Match
-              </button>
-              <button
-                onClick={onBack}
-                className="px-4 py-2.5 border border-border text-sand text-xs font-bold uppercase tracking-widest hover:border-foreground/50 transition-colors cursor-pointer"
-              >
-                Tournament Desk
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Live matches */}
-        {liveMatches.length > 0 && (
-          <div className="space-y-2">
-            <span className="text-[0.65rem] font-bold uppercase tracking-widest text-pickle">
-              Live Now ({liveMatches.length})
+        {/* 4 Prominent Court Cards */}
+        <div>
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-xs font-bold uppercase tracking-widest text-foreground/80">
+              Facility Courts (1 - 4)
             </span>
-            <div className="grid gap-3 grid-cols-1 sm:grid-cols-2">
-              {liveMatches.map((m) => (
-                <button
-                  key={m.id}
-                  onClick={() => onSelectMatch(m.id)}
-                  className="surface-card p-4 text-left border border-pickle/60 hover:border-pickle shadow-sm shadow-pickle/10 transition-all cursor-pointer"
+            <span className="text-xs font-bold text-foreground/80 uppercase font-sans">
+              Admin Dispatched Station Monitor
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {FACILITY_COURTS.map((court) => {
+              const st = currentStations[court];
+              // Find dispatched match for this court
+              const courtMatch = matches.find((m) => {
+                if (m.status === "final") return false;
+                if (st?.currentMatchId && m.id === st.currentMatchId) return true;
+                return m.court === court;
+              });
+
+              const isLive = courtMatch?.status === "live";
+              const isScheduled = courtMatch?.status === "scheduled";
+              const isAssignedToMe = courtMatch?.officiatedBy === currentUmpire;
+
+              return (
+                <div
+                  key={court}
+                  className={`p-0 overflow-hidden flex flex-col justify-between border-2 transition-all font-sans ${
+                    isLive
+                      ? "border-pickle/80 shadow-lg shadow-pickle/15 bg-charcoal text-sand"
+                      : courtMatch
+                      ? "border-border hover:border-pickle/50 bg-charcoal text-sand"
+                      : "border-border border-dashed bg-card text-foreground"
+                  }`}
                 >
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-1.5 min-w-0">
-                      <span className="text-xs font-bold uppercase tracking-widest text-foreground font-mono">{m.court}</span>
-                      {m.stage && (
-                        <span className="text-[0.6rem] font-bold uppercase tracking-wider text-pickle font-mono bg-pickle/15 px-1.5 py-0.5 border border-pickle/30 truncate">
-                          {m.stage}
-                        </span>
-                      )}
-                    </div>
-                    <MatchStatusBadge status={m.status} />
-                  </div>
-                  <div className="text-sm font-semibold text-foreground">
-                    {m.teamAName} <span className="text-pickle font-display text-lg">{m.score.teamAScore}</span>
-                    <span className="text-foreground/40 mx-1">-</span>
-                    <span className="text-pickle font-display text-lg">{m.score.teamBScore}</span> {m.teamBName}
-                  </div>
-                  <div className="mt-2 pt-2 border-t border-border/60 flex items-center justify-between text-[0.65rem] uppercase tracking-widest">
-                    <span className="text-pickle font-bold">Score this match</span>
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (typeof localStorage !== "undefined") {
-                          try {
-                            localStorage.removeItem(`dv_toss_done_${m.id}`);
-                          } catch {}
-                        }
-                        onUpdate(m.id, resetMatch);
-                        onSelectMatch(m.id);
-                      }}
-                      title="Reset score to 0-0 and rerun coin toss"
-                      className="px-2 py-1 text-[0.6rem] font-bold uppercase tracking-wider bg-charcoal text-sand border border-pickle/40 hover:bg-pickle hover:text-sand transition-colors cursor-pointer"
+                  {/* Card Header */}
+                  <div
+                    className={`px-4 py-3 flex items-center justify-between border-b-2 ${
+                      courtMatch ? "bg-charcoal border-white/10" : "bg-muted/40 border-border"
+                    }`}
+                  >
+                    <span
+                      className={`font-display text-2xl tracking-wide ${
+                        courtMatch ? "text-sand" : "text-foreground"
+                      }`}
                     >
-                      Coin Toss (Reset)
-                    </button>
-                  </div>
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Scheduled matches */}
-        {scheduledMatches.length > 0 && (
-          <div className="space-y-2">
-            <span className="text-[0.65rem] font-bold uppercase tracking-widest text-foreground/60">
-              Scheduled ({scheduledMatches.length})
-            </span>
-            <div className="grid gap-3 grid-cols-1 sm:grid-cols-2">
-              {scheduledMatches.map((m) => (
-                <button
-                  key={m.id}
-                  onClick={() => onSelectMatch(m.id)}
-                  className="surface-card p-4 text-left border border-border hover:border-foreground/40 transition-colors cursor-pointer"
-                >
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-1.5 min-w-0">
-                      <span className="text-xs font-bold uppercase tracking-widest text-foreground font-mono">{m.court}</span>
-                      {m.stage && (
-                        <span className="text-[0.6rem] font-bold uppercase tracking-wider text-pickle font-mono bg-pickle/15 px-1.5 py-0.5 border border-pickle/30 truncate">
-                          {m.stage}
-                        </span>
-                      )}
-                    </div>
-                    <MatchStatusBadge status={m.status} />
-                  </div>
-                  <div className="text-sm font-semibold text-foreground">
-                    {m.teamAName} vs {m.teamBName}
-                  </div>
-                  <div className="mt-2 pt-2 border-t border-border/60 flex items-center justify-between text-[0.65rem] uppercase tracking-widest">
-                    <div className="flex items-center gap-1 min-w-0">
-                      <span className="text-foreground/70 font-semibold">Official:</span>
-                      <span className={`font-mono truncate max-w-[100px] ${m.officiatedBy ? "text-pickle font-bold" : "text-foreground/50"}`}>
-                        {m.officiatedBy
-                          ? m.officiatedBy === currentUmpire
-                            ? `${m.officiatedBy} (You)`
-                            : m.officiatedBy
-                          : "Unassigned"}
+                      {court}
+                    </span>
+                    {isLive && (
+                      <span className="inline-flex items-center gap-1.5 px-2 py-0.5 text-xs font-bold uppercase tracking-wider bg-pickle/20 border border-pickle/50 text-pickle">
+                        <span className="h-1.5 w-1.5 rounded-full bg-pickle animate-pulse" />
+                        Live: {courtMatch.score.teamAScore} - {courtMatch.score.teamBScore}
                       </span>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (typeof localStorage !== "undefined") {
-                          try {
-                            localStorage.removeItem(`dv_toss_done_${m.id}`);
-                          } catch {}
-                        }
-                        onUpdate(m.id, resetMatch);
-                        onSelectMatch(m.id);
-                      }}
-                      title="Reset score to 0-0 and rerun coin toss"
-                      className="px-2 py-1 text-[0.6rem] font-bold uppercase tracking-wider bg-charcoal text-sand border border-pickle/40 hover:bg-pickle hover:text-sand transition-colors cursor-pointer shrink-0"
-                    >
-                      Coin Toss (Reset)
-                    </button>
+                    )}
+                    {isScheduled && (
+                      <span className="inline-flex items-center px-2 py-0.5 text-xs font-bold uppercase tracking-wider bg-sand/15 border border-border text-sand">
+                        Ready
+                      </span>
+                    )}
+                    {!courtMatch && (
+                      <span className="text-xs font-bold uppercase tracking-wider text-foreground/70 bg-card border border-border px-2 py-0.5">
+                        Standby
+                      </span>
+                    )}
                   </div>
-                </button>
-              ))}
-            </div>
+
+                  {/* Card Body */}
+                  <div className="p-4 flex-1 flex flex-col justify-between space-y-4">
+                    {courtMatch ? (
+                      <div className="space-y-3">
+                        {courtMatch.stage && (
+                          <span className="inline-block text-xs font-bold uppercase tracking-wider text-pickle bg-pickle/15 px-2 py-0.5 border border-pickle/30 truncate max-w-full font-sans">
+                            {courtMatch.stage}
+                          </span>
+                        )}
+
+                        {/* Matchup */}
+                        <div className="space-y-2.5">
+                          {/* Team A */}
+                          <div className="bg-charcoal/80 p-2.5 border border-white/10">
+                            <span className="block text-sm font-bold text-sand truncate">
+                              {courtMatch.teamAName}
+                            </span>
+                            <span className="block text-xs text-sand/80 font-medium truncate mt-0.5">
+                              {courtMatch.teamAPlayers.join(" / ")}
+                            </span>
+                            {courtMatch.teamAClub && (
+                              <span className="inline-block mt-1 text-[0.6rem] px-1.5 py-0.2 bg-pickle/20 text-pickle border border-pickle/40 uppercase tracking-wider font-bold font-sans">
+                                {courtMatch.teamAClub}
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="text-xs font-bold uppercase tracking-widest text-center text-sand/60">
+                            vs
+                          </div>
+
+                          {/* Team B */}
+                          <div className="bg-charcoal/80 p-2.5 border border-white/10">
+                            <span className="block text-sm font-bold text-sand truncate">
+                              {courtMatch.teamBName}
+                            </span>
+                            <span className="block text-xs text-sand/80 font-medium truncate mt-0.5">
+                              {courtMatch.teamBPlayers.join(" / ")}
+                            </span>
+                            {courtMatch.teamBClub && (
+                              <span className="inline-block mt-1 text-[0.6rem] px-1.5 py-0.2 bg-pickle/20 text-pickle border border-pickle/40 uppercase tracking-wider font-bold font-sans">
+                                {courtMatch.teamBClub}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Official Info */}
+                        <div className="text-xs uppercase tracking-wider text-sand/80 flex items-center justify-between pt-1">
+                          <span className="text-sand/70 font-semibold">Official:</span>
+                          <span className={`font-bold truncate max-w-[140px] font-sans ${courtMatch.officiatedBy ? "text-pickle" : "text-sand/60"}`}>
+                            {courtMatch.officiatedBy
+                              ? isAssignedToMe
+                                ? `${courtMatch.officiatedBy} (You)`
+                                : courtMatch.officiatedBy
+                              : "Unassigned"}
+                          </span>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="py-8 text-center space-y-2">
+                        <span className="text-sm uppercase tracking-wider font-bold text-foreground block">
+                          Waiting for Admin Dispatch
+                        </span>
+                        <p className="text-xs text-foreground/70 font-medium max-w-[220px] mx-auto leading-relaxed">
+                          The Tournament Director will assign the next scheduled match here.
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Action button */}
+                    <div className="pt-2">
+                      {courtMatch ? (
+                        <div className="space-y-2">
+                          <button
+                            type="button"
+                            onClick={() => onSelectMatch(courtMatch.id)}
+                            className="w-full py-2.5 px-3 bg-pickle text-sand font-bold text-xs uppercase tracking-widest hover:opacity-90 active:scale-[0.99] transition-all text-center cursor-pointer shadow-md font-sans"
+                          >
+                            {isLive ? `Continue Scoring ${court}` : `Supervise & Score ${court}`}
+                          </button>
+                          {!isMatchTossDone(courtMatch) && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (typeof localStorage !== "undefined") {
+                                  try {
+                                    localStorage.removeItem(`dv_toss_done_${courtMatch.id}`);
+                                  } catch {}
+                                }
+                                onUpdate(courtMatch.id, resetMatch);
+                                onSelectMatch(courtMatch.id);
+                              }}
+                              className="w-full py-1.5 px-2 bg-charcoal border border-pickle/40 text-sand hover:bg-pickle hover:text-sand text-xs font-bold uppercase tracking-wider transition-colors cursor-pointer text-center font-sans"
+                            >
+                              Coin Toss (Reset)
+                            </button>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="w-full py-2.5 px-3 border-2 border-border text-foreground/60 font-bold text-xs uppercase tracking-wider text-center select-none bg-muted/30">
+                          Standby: No Dispatched Match
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
           </div>
-        )}
+        </div>
+
+        {/* Match Results Banner linking to dedicated Match Results tab */}
+        <div className="pt-4 border-t-2 border-border flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 bg-card p-4 border-2 border-border shadow-sm font-sans">
+          <div>
+            <span className="text-xs uppercase tracking-wider font-bold text-pickle block">
+              Match Results
+            </span>
+            <span className="text-xs text-foreground/80 font-medium">
+              {completedMatches.length > 0
+                ? `${completedMatches.length} match${completedMatches.length === 1 ? "" : "es"} concluded for ${activeTournament?.name || "this event"}.`
+                : `Official match results for ${activeTournament?.name || "this event"}.`}
+            </span>
+          </div>
+          {onViewResults && (
+            <button
+              type="button"
+              onClick={onViewResults}
+              className="px-4 py-2 text-xs font-bold uppercase tracking-wider bg-pickle text-sand hover:opacity-90 active:scale-[0.99] transition-all cursor-pointer w-fit shadow-sm font-sans"
+            >
+              View Match Results &rarr;
+            </button>
+          )}
+        </div>
       </div>
     );
   }
@@ -1428,32 +1413,24 @@ function UmpireConsole({
 
       {/* Navigation Header */}
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-center gap-2">
-          <button
-            onClick={onBack}
-            className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-widest text-foreground hover:text-foreground/70 transition-colors cursor-pointer w-fit"
-          >
-            <span className="text-base leading-none">&larr;</span> Desk
-          </button>
-          <span className="text-border">|</span>
-          <button
-            onClick={() => onSelectMatch("")}
-            className="text-xs font-bold uppercase tracking-widest text-sand/70 hover:text-sand transition-colors cursor-pointer w-fit"
-          >
-            All Dispatched
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={() => onSelectMatch("")}
+          className="flex items-center gap-2 px-3 py-1.5 text-xs font-bold uppercase tracking-widest bg-charcoal border border-border text-sand hover:border-pickle hover:text-pickle transition-colors cursor-pointer w-fit"
+        >
+          <span className="text-base leading-none">&larr;</span> Back to Court Selection
+        </button>
 
         <div className="flex flex-wrap items-center gap-2">
           {/* Umpire / Official Badge */}
           <div className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs uppercase tracking-widest border border-border bg-charcoal text-sand">
             <span className="h-1.5 w-1.5 rounded-full bg-pickle animate-pulse" />
-            <span className="text-[0.65rem] font-bold text-sand/70">Official:</span>
-            <span className="font-bold text-pickle font-mono">
+            <span className="text-xs font-bold text-sand">Official:</span>
+            <span className="font-bold text-pickle font-sans">
               {effectiveUmpire}
             </span>
             {effectiveUmpire === currentUmpire && (
-              <span className="text-[0.6rem] text-sand/60 font-semibold">(You)</span>
+              <span className="text-xs text-sand/90 font-bold">(You)</span>
             )}
           </div>
 
@@ -1864,119 +1841,277 @@ function UmpireConsole({
 }
 
 /* ═══════════════════════════════════════════════
-   TAB 3: LIVE SCOREBOARD (SPECTATOR VIEW)
+   TAB 2: MATCH RESULTS (ACTIVE EVENT ARCHIVE)
 ═══════════════════════════════════════════════ */
 
-function LiveScoreboard({
+function UmpireMatchResults({
   matches,
-  stations,
+  activeTournament,
   onSelectMatch,
 }: {
   matches: LiveMatch[];
-  stations: Record<FacilityCourt, CourtStation>;
+  activeTournament?: any;
   onSelectMatch: (id: string) => void;
 }) {
-  const confirmedMatches = useMemo(() => {
-    return matches.filter((m) => isConfirmedDispatchedMatch(m, stations));
-  }, [matches, stations]);
+  const [courtFilter, setCourtFilter] = useState<string>("all");
+  const [bracketFilter, setBracketFilter] = useState<string>("all");
 
-  const liveMatches = confirmedMatches.filter((m) => m.status === "live");
-  const scheduledMatches = confirmedMatches.filter((m) => m.status === "scheduled");
-  const finalMatches = confirmedMatches.filter((m) => m.status === "final");
+  const completedMatches = useMemo(() => {
+    return matches
+      .filter((m) => m.status === "final")
+      .sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0));
+  }, [matches]);
+
+  const uniqueStages = useMemo(() => {
+    const set = new Set<string>();
+    for (const m of completedMatches) {
+      if (m.stage) set.add(m.stage);
+    }
+    return Array.from(set);
+  }, [completedMatches]);
+
+  const filteredMatches = useMemo(() => {
+    return completedMatches.filter((m) => {
+      if (courtFilter !== "all" && m.court !== courtFilter) return false;
+      if (bracketFilter !== "all" && m.stage !== bracketFilter) return false;
+      return true;
+    });
+  }, [completedMatches, courtFilter, bracketFilter]);
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-6 font-sans">
       {/* Header */}
-      <div className="border-b border-border pb-5 text-center">
-        <span className="text-xs font-bold uppercase tracking-[0.28em] text-pickle">
-          Facility Live Scoreboard
-        </span>
-        <h2 className="font-display text-3xl sm:text-4xl text-foreground mt-1">
-          Dink Valley Real-Time Court Broadcast
-        </h2>
-        <p className="text-sm text-foreground/80 mt-1">
-          Live courtside synchronization powered by Supabase Realtime
-        </p>
-        <div className="mt-3 flex justify-center gap-4">
-          {liveMatches.length > 0 && (
-            <span className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-widest text-pickle">
-              <span className="h-2 w-2 rounded-full bg-pickle animate-pulse" />
-              {liveMatches.length} Live
-            </span>
-          )}
-          {scheduledMatches.length > 0 && (
-            <span className="text-xs font-bold uppercase tracking-widest text-foreground">
-              {scheduledMatches.length} Scheduled
-            </span>
-          )}
-          {finalMatches.length > 0 && (
-            <span className="text-xs font-bold uppercase tracking-widest text-brick">
-              {finalMatches.length} Final
-            </span>
-          )}
+      <div className="border-b-2 border-border pb-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div>
+          <span className="text-xs font-bold uppercase tracking-wider text-pickle font-sans block">
+            Event Match Archive
+          </span>
+          <h2 className="font-display text-3xl sm:text-4xl text-foreground tracking-wide mt-1">
+            Match Results
+          </h2>
+          <p className="text-sm text-foreground/80 font-medium mt-1">
+            Official scores and match history for {activeTournament?.name || "the active event"}. Past event matches are excluded.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-sans font-bold text-foreground px-3.5 py-1.5 bg-card border-2 border-border shadow-sm">
+            <span className="text-pickle font-black mr-1.5">{completedMatches.length}</span>
+            Matches Concluded
+          </span>
         </div>
       </div>
 
-      {/* Live matches */}
-      {liveMatches.length > 0 && (
-        <div className="space-y-4">
-          <h3 className="font-display text-xl text-pickle flex items-center gap-2">
-            <span className="h-2.5 w-2.5 rounded-full bg-pickle animate-pulse" />
-            Live In Play
-          </h3>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {liveMatches.map((match) => (
-              <ScoreboardCard
-                key={match.id}
-                match={match}
-                station={stations[match.court as FacilityCourt]}
-                onSelect={() => onSelectMatch(match.id)}
-              />
+      {/* Filters Bar */}
+      {completedMatches.length > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-3 bg-charcoal p-3.5 border-2 border-border/80 shadow-sm">
+          {/* Court Filter */}
+          <div className="flex items-center gap-2 overflow-x-auto">
+            <span className="text-xs font-bold uppercase tracking-wider text-sand mr-1 shrink-0 font-sans">
+              Court:
+            </span>
+            {["all", "Court 1", "Court 2", "Court 3", "Court 4"].map((c) => (
+              <button
+                key={c}
+                type="button"
+                onClick={() => setCourtFilter(c)}
+                className={`px-3 py-1.5 text-xs font-bold uppercase tracking-wider transition-all cursor-pointer font-sans ${
+                  courtFilter === c
+                    ? "bg-pickle text-sand shadow-sm"
+                    : "bg-charcoal text-sand/80 hover:text-white border border-white/20 hover:border-white/40"
+                }`}
+              >
+                {c === "all" ? "All Courts" : c}
+              </button>
             ))}
           </div>
+
+          {/* Bracket Filter */}
+          {uniqueStages.length > 0 && (
+            <div className="flex items-center gap-2 overflow-x-auto">
+              <span className="text-xs font-bold uppercase tracking-wider text-sand mr-1 shrink-0 font-sans">
+                Bracket:
+              </span>
+              <button
+                type="button"
+                onClick={() => setBracketFilter("all")}
+                className={`px-3 py-1.5 text-xs font-bold uppercase tracking-wider transition-all cursor-pointer font-sans ${
+                  bracketFilter === "all"
+                    ? "bg-pickle text-sand shadow-sm"
+                    : "bg-charcoal text-sand/80 hover:text-white border border-white/20 hover:border-white/40"
+                }`}
+              >
+                All
+              </button>
+              {uniqueStages.map((stg) => (
+                <button
+                  key={stg}
+                  type="button"
+                  onClick={() => setBracketFilter(stg)}
+                  className={`px-3 py-1.5 text-xs font-bold uppercase tracking-wider transition-all cursor-pointer font-sans ${
+                    bracketFilter === stg
+                      ? "bg-pickle text-sand shadow-sm"
+                      : "bg-charcoal text-sand/80 hover:text-white border border-white/20 hover:border-white/40"
+                  }`}
+                >
+                  {stg.replace(" (Pool Play)", "")}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
-      {/* Scheduled matches */}
-      {scheduledMatches.length > 0 && (
-        <div className="space-y-4">
-          <h3 className="font-display text-xl text-foreground">Next Up</h3>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {scheduledMatches.map((match) => (
-              <ScoreboardCard
-                key={match.id}
-                match={match}
-                station={stations[match.court as FacilityCourt]}
-                onSelect={() => onSelectMatch(match.id)}
-              />
-            ))}
-          </div>
-        </div>
-      )}
+      {/* Results Grid */}
+      {filteredMatches.length > 0 ? (
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {filteredMatches.map((m) => (
+            <div
+              key={m.id}
+              className="bg-card p-4 border-2 border-border flex flex-col justify-between space-y-4 shadow-sm hover:border-pickle/60 transition-colors"
+            >
+              {/* Card Header */}
+              <div className="flex items-center justify-between border-b-2 border-border/60 pb-2.5">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="text-xs font-bold uppercase tracking-wider text-foreground font-sans">
+                    {m.court}
+                  </span>
+                  {m.stage && (
+                    <span className="text-xs font-bold text-pickle bg-pickle/15 px-2 py-0.5 border border-pickle/30 truncate font-sans">
+                      {m.stage}
+                    </span>
+                  )}
+                </div>
+                <span className="text-[0.65rem] font-bold uppercase tracking-wider bg-brick/15 border border-brick/40 text-brick px-2 py-0.5 font-sans">
+                  Final
+                </span>
+              </div>
 
-      {/* Completed matches */}
-      {finalMatches.length > 0 && (
-        <div className="space-y-4">
-          <h3 className="font-display text-xl text-brick">Completed Matches</h3>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {finalMatches.map((match) => (
-              <ScoreboardCard
-                key={match.id}
-                match={match}
-                station={stations[match.court as FacilityCourt]}
-                onSelect={() => onSelectMatch(match.id)}
-              />
-            ))}
-          </div>
-        </div>
-      )}
+              {/* Matchup & Scores */}
+              <div className="space-y-2.5">
+                {/* Team A */}
+                <div
+                  className={`p-3 border-2 transition-colors flex items-center justify-between ${
+                    m.winnerTeam === m.teamAName
+                      ? "bg-pickle/10 border-pickle/50"
+                      : "bg-muted/40 border-border/60"
+                  }`}
+                >
+                  <div className="min-w-0 mr-3">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span
+                        className={`block text-sm font-bold truncate font-sans ${
+                          m.winnerTeam === m.teamAName ? "text-pickle" : "text-foreground"
+                        }`}
+                      >
+                        {m.teamAName}
+                      </span>
+                      {m.winnerTeam === m.teamAName && (
+                        <span className="text-[0.6rem] font-bold uppercase tracking-wider bg-pickle text-sand px-1.5 py-0.2 shrink-0 font-sans">
+                          Winner
+                        </span>
+                      )}
+                    </div>
+                    <span className="block text-xs text-foreground/80 font-medium truncate mt-0.5 font-sans">
+                      {m.teamAPlayers.join(" / ")}
+                    </span>
+                    {m.teamAClub && (
+                      <span className="inline-block mt-1 text-[0.6rem] font-bold px-2 py-0.5 bg-card text-foreground border border-border uppercase tracking-wider font-sans">
+                        {m.teamAClub}
+                      </span>
+                    )}
+                  </div>
+                  <span
+                    className={`font-display text-3xl font-bold ${
+                      m.winnerTeam === m.teamAName ? "text-pickle" : "text-foreground"
+                    }`}
+                  >
+                    {m.score.teamAScore}
+                  </span>
+                </div>
 
-      {confirmedMatches.length === 0 && (
-        <div className="surface-card p-12 text-center border border-dashed border-border">
-          <h3 className="font-display text-2xl text-foreground">No Matches Active</h3>
-          <p className="text-sm text-foreground/80 mt-2">
-            Matches will broadcast here immediately once an umpire or desk official launches a match.
+                {/* Team B */}
+                <div
+                  className={`p-3 border-2 transition-colors flex items-center justify-between ${
+                    m.winnerTeam === m.teamBName
+                      ? "bg-pickle/10 border-pickle/50"
+                      : "bg-muted/40 border-border/60"
+                  }`}
+                >
+                  <div className="min-w-0 mr-3">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span
+                        className={`block text-sm font-bold truncate font-sans ${
+                          m.winnerTeam === m.teamBName ? "text-pickle" : "text-foreground"
+                        }`}
+                      >
+                        {m.teamBName}
+                      </span>
+                      {m.winnerTeam === m.teamBName && (
+                        <span className="text-[0.6rem] font-bold uppercase tracking-wider bg-pickle text-sand px-1.5 py-0.2 shrink-0 font-sans">
+                          Winner
+                        </span>
+                      )}
+                    </div>
+                    <span className="block text-xs text-foreground/80 font-medium truncate mt-0.5 font-sans">
+                      {m.teamBPlayers.join(" / ")}
+                    </span>
+                    {m.teamBClub && (
+                      <span className="inline-block mt-1 text-[0.6rem] font-bold px-2 py-0.5 bg-card text-foreground border border-border uppercase tracking-wider font-sans">
+                        {m.teamBClub}
+                      </span>
+                    )}
+                  </div>
+                  <span
+                    className={`font-display text-3xl font-bold ${
+                      m.winnerTeam === m.teamBName ? "text-pickle" : "text-foreground"
+                    }`}
+                  >
+                    {m.score.teamBScore}
+                  </span>
+                </div>
+              </div>
+
+              {/* Card Footer: Official + Actions */}
+              <div className="pt-2 border-t-2 border-border/50 flex items-center justify-between text-xs font-sans">
+                <div className="text-xs text-foreground/80 font-medium">
+                  <span>Official: </span>
+                  <span className="font-bold text-foreground">{m.officiatedBy || "Unassigned"}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onSelectMatch(m.id)}
+                  className="px-3 py-1.5 text-xs font-bold uppercase tracking-wider bg-pickle text-sand hover:opacity-90 transition-opacity cursor-pointer shadow-sm font-sans"
+                >
+                  View Details &rarr;
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="bg-card p-12 text-center border-2 border-dashed border-border shadow-sm font-sans">
+          <span className="text-sm font-bold uppercase tracking-wider text-foreground block">
+            {courtFilter !== "all" || bracketFilter !== "all"
+              ? "No Matches Found For Selected Filters"
+              : "No Completed Matches Yet"}
+          </span>
+          <p className="text-xs text-foreground/80 font-medium mt-1.5 max-w-sm mx-auto leading-relaxed">
+            {courtFilter !== "all" || bracketFilter !== "all"
+              ? "Try resetting your court or bracket filter above to see all results."
+              : "Official match results for this active event will be archived here once matches conclude."}
           </p>
+          {(courtFilter !== "all" || bracketFilter !== "all") && (
+            <button
+              type="button"
+              onClick={() => {
+                setCourtFilter("all");
+                setBracketFilter("all");
+              }}
+              className="mt-4 px-4 py-1.5 text-xs font-bold uppercase tracking-wider bg-pickle text-sand hover:opacity-90 transition-opacity cursor-pointer font-sans"
+            >
+              Reset Filters
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -2404,7 +2539,7 @@ function CoinTossOverlay({
           {onClose && (
             <button
               onClick={onClose}
-              className="text-[0.65rem] font-bold uppercase tracking-wider text-sand/60 hover:text-sand transition-colors px-2 py-0.5 border border-border/40 hover:border-sand cursor-pointer"
+              className="text-xs font-bold uppercase tracking-wider text-foreground/80 hover:text-foreground transition-colors px-2.5 py-0.5 border border-border hover:border-foreground cursor-pointer font-sans"
             >
               Skip
             </button>
@@ -2547,33 +2682,33 @@ function CoinTossOverlay({
 
         {phase === "flipping" && (
           <div className="py-3 space-y-1">
-            <span className="text-xs font-bold uppercase tracking-widest text-pickle animate-pulse block">
+            <span className="text-xs font-bold uppercase tracking-widest text-pickle animate-pulse block font-sans">
               Flipping...
             </span>
-            <span className="text-[0.65rem] text-sand/70 font-mono">
+            <span className="text-xs text-foreground/80 font-bold font-sans">
               {callingTeamName} called {callingChoice.toUpperCase()}
             </span>
           </div>
         )}
 
         {phase === "result" && (
-          <div className="space-y-3.5 pt-1">
-            <div className="p-3 bg-pickle/15 border border-pickle/40 text-center space-y-1">
+          <div className="space-y-3.5 pt-1 font-sans">
+            <div className="p-3 bg-pickle/15 border-2 border-pickle/40 text-center space-y-1">
               <div className="flex items-center justify-center gap-2">
-                <span className="text-[0.6rem] uppercase tracking-widest text-pickle font-bold">
+                <span className="text-xs uppercase tracking-wider text-pickle font-bold">
                   Coin Landed On:
                 </span>
-                <span className="text-xs font-bold uppercase tracking-wider text-sand font-mono bg-charcoal px-2 py-0.5 border border-border">
+                <span className="text-xs font-bold uppercase tracking-wider text-sand font-sans bg-charcoal px-2.5 py-0.5 border border-border">
                   {face}
                 </span>
               </div>
-              <span className="block text-[0.6rem] uppercase tracking-widest text-sand/60 font-semibold pt-1">
+              <span className="block text-xs uppercase tracking-wider text-foreground/70 font-bold pt-1">
                 Toss Winner
               </span>
-              <span className="block font-display text-2xl text-foreground">
+              <span className="block font-display text-2xl text-foreground font-bold">
                 {winnerName}
               </span>
-              <span className="block text-[0.65rem] text-sand/80 font-medium">
+              <span className="block text-xs text-foreground/90 font-medium">
                 {winnerName === callingTeamName
                   ? `${winnerName} called ${callingChoice} correctly!`
                   : `${winnerName} won as coin landed on ${face}!`}
@@ -2803,7 +2938,7 @@ function CourtStatusBadge({
     );
   }
   return (
-    <span className="text-[0.55rem] font-bold uppercase tracking-wider text-sand/60">
+    <span className="text-[0.55rem] font-bold uppercase tracking-wider text-foreground/80 bg-card px-1.5 py-0.5 border border-border">
       Available
     </span>
   );
