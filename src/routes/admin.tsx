@@ -1,5 +1,5 @@
 import { createFileRoute, useNavigate, Link, useRouter } from "@tanstack/react-router";
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import type { Team, Tournament, Category } from "@/data/tournaments";
 import { DrawsManager } from "@/components/admin/DrawsManager";
 import { BracketDraw } from "@/components/admin/BracketDraw";
@@ -139,7 +139,13 @@ const tabs: { key: TabKey; label: string }[] = [
 
 function Admin() {
   const navigate = useNavigate();
-  const { tournaments, isOnline } = useTournamentStore();
+  const { tournaments, isLoading, isOnline } = useTournamentStore();
+
+  const lastKnownTournamentsRef = useRef<Tournament[]>(tournaments);
+  if (tournaments.length > 0) {
+    lastKnownTournamentsRef.current = tournaments;
+  }
+  const effectiveTournaments = tournaments.length > 0 ? tournaments : lastKnownTournamentsRef.current;
 
   const [isMounted, setIsMounted] = useState(false);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -186,22 +192,22 @@ function Admin() {
     }
   }, []);
 
-  const tournament = tournaments.find((t) => t.slug === tournamentSlug) ?? tournaments[0];
+  const tournament = effectiveTournaments.find((t) => t.slug === tournamentSlug) ?? effectiveTournaments[0];
   const category =
     tournament?.categories?.find((c) => c.id === categoryId || (c as any).category_slug === categoryId) ?? tournament?.categories?.[0];
 
   // Sync tournamentSlug when tournaments change
   useEffect(() => {
-    if (tournaments.length > 0) {
-      if (!tournamentSlug || !tournaments.some((t) => t.slug === tournamentSlug)) {
-        const first = tournaments[0]!;
+    if (effectiveTournaments.length > 0) {
+      if (!tournamentSlug || !effectiveTournaments.some((t) => t.slug === tournamentSlug)) {
+        const first = effectiveTournaments[0]!;
         setTournamentSlug(first.slug);
         if (first.categories && first.categories.length > 0) {
           setCategoryId(first.categories[0]!.id);
         }
       }
     }
-  }, [tournaments, tournamentSlug]);
+  }, [effectiveTournaments, tournamentSlug]);
 
   // Sync categoryId when tournament categories change
   useEffect(() => {
@@ -551,7 +557,16 @@ function Admin() {
               </div>
 
               {/* No tournament guard */}
-              {tournaments.length === 0 && (
+              {effectiveTournaments.length === 0 && isLoading && (
+                <div className="surface-card p-10 sm:p-14 text-center max-w-xl mx-auto border border-border mt-8">
+                  <div className="flex flex-col items-center justify-center gap-3">
+                    <div className="h-6 w-6 border-2 border-pickle border-t-transparent rounded-full animate-spin" />
+                    <span className="text-xs uppercase tracking-[0.28em] text-pickle font-bold">Loading Tournaments</span>
+                  </div>
+                </div>
+              )}
+
+              {effectiveTournaments.length === 0 && !isLoading && (
                 <div className="surface-card p-10 sm:p-14 text-center max-w-xl mx-auto border border-border mt-8">
                   <span className="text-xs uppercase tracking-[0.28em] text-pickle font-bold">Setup Required</span>
                   <h3 className="font-display text-3xl text-foreground mt-2">No Tournaments Created Yet</h3>
@@ -567,7 +582,7 @@ function Admin() {
                 </div>
               )}
 
-              {tournaments.length > 0 && (!tournament || !category) && (
+              {effectiveTournaments.length > 0 && (!tournament || !category) && (
                 <div className="surface-card p-10 sm:p-14 text-center max-w-xl mx-auto border border-border mt-8">
                   <span className="text-xs uppercase tracking-[0.28em] text-pickle font-bold">Divisions Required</span>
                   <h3 className="font-display text-3xl text-foreground mt-2">No Divisions Configured</h3>
@@ -587,11 +602,11 @@ function Admin() {
                 <BracketDraw
                   tournament={tournament}
                   category={category}
-                  tournaments={tournaments}
+                  tournaments={effectiveTournaments}
                   tournamentSlug={tournamentSlug}
                   setTournamentSlug={(slug) => {
                     setTournamentSlug(slug);
-                    const next = tournaments.find((t) => t.slug === slug);
+                    const next = effectiveTournaments.find((t) => t.slug === slug);
                     if (next?.categories?.[0]) setCategoryId(next.categories[0].id);
                   }}
                   categoryId={categoryId}
@@ -602,11 +617,11 @@ function Admin() {
                 <DrawsManager
                   tournament={tournament}
                   category={category}
-                  tournaments={tournaments}
+                  tournaments={effectiveTournaments}
                   tournamentSlug={tournamentSlug}
                   setTournamentSlug={(slug) => {
                     setTournamentSlug(slug);
-                    const next = tournaments.find((t) => t.slug === slug);
+                    const next = effectiveTournaments.find((t) => t.slug === slug);
                     if (next?.categories?.[0]) setCategoryId(next.categories[0].id);
                   }}
                   categoryId={categoryId}
@@ -620,7 +635,15 @@ function Admin() {
           {/* ── DISPATCH TAB ── */}
           {activeTab === "dispatch" && (
             <>
-              {tournaments.length === 0 && (
+              {effectiveTournaments.length === 0 && isLoading && (
+                <div className="surface-card p-10 sm:p-14 text-center max-w-xl mx-auto border border-border mt-8">
+                  <div className="flex flex-col items-center justify-center gap-3">
+                    <div className="h-6 w-6 border-2 border-pickle border-t-transparent rounded-full animate-spin" />
+                    <span className="text-xs uppercase tracking-[0.28em] text-pickle font-bold">Loading Dispatch Stations</span>
+                  </div>
+                </div>
+              )}
+              {effectiveTournaments.length === 0 && !isLoading && (
                 <div className="surface-card p-10 sm:p-14 text-center max-w-xl mx-auto border border-border mt-8">
                   <span className="text-xs uppercase tracking-[0.28em] text-pickle font-bold">Setup Required</span>
                   <h3 className="font-display text-3xl text-foreground mt-2">No Tournaments Created Yet</h3>
@@ -636,11 +659,11 @@ function Admin() {
                 <CourtDispatch
                   tournament={tournament}
                   category={category}
-                  tournaments={tournaments}
+                  tournaments={effectiveTournaments}
                   tournamentSlug={tournamentSlug}
                   setTournamentSlug={(slug) => {
                     setTournamentSlug(slug);
-                    const next = tournaments.find((t) => t.slug === slug);
+                    const next = effectiveTournaments.find((t) => t.slug === slug);
                     if (next?.categories?.[0]) setCategoryId(next.categories[0].id);
                   }}
                   categoryId={categoryId}
@@ -678,7 +701,7 @@ function Admin() {
                       activeTournamentSlug={tournamentSlug}
                       onSelectTournament={(slug) => {
                         setTournamentSlug(slug);
-                        const found = tournaments.find((t) => t.slug === slug);
+                        const found = effectiveTournaments.find((t) => t.slug === slug);
                         if (found?.categories?.[0]) setCategoryId(found.categories[0].id);
                       }}
                     />
@@ -713,11 +736,11 @@ function Admin() {
                       <TeamsTab
                         tournament={tournament}
                         category={category}
-                        tournaments={tournaments}
+                        tournaments={effectiveTournaments}
                         tournamentSlug={tournamentSlug}
                         setTournamentSlug={(slug) => {
                           setTournamentSlug(slug);
-                          const next = tournaments.find((t) => t.slug === slug);
+                          const next = effectiveTournaments.find((t) => t.slug === slug);
                           if (next?.categories?.[0]) setCategoryId(next.categories[0].id);
                         }}
                         categoryId={categoryId}
@@ -758,7 +781,7 @@ function Admin() {
           {/* ── TEAMS & PAYMENTS TAB ── */}
           {activeTab === "teams" && (
             <div className="max-w-4xl space-y-4">
-              {tournaments.length === 0 && (
+              {effectiveTournaments.length === 0 && !isLoading && (
                 <div className="surface-card p-10 sm:p-14 text-center max-w-xl mx-auto border border-border mt-8">
                   <span className="text-xs uppercase tracking-[0.28em] text-pickle font-bold">Setup Required</span>
                   <h3 className="font-display text-3xl text-foreground mt-2">No Tournaments Created Yet</h3>
@@ -774,7 +797,7 @@ function Admin() {
                 </div>
               )}
 
-              {tournaments.length > 0 && (!tournament || !category) && (
+              {effectiveTournaments.length > 0 && (!tournament || !category) && (
                 <div className="surface-card p-10 sm:p-14 text-center max-w-xl mx-auto border border-border mt-8">
                   <span className="text-xs uppercase tracking-[0.28em] text-pickle font-bold">Divisions Required</span>
                   <h3 className="font-display text-3xl text-foreground mt-2">No Divisions Configured</h3>
@@ -794,11 +817,11 @@ function Admin() {
                 <TeamsTab
                   tournament={tournament}
                   category={category}
-                  tournaments={tournaments}
+                  tournaments={effectiveTournaments}
                   tournamentSlug={tournamentSlug}
                   setTournamentSlug={(slug) => {
                     setTournamentSlug(slug);
-                    const next = tournaments.find((t) => t.slug === slug);
+                    const next = effectiveTournaments.find((t) => t.slug === slug);
                     if (next?.categories?.[0]) setCategoryId(next.categories[0].id);
                   }}
                   categoryId={categoryId}

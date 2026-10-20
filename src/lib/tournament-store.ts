@@ -27,6 +27,9 @@ const OFFLINE_BACKUP_KEY = "dv_tournaments_offline_cache";
 // Global in-memory authority
 let _memoryTournaments: Tournament[] | null = null;
 let _isInitialFetchDone = false;
+let _isSyncing = false;
+let _hasQueuedSync = false;
+let _syncDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 function readOfflineBackup(): Tournament[] {
   if (typeof window === "undefined") return [];
@@ -423,22 +426,48 @@ export function useTournamentStore() {
     if (typeof navigator !== "undefined" && !navigator.onLine) {
       return;
     }
+    if (_isSyncing) {
+      _hasQueuedSync = true;
+      return;
+    }
+    _isSyncing = true;
     try {
       const cloudTournaments = await dbGetTournaments();
-      if (Array.isArray(cloudTournaments)) {
-        // Direct database state is the single source of truth
-        _memoryTournaments = cloudTournaments;
-        writeOfflineBackup(cloudTournaments);
-        setTournaments(cloudTournaments);
-        setLastSyncedAt(new Date());
-        _isInitialFetchDone = true;
+      // If cloud fetch failed (query error, rate limit, abort), retain active memory & storage!
+      if (cloudTournaments === null) {
+        return;
       }
+      // If cloud returned empty array, but we currently have tournaments in memory,
+      // do not wipe active memory state due to a transient cloud read or blip!
+      if (cloudTournaments.length === 0 && _memoryTournaments && _memoryTournaments.length > 0) {
+        return;
+      }
+
+      _memoryTournaments = cloudTournaments;
+      writeOfflineBackup(cloudTournaments);
+      setTournaments(cloudTournaments);
+      setLastSyncedAt(new Date());
+      _isInitialFetchDone = true;
     } catch (err) {
       console.warn("[TournamentStore] Sync failed, maintaining active memory state:", err);
     } finally {
+      _isSyncing = false;
       setIsLoading(false);
+      if (_hasQueuedSync) {
+        _hasQueuedSync = false;
+        setTimeout(() => syncFromCloud(), 150);
+      }
     }
   }, []);
+
+  const debouncedSync = useCallback(() => {
+    if (_syncDebounceTimer) {
+      clearTimeout(_syncDebounceTimer);
+    }
+    _syncDebounceTimer = setTimeout(() => {
+      syncFromCloud();
+    }, 300);
+  }, [syncFromCloud]);
 
   const refresh = useCallback(() => {
     setTournaments(getTournaments());
@@ -451,7 +480,7 @@ export function useTournamentStore() {
     // Track online / offline status
     const handleOnline = () => {
       setIsOnline(true);
-      syncFromCloud();
+      debouncedSync();
     };
     const handleOffline = () => {
       setIsOnline(false);
@@ -468,39 +497,25 @@ export function useTournamentStore() {
     // Re-sync when tab visibility is restored
     const handleVisibility = () => {
       if (document.visibilityState === "visible" && navigator.onLine) {
-        syncFromCloud();
+        debouncedSync();
       }
     };
     document.addEventListener("visibilitychange", handleVisibility);
 
-    // Listen for realtime changes on tournaments, categories, and teams
-    let unsubRealtime: (() => void) | null = null;
-    try {
-      unsubRealtime = dbSubscribeToLive(
-        () => {
-          if (mounted) syncFromCloud();
-        },
-        () => {
-          if (mounted) syncFromCloud();
-        }
-      );
-    } catch (err) {
-      console.warn("[TournamentStore] Realtime listener error:", err);
-    }
-
-    // Additional Supabase channel explicitly listening to tournament changes
+    // Supabase channel explicitly listening to tournament, category, and team changes
+    // (debounced so rapid multi-table updates don't cause thundering-herd refetches)
     let directTourneyChannel: ReturnType<typeof supabase.channel> | null = null;
     try {
       directTourneyChannel = supabase
         .channel(`tourney-realtime-${Date.now()}`)
         .on("postgres_changes", { event: "*", schema: "public", table: "tournaments" }, () => {
-          if (mounted) syncFromCloud();
+          if (mounted) debouncedSync();
         })
         .on("postgres_changes", { event: "*", schema: "public", table: "categories" }, () => {
-          if (mounted) syncFromCloud();
+          if (mounted) debouncedSync();
         })
         .on("postgres_changes", { event: "*", schema: "public", table: "teams" }, () => {
-          if (mounted) syncFromCloud();
+          if (mounted) debouncedSync();
         })
         .subscribe();
     } catch {
@@ -520,12 +535,8 @@ export function useTournamentStore() {
       document.removeEventListener("visibilitychange", handleVisibility);
       window.removeEventListener("dv_tournaments_updated", handleLocalUpdate);
 
-      if (unsubRealtime) {
-        try {
-          unsubRealtime();
-        } catch {
-          // ignore
-        }
+      if (_syncDebounceTimer) {
+        clearTimeout(_syncDebounceTimer);
       }
       if (directTourneyChannel) {
         try {
@@ -535,7 +546,7 @@ export function useTournamentStore() {
         }
       }
     };
-  }, [syncFromCloud]);
+  }, [syncFromCloud, debouncedSync]);
 
   return {
     tournaments,

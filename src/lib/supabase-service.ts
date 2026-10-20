@@ -50,8 +50,32 @@ export function clearMainDrawCache(tournamentSlug: string, categoryId?: string):
   }
 }
 
+// Tombstone tracking to prevent asynchronous cloud reads from resurrecting draws that are currently being reset
+const _pendingResetDraws = new Set<string>();
+
+export function markDrawAsReset(tournamentSlug: string, categoryId: string): void {
+  if (!tournamentSlug || !categoryId) return;
+  const key = `${tournamentSlug}_${categoryId.trim().toLowerCase()}`;
+  _pendingResetDraws.add(key);
+  clearDrawnGroupsCache(tournamentSlug, categoryId);
+}
+
+export function clearDrawResetMark(tournamentSlug: string, categoryId: string): void {
+  if (!tournamentSlug || !categoryId) return;
+  const key = `${tournamentSlug}_${categoryId.trim().toLowerCase()}`;
+  _pendingResetDraws.delete(key);
+}
+
+export function isDrawResetMarked(tournamentSlug: string, categoryId: string): boolean {
+  if (!tournamentSlug || !categoryId) return false;
+  const key = `${tournamentSlug}_${categoryId.trim().toLowerCase()}`;
+  return _pendingResetDraws.has(key);
+}
+
 export function getCachedDrawnGroups(tournamentSlug: string, categoryId: string): any[] | null {
   if (!tournamentSlug || !categoryId) return null;
+  if (isDrawResetMarked(tournamentSlug, categoryId)) return null;
+
   // 1. Direct match
   const direct = _drawnGroupsCache.get(`${tournamentSlug}_${categoryId}`);
   if (direct && Array.isArray(direct) && direct.length > 0) {
@@ -75,6 +99,7 @@ export function getCachedDrawnGroups(tournamentSlug: string, categoryId: string)
 }
 
 export async function dbGetDrawnGroups(tournamentSlug: string, categoryId: string): Promise<any[] | null> {
+  if (isDrawResetMarked(tournamentSlug, categoryId)) return null;
   const cached = getCachedDrawnGroups(tournamentSlug, categoryId);
   if (cached && Array.isArray(cached) && cached.length > 0) return cached;
 
@@ -89,7 +114,9 @@ export async function dbGetDrawnGroups(tournamentSlug: string, categoryId: strin
       const meta = tourney.rules as any;
       if (meta.drawnGroups && typeof meta.drawnGroups === "object") {
         for (const [catId, grps] of Object.entries(meta.drawnGroups)) {
-          _drawnGroupsCache.set(`${tournamentSlug}_${catId}`, grps as any);
+          if (!isDrawResetMarked(tournamentSlug, catId)) {
+            _drawnGroupsCache.set(`${tournamentSlug}_${catId}`, grps as any);
+          }
         }
         return getCachedDrawnGroups(tournamentSlug, categoryId);
       }
@@ -112,7 +139,7 @@ export function getCachedDispatchQueue(): any[] {
 /**
  * Fetch all tournaments from Supabase, including categories and teams.
  */
-export async function dbGetTournaments(): Promise<Tournament[]> {
+export async function dbGetTournaments(): Promise<Tournament[] | null> {
   try {
     const { data: dbTournaments, error } = await supabase
       .from("tournaments")
@@ -126,11 +153,11 @@ export async function dbGetTournaments(): Promise<Tournament[]> {
       .order("created_at", { ascending: false });
 
     if (error) {
-      console.warn("[Supabase] Failed to fetch tournaments, using fallback:", error.message);
-      return [];
+      console.warn("[Supabase] Failed to fetch tournaments, retaining active memory state:", error.message);
+      return null;
     }
 
-    if (!dbTournaments || dbTournaments.length === 0) {
+    if (!dbTournaments) {
       return [];
     }
 
@@ -145,25 +172,18 @@ export async function dbGetTournaments(): Promise<Tournament[]> {
         parsedRules = Array.isArray(metaObj.rules) ? metaObj.rules : [];
         if (metaObj.drawnGroups && typeof metaObj.drawnGroups === "object") {
           for (const [catId, groups] of Object.entries(metaObj.drawnGroups)) {
-            _drawnGroupsCache.set(`${t.slug}_${catId}`, groups as any);
-          }
-          if (typeof window !== "undefined") {
-            window.dispatchEvent(new Event("dv_drawn_groups_updated"));
+            if (!isDrawResetMarked(t.slug, catId)) {
+              _drawnGroupsCache.set(`${t.slug}_${catId}`, groups as any);
+            }
           }
         }
         if (metaObj.mainDraw && typeof metaObj.mainDraw === "object") {
           for (const [catId, draw] of Object.entries(metaObj.mainDraw)) {
             _mainDrawCache.set(`${t.slug}_${catId}`, draw as any);
           }
-          if (typeof window !== "undefined") {
-            window.dispatchEvent(new Event("dv_main_draw_updated"));
-          }
         }
         if (Array.isArray(metaObj.dispatchQueue)) {
           _dispatchQueueCache = metaObj.dispatchQueue;
-          if (typeof window !== "undefined") {
-            window.dispatchEvent(new Event("dv_dispatch_queue_updated"));
-          }
         }
       }
 
@@ -514,12 +534,29 @@ export async function dbDeleteMatchesForCategory(
   categoryId: string
 ): Promise<boolean> {
   try {
-    const { error } = await supabase
-      .from("matches")
-      .delete()
-      .eq("tournament_slug", tournamentSlug)
-      .eq("category_id", categoryId)
-      .neq("status", "final");
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    let targetCatUuid = isUuid.test(categoryId) ? categoryId : null;
+
+    if (!targetCatUuid) {
+      const { data: catRow } = await supabase
+        .from("categories")
+        .select("id")
+        .eq("category_slug", categoryId)
+        .maybeSingle();
+      if (catRow?.id) {
+        targetCatUuid = catRow.id;
+      }
+    }
+
+    let query = supabase.from("matches").delete().neq("status", "final");
+    if (tournamentSlug) {
+      query = query.eq("tournament_slug", tournamentSlug);
+    }
+    if (targetCatUuid) {
+      query = query.eq("category_id", targetCatUuid);
+    }
+
+    const { error } = await query;
     if (error) {
       console.warn("[Supabase] Error deleting category matches:", error.message);
       return false;
@@ -937,7 +974,8 @@ export async function dbDeleteDrawnGroups(
   tournamentSlug: string,
   categoryId: string
 ): Promise<boolean> {
-  // Synchronously wipe in-memory cache immediately to prevent resurrecting stale data
+  // Synchronously mark reset tombstone immediately to prevent background sync from resurrecting stale data
+  markDrawAsReset(tournamentSlug, categoryId);
   clearDrawnGroupsCache(tournamentSlug, categoryId);
 
   try {
@@ -947,7 +985,10 @@ export async function dbDeleteDrawnGroups(
       .eq("slug", tournamentSlug)
       .maybeSingle();
 
-    if (!tourney) return false;
+    if (!tourney) {
+      setTimeout(() => clearDrawResetMark(tournamentSlug, categoryId), 2000);
+      return false;
+    }
 
     let catSlug = categoryId;
     let catUuid = categoryId;
@@ -965,6 +1006,8 @@ export async function dbDeleteDrawnGroups(
       }
     }
 
+    markDrawAsReset(tournamentSlug, catSlug);
+    markDrawAsReset(tournamentSlug, catUuid);
     clearDrawnGroupsCache(tournamentSlug, catSlug);
     clearDrawnGroupsCache(tournamentSlug, catUuid);
 
@@ -985,11 +1028,25 @@ export async function dbDeleteDrawnGroups(
         .update({ rules: updatedMeta, updated_at: new Date().toISOString() })
         .eq("slug", tournamentSlug);
 
+      setTimeout(() => {
+        clearDrawResetMark(tournamentSlug, categoryId);
+        clearDrawResetMark(tournamentSlug, catSlug);
+        clearDrawResetMark(tournamentSlug, catUuid);
+      }, 2000);
+
       return !error;
     }
+
+    setTimeout(() => {
+      clearDrawResetMark(tournamentSlug, categoryId);
+      clearDrawResetMark(tournamentSlug, catSlug);
+      clearDrawResetMark(tournamentSlug, catUuid);
+    }, 2000);
+
     return true;
   } catch (err) {
     console.warn("[Supabase] Failed to delete drawn groups:", err);
+    setTimeout(() => clearDrawResetMark(tournamentSlug, categoryId), 2000);
     return false;
   }
 }

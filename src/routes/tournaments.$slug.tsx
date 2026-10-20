@@ -37,7 +37,8 @@ export const Route = createFileRoute("/tournaments/$slug")({
   loader: async ({ params }) => {
     let cloudList: Tournament[] = [];
     try {
-      cloudList = await dbGetTournaments();
+      const res = await dbGetTournaments();
+      if (res) cloudList = res;
     } catch {
       // ignore
     }

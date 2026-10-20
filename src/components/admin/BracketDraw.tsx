@@ -11,6 +11,7 @@ import {
   getCachedDrawnGroups,
   clearDrawnGroupsCache,
   clearMainDrawCache,
+  markDrawAsReset,
 } from "@/lib/supabase-service";
 
 export type BracketSlot = {
@@ -180,8 +181,9 @@ export function resetDrawnGroups(
 ): void {
   const targetIds = Array.from(new Set([categoryId, ...extraCategoryIds].filter(Boolean)));
 
-  // 1. Immediately wipe in-memory caches synchronously so no listeners read stale data
+  // 1. Immediately wipe in-memory caches and register tombstones so background cloud reads cannot resurrect stale draws
   for (const cid of targetIds) {
+    markDrawAsReset(tournamentSlug, cid);
     clearDrawnGroupsCache(tournamentSlug, cid);
     clearMainDrawCache(tournamentSlug, cid);
   }
@@ -213,13 +215,12 @@ export function resetDrawnGroups(
     }
   }
 
-  // 3. Delete from Supabase cloud database
-  for (const cid of targetIds) {
-    dbDeleteDrawnGroups(tournamentSlug, cid).catch((err) => {
-      console.warn("[Supabase] Failed to delete drawn groups from cloud:", err);
-    });
-    dbDeleteMainDraw(tournamentSlug, cid).catch(() => {});
-  }
+  // 3. Delete from Supabase cloud database (single targeted call cleans both slug and uuid)
+  const primaryId = targetIds[0] || categoryId;
+  dbDeleteDrawnGroups(tournamentSlug, primaryId).catch((err) => {
+    console.warn("[Supabase] Failed to delete drawn groups from cloud:", err);
+  });
+  dbDeleteMainDraw(tournamentSlug, primaryId).catch(() => {});
 
   // 4. Purge all matches (including final ones) for this category from live match store & database
   for (const cid of targetIds) {

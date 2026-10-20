@@ -34,7 +34,8 @@ import { QualificationsCarousel } from "@/components/public/QualificationsCarous
 export const Route = createFileRoute("/")({
   loader: async () => {
     try {
-      return await dbGetTournaments();
+      const res = await dbGetTournaments();
+      return res || [];
     } catch {
       return [];
     }
