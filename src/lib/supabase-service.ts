@@ -249,12 +249,20 @@ export async function dbGetTournaments(): Promise<Tournament[] | null> {
           paymentStatus: (tm.paymentStatus as Team["paymentStatus"]) || "Verified",
         }));
 
+        const savedMaxEntries =
+          c.max_entries ||
+          c.max_teams ||
+          metaObj?.categoryMeta?.[c.category_slug || c.id]?.maxEntries ||
+          metaObj?.categoryMeta?.[c.id]?.maxEntries ||
+          16;
+
         return {
           id: c.category_slug || c.id,
           label: c.label,
           level: c.level as Category["level"],
           division: c.division as Category["division"],
           fee: c.entry_fee || undefined,
+          maxEntries: Number(savedMaxEntries) || 16,
           teams: allTeams,
           pendingTeams: [],
           pools: [],
@@ -301,11 +309,25 @@ export async function dbSaveTournament(t: Tournament): Promise<boolean> {
       .eq("slug", t.slug)
       .maybeSingle();
 
+    const categoryMeta: Record<string, { maxEntries: number }> = {};
+    (t.categories || []).forEach((cat) => {
+      categoryMeta[cat.id] = { maxEntries: cat.maxEntries || 16 };
+    });
+
     let rulesToSave: any = t.rules;
     if (existingTourney?.rules && typeof existingTourney.rules === "object" && !Array.isArray(existingTourney.rules)) {
       rulesToSave = {
         ...(existingTourney.rules as any),
         rules: Array.isArray(t.rules) ? t.rules : (existingTourney.rules as any).rules || [],
+        categoryMeta: {
+          ...((existingTourney.rules as any).categoryMeta || {}),
+          ...categoryMeta,
+        },
+      };
+    } else {
+      rulesToSave = {
+        rules: Array.isArray(t.rules) ? t.rules : [],
+        categoryMeta,
       };
     }
 

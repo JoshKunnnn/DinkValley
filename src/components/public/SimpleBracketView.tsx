@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Category, Team } from "@/data/tournaments";
-import { findLiveMatchForTeams, type LiveMatch } from "@/lib/match-store";
+import { findLiveMatchForTeams, generateBalancedRoundRobinPairs, type LiveMatch } from "@/lib/match-store";
 import type { BracketGroup } from "@/components/admin/BracketDraw";
 import type { KnockoutMatch } from "@/components/admin/DrawsManager";
 import { UpNextSlider } from "./UpNextSlider";
@@ -215,61 +215,58 @@ export function SimpleBracketView({
     const tableMap = new Map<string, { name: string; w: number; l: number; pd: number }>();
     teams.forEach((t) => tableMap.set(t.name, { name: t.name, w: 0, l: 0, pd: 0 }));
 
-    for (let i = 0; i < teams.length; i++) {
-      for (let j = i + 1; j < teams.length; j++) {
-        const a = teams[i]!;
-        const b = teams[j]!;
-        const live = findLiveMatchForTeams(matches, a.name, b.name);
-        const flipped = live ? live.teamAName !== a.name : false;
-        const scoreA = live ? (flipped ? live.score.teamBScore : live.score.teamAScore) : 0;
-        const scoreB = live ? (flipped ? live.score.teamAScore : live.score.teamBScore) : 0;
-        const rawCourt = live && live.court && live.court !== "Queue" ? live.court : null;
-        const court = formatCourtName(rawCourt);
+    const pairs = generateBalancedRoundRobinPairs(teams);
+    pairs.forEach(([a, b], pIdx) => {
+      const live = findLiveMatchForTeams(matches, a.name, b.name);
+      const flipped = live ? live.teamAName !== a.name : false;
+      const scoreA = live ? (flipped ? live.score.teamBScore : live.score.teamAScore) : 0;
+      const scoreB = live ? (flipped ? live.score.teamAScore : live.score.teamBScore) : 0;
+      const rawCourt = live && live.court && live.court !== "Queue" ? live.court : null;
+      const court = formatCourtName(rawCourt);
 
-        let statusKind: MatchStatusKind = "next";
-        let statusText = "Up Next";
-        let winnerName: string | null = null;
+      let statusKind: MatchStatusKind = "next";
+      let statusText = "Up Next";
+      let winnerName: string | null = null;
 
-        if (live?.status === "live") {
-          statusKind = "playing";
-          statusText = court ? `Live on ${court}` : "Playing Now";
-        } else if (live?.status === "final") {
-          statusKind = "done";
-          winnerName = live.winnerTeam ?? (scoreA > scoreB ? a.name : scoreB > scoreA ? b.name : null);
-          statusText = winnerName ? `Done - ${winnerName} won` : "Finished";
-        }
-
-        if (statusKind === "done") {
-          const statsA = tableMap.get(a.name);
-          const statsB = tableMap.get(b.name);
-          if (statsA && statsB) {
-            if (scoreA > scoreB) {
-              statsA.w += 1;
-              statsB.l += 1;
-            } else if (scoreB > scoreA) {
-              statsB.w += 1;
-              statsA.l += 1;
-            }
-            statsA.pd += scoreA - scoreB;
-            statsB.pd += scoreB - scoreA;
-          }
-        }
-
-        items.push({
-          key: `${currentGroup.letter}-${i}-${j}`,
-          teamAName: a.name,
-          teamBName: b.name,
-          teamA: a,
-          teamB: b,
-          status: statusKind,
-          scoreA,
-          scoreB,
-          court,
-          statusText,
-          winnerName,
-        });
+      if (live?.status === "live") {
+        statusKind = "playing";
+        statusText = court ? `Live on ${court}` : "Playing Now";
+      } else if (live?.status === "final") {
+        statusKind = "done";
+        winnerName = live.winnerTeam ?? (scoreA > scoreB ? a.name : scoreB > scoreA ? b.name : null);
+        statusText = winnerName ? `Done - ${winnerName} won` : "Finished";
       }
-    }
+
+      if (statusKind === "done") {
+        const statsA = tableMap.get(a.name);
+        const statsB = tableMap.get(b.name);
+        if (statsA && statsB) {
+          if (scoreA > scoreB) {
+            statsA.w += 1;
+            statsB.l += 1;
+          } else if (scoreB > scoreA) {
+            statsB.w += 1;
+            statsA.l += 1;
+          }
+          statsA.pd += scoreA - scoreB;
+          statsB.pd += scoreB - scoreA;
+        }
+      }
+
+      items.push({
+        key: `${currentGroup.letter}-${a.id}-${b.id}-${pIdx}`,
+        teamAName: a.name,
+        teamBName: b.name,
+        teamA: a,
+        teamB: b,
+        status: statusKind,
+        scoreA,
+        scoreB,
+        court,
+        statusText,
+        winnerName,
+      });
+    });
 
     const sortedStandings = [...tableMap.values()].sort((x, y) => y.w - x.w || y.pd - x.pd);
     return { matchItems: items, standings: sortedStandings, roundsMap: new Map() };
@@ -298,6 +295,7 @@ export function SimpleBracketView({
   const playingMatches = matchItems.filter((m) => m.status === "playing");
   const upcomingMatches = matchItems.filter((m) => m.status === "next");
   const finishedMatches = matchItems.filter((m) => m.status === "done");
+  const isBracketDone = matchItems.length > 0 && finishedMatches.length === matchItems.length;
 
   return (
     <div
@@ -455,18 +453,21 @@ export function SimpleBracketView({
                     {currentSection.title} Standings
                   </h4>
                   <p className="text-xs text-foreground/70 mt-0.5">
-                    Top 2 teams advance to the Championship Finals.
+                    {isBracketDone
+                      ? "Group play concluded. Top 2 teams advance to Championship Finals."
+                      : "Top 2 teams advance once all group matches conclude."}
                   </p>
                 </div>
-                <span className="text-xs uppercase tracking-wider font-mono text-muted-foreground shrink-0">
-                  Wins / Losses
-                </span>
+                <div className="flex items-center gap-3 sm:gap-4 text-xs uppercase tracking-wider font-mono text-muted-foreground shrink-0">
+                  <span className="w-14 text-center">W - L</span>
+                  <span className="w-12 text-right">DIFF</span>
+                </div>
               </div>
 
               <div className="mt-3 divide-y divide-border/60">
                 {standings.map((team, rank) => {
                   const isHighlight = highlightTeam === team.name;
-                  const isAdvancing = rank < 2;
+                  const isAdvancing = isBracketDone && rank < 2;
 
                   return (
                     <div
@@ -486,9 +487,16 @@ export function SimpleBracketView({
                           #{rank + 1}
                         </span>
                         <div className="min-w-0">
-                          <span className="font-semibold text-foreground truncate block">
-                            {team.name}
-                          </span>
+                          <div className="flex items-center gap-2">
+                            <span className="font-semibold text-foreground truncate block">
+                              {team.name}
+                            </span>
+                            {isAdvancing && (
+                              <span className="text-[0.65rem] font-mono px-1.5 py-0.5 rounded bg-pickle/20 text-pickle border border-pickle/30 font-bold shrink-0">
+                                Seed {rank + 1}
+                              </span>
+                            )}
+                          </div>
                           {isAdvancing && (
                             <span className="text-[0.65rem] font-bold uppercase tracking-wider text-pickle block">
                               Advances to Finals
@@ -497,9 +505,22 @@ export function SimpleBracketView({
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-3 font-mono text-xs sm:text-sm shrink-0">
-                        <span className="text-pickle font-bold">{team.w}W</span>
-                        <span className="text-foreground/50">{team.l}L</span>
+                      <div className="flex items-center gap-3 sm:gap-4 font-mono text-xs sm:text-sm shrink-0">
+                        <div className="w-14 flex items-center justify-center gap-1.5">
+                          <span className="text-pickle font-bold">{team.w}W</span>
+                          <span className="text-foreground/50">{team.l}L</span>
+                        </div>
+                        <span
+                          className={`w-12 text-right font-bold ${
+                            team.pd > 0
+                              ? "text-pickle"
+                              : team.pd < 0
+                                ? "text-red-400"
+                                : "text-foreground/60"
+                          }`}
+                        >
+                          {team.pd > 0 ? `+${team.pd}` : team.pd}
+                        </span>
                       </div>
                     </div>
                   );

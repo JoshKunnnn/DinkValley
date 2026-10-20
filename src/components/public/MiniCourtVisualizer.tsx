@@ -22,15 +22,15 @@ export function MiniCourtVisualizer({
   return (
     <div className={`w-full overflow-hidden rounded border border-pickle/40 bg-[#16221D] ${compact ? "p-2" : "p-3 sm:p-4"}`}>
       {/* Top Banner: Service Call readout */}
-      <div className="flex items-center justify-between pb-2 mb-2 border-b border-border/40 text-[0.65rem] font-mono uppercase tracking-wider text-sand">
-        <span className="flex items-center gap-1.5 font-bold text-pickle">
+      <div className="flex items-center justify-between pb-2 mb-2 border-b border-white/15 text-[0.68rem] font-mono uppercase tracking-wider text-white">
+        <span className="flex items-center gap-1.5 font-black text-emerald-400">
           <span className="relative flex h-2 w-2">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-pickle opacity-75"></span>
-            <span className="relative inline-flex rounded-full h-2 w-2 bg-pickle"></span>
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+            <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-400"></span>
           </span>
           Serving: {isTeamAServing ? teamAName : teamBName}
         </span>
-        <span className="px-1.5 py-0.5 rounded bg-charcoal border border-border text-[0.6rem] font-bold">
+        <span className="px-2 py-0.5 rounded bg-black/80 border border-emerald-500/40 text-[0.62rem] font-black text-emerald-300">
           Server {score.serverNumber} &middot; {isRightCourt ? "Right (Even)" : "Left (Odd)"}
         </span>
       </div>

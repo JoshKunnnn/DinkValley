@@ -11,6 +11,7 @@ import { useTournamentStore } from "@/lib/tournament-store";
 import {
   useMatchStore,
   findLiveMatchForTeams,
+  generateBalancedRoundRobinPairs,
   type LiveMatch,
 } from "@/lib/match-store";
 import {
@@ -32,6 +33,7 @@ import { TeamFinder } from "@/components/public/TeamFinder";
 import { StepIndicator } from "@/components/public/StepIndicator";
 import { UpNextSlider } from "@/components/public/UpNextSlider";
 import { FinalResultsView } from "@/components/public/FinalResultsView";
+import { LiveCourtsBoard } from "@/components/public/LiveCourtsBoard";
 
 export const Route = createFileRoute("/tournaments/$slug")({
   loader: async ({ params }) => {
@@ -410,13 +412,6 @@ function TournamentPage() {
             </button>
             <button
               type="button"
-              onClick={() => setIsRegModalOpen(true)}
-              className="min-h-[3rem] px-4 py-2.5 border-2 border-border bg-card text-foreground text-xs sm:text-sm font-bold uppercase tracking-wider rounded-xl hover:border-pickle transition-colors cursor-pointer"
-            >
-              Register Team +
-            </button>
-            <button
-              type="button"
               onClick={() => setFriendlyMode((m) => !m)}
               className="min-h-[3rem] px-4 py-2.5 border-2 border-border bg-charcoal text-sand text-xs sm:text-sm font-mono uppercase tracking-wider rounded-xl hover:border-sand/50 transition-colors cursor-pointer"
             >
@@ -441,6 +436,17 @@ function TournamentPage() {
         {/* Main Content: Friendly Simple Bracket View OR Detailed Multi-Tab View */}
         {friendlyMode ? (
           <div className="mt-6 sm:mt-8 space-y-6">
+            {/* Persistent 4-Court Live Board */}
+            <LiveCourtsBoard
+              tournamentSlug={t.slug}
+              categories={t.categories}
+              currentCategoryId={category.id}
+              onTeamClick={(teamName) => {
+                setHighlightTeam(teamName);
+                setFriendlySubTab("bracket");
+              }}
+            />
+
             {/* Friendly Sub-view Switcher: Bracket Groups vs All Match Results */}
             <div className="flex items-center gap-2">
               <button
@@ -530,7 +536,7 @@ function TournamentPage() {
             {/* Capacity Bar */}
             {(() => {
               const currentCount = category.teams?.length ?? 0;
-              const maxCapacity = 32;
+              const maxCapacity = category.maxEntries || 16;
               const percentFilled = Math.min(100, Math.round((currentCount / maxCapacity) * 100));
               const slotsRemaining = Math.max(0, maxCapacity - currentCount);
 
@@ -548,7 +554,7 @@ function TournamentPage() {
                       </div>
                       <div className="flex items-baseline gap-2 flex-wrap">
                         <span className="font-display text-2xl text-foreground font-bold">
-                          {currentCount} of {maxCapacity} Confirmed Teams
+                          {currentCount} of {maxCapacity} Confirmed Pairs
                         </span>
                         <span className="text-xs font-mono text-muted-foreground">
                           ({percentFilled}% filled)
@@ -559,10 +565,15 @@ function TournamentPage() {
                     <div className="flex items-center gap-2 shrink-0">
                       <button
                         onClick={() => setIsRegModalOpen(true)}
-                        className="px-4 py-2 bg-pickle text-sand text-xs font-bold uppercase tracking-widest hover:opacity-90 transition-opacity rounded cursor-pointer flex items-center gap-1.5"
+                        disabled={slotsRemaining === 0}
+                        className={`px-4 py-2 text-xs font-bold uppercase tracking-widest transition-opacity rounded flex items-center gap-1.5 ${
+                          slotsRemaining === 0
+                            ? "bg-charcoal text-muted-foreground border border-border cursor-not-allowed"
+                            : "bg-pickle text-sand hover:opacity-90 cursor-pointer"
+                        }`}
                       >
-                        <span>Register Team</span>
-                        <span>+</span>
+                        <span>{slotsRemaining === 0 ? "Division Full" : "Register Team"}</span>
+                        {slotsRemaining > 0 && <span>+</span>}
                       </button>
                     </div>
                   </div>
@@ -576,7 +587,7 @@ function TournamentPage() {
                     </div>
                     <div className="mt-1.5 flex justify-between text-[0.65rem] font-mono text-muted-foreground">
                       <span>{slotsRemaining} slots remaining</span>
-                      <span>Max {maxCapacity} teams</span>
+                      <span>Max {maxCapacity} pairs</span>
                     </div>
                   </div>
                 </div>
@@ -1873,17 +1884,15 @@ function BracketCard({
   const [open, setOpen] = useState(defaultOpen);
   const teams = grp.slots.map((s) => s.team).filter((t): t is Team => t !== null);
 
-  // Generate round-robin match pairings
-  const groupMatches: { id: string; teamA: Team; teamB: Team }[] = [];
-  for (let i = 0; i < teams.length; i++) {
-    for (let j = i + 1; j < teams.length; j++) {
-      groupMatches.push({
-        id: `drawn-${grp.letter}-${i}-${j}`,
-        teamA: teams[i]!,
-        teamB: teams[j]!,
-      });
-    }
-  }
+  // Generate balanced round-robin match pairings (Berger rotation)
+  const groupMatches: { id: string; teamA: Team; teamB: Team }[] = useMemo(() => {
+    const pairs = generateBalancedRoundRobinPairs(teams);
+    return pairs.map(([teamA, teamB], pIdx) => ({
+      id: `drawn-${grp.letter}-${teamA.id}-${teamB.id}-${pIdx}`,
+      teamA,
+      teamB,
+    }));
+  }, [teams, grp.letter]);
 
   // Compute live standings for this group from match-store
   const standings = useMemo(() => {
@@ -2047,7 +2056,8 @@ function BracketCard({
                 </thead>
                 <tbody>
                   {standings.map((row, i) => {
-                    const isQualified = i < 2;
+                    const isGroupDone = groupMatches.length > 0 && completedCount === groupMatches.length;
+                    const isQualified = isGroupDone && i < 2;
                     return (
                       <tr
                         key={row.name}
@@ -2083,7 +2093,7 @@ function BracketCard({
                 </tbody>
               </table>
               <div className="mt-2 flex items-center justify-between text-[0.6rem] text-muted-foreground font-mono uppercase tracking-widest">
-                <span>Top 2 advance to playoff bracket</span>
+                <span>{groupMatches.length > 0 && completedCount === groupMatches.length ? "Top 2 Seeded into Playoffs" : "Top 2 advance upon group completion"}</span>
                 <span>Standings live sync</span>
               </div>
             </div>

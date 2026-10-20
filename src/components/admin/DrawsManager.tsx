@@ -407,10 +407,14 @@ export function DrawsManager({
       );
     });
 
+    const allMatchesCompleted =
+      group.matches.length > 0 &&
+      group.matches.every((m) => m.scoreA !== undefined && m.scoreB !== undefined);
+
     // Set rank and top 2 qualification status
     rows.forEach((row, i) => {
       row.rank = i + 1;
-      row.isQualified = i < 2; // Top 2 advance
+      row.isQualified = allMatchesCompleted && i < 2; // Top 2 advance once bracket is done
     });
 
     return rows;

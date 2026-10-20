@@ -74,8 +74,9 @@ export function PublicRegistrationModal({
   const activeCategory =
     (tournament?.categories || []).find((c) => c.id === selectedCatId) ??
     tournament?.categories?.[0];
+  const maxCapacity = activeCategory?.maxEntries || 16;
   const currentCount = activeCategory?.teams?.length ?? 0;
-  const isFull = currentCount >= 32;
+  const isFull = currentCount >= maxCapacity;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -94,7 +95,7 @@ export function PublicRegistrationModal({
       return;
     }
     if (isFull) {
-      setError("This category has reached maximum capacity (32/32 teams).");
+      setError(`This category has reached maximum capacity (${currentCount}/${maxCapacity} pairs).`);
       return;
     }
     if (!activeCategory) {
@@ -248,15 +249,19 @@ export function PublicRegistrationModal({
                 onChange={(e) => setSelectedCatId(e.target.value)}
                 className="w-full bg-charcoal border border-border p-2.5 text-xs text-sand rounded focus:border-pickle focus:outline-none"
               >
-                {(tournament?.categories || []).map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.label} ({c.level} - {c.division}) &middot; {c.teams?.length ?? 0}/32 slots filled
-                  </option>
-                ))}
+                {(tournament?.categories || []).map((c) => {
+                  const cap = c.maxEntries || 16;
+                  const count = c.teams?.length ?? 0;
+                  return (
+                    <option key={c.id} value={c.id}>
+                      {c.label} ({c.level} - {c.division}) &middot; {count}/{cap} pairs filled
+                    </option>
+                  );
+                })}
               </select>
               {isFull && (
                 <p className="text-[0.65rem] text-brick font-bold uppercase tracking-wider">
-                  This category is currently full (32 of 32 slots filled).
+                  This category is currently full ({currentCount} of {maxCapacity} pairs registered).
                 </p>
               )}
             </div>

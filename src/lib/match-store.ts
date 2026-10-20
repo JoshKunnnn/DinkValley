@@ -644,6 +644,49 @@ export function findLiveMatchForTeams(
 }
 
 /**
+ * Generates round-robin match pairings using the balanced Berger circle rotation algorithm.
+ * Groups matches by round so that every team plays once per round (or has a bye if odd).
+ * This interleaves matches and maximizes rest intervals between games to minimize player fatigue.
+ */
+export function generateBalancedRoundRobinPairs<T>(items: T[]): [T, T][] {
+  if (items.length < 2) return [];
+
+  const list: (T | null)[] = [...items];
+  if (list.length % 2 !== 0) {
+    list.push(null); // bye dummy
+  }
+
+  const n = list.length;
+  const numRounds = n - 1;
+  const matchesPerRound = Math.floor(n / 2);
+  const pairs: [T, T][] = [];
+
+  const indices: number[] = list.map((_, i) => i);
+
+  for (let r = 0; r < numRounds; r++) {
+    for (let i = 0; i < matchesPerRound; i++) {
+      const idx1 = indices[i];
+      const idx2 = indices[n - 1 - i];
+      if (idx1 !== undefined && idx2 !== undefined) {
+        const t1 = list[idx1];
+        const t2 = list[idx2];
+        if (t1 !== null && t1 !== undefined && t2 !== null && t2 !== undefined) {
+          pairs.push([t1, t2]);
+        }
+      }
+    }
+
+    // Rotate indices keeping index 0 fixed
+    const last = indices.pop();
+    if (last !== undefined) {
+      indices.splice(1, 0, last);
+    }
+  }
+
+  return pairs;
+}
+
+/**
  * Takes drawn brackets/groups and synchronizes them into dv_live_matches,
  * preserving any already existing in-progress or final scores.
  */
@@ -664,45 +707,42 @@ export function syncDrawnBracketsToLiveMatches(
       .map((s) => s.team)
       .filter((t): t is { id: string; name: string; players: string[] } => t !== null);
 
-    for (let i = 0; i < teams.length; i++) {
-      for (let j = i + 1; j < teams.length; j++) {
-        const teamA = teams[i]!;
-        const teamB = teams[j]!;
-        const matchId = `live-${tournamentSlug}-${categoryId}-${group.letter}-${i + 1}v${j + 1}`;
-        const courtName = "Queue";
+    const pairs = generateBalancedRoundRobinPairs(teams);
+    pairs.forEach(([teamA, teamB], pIdx) => {
+      const matchId = `live-${tournamentSlug}-${categoryId}-${group.letter}-${teamA.id || pIdx + 1}v${teamB.id || pIdx + 2}`;
+      const courtName = "Queue";
 
-        // Check if a match for these two teams already exists in the store
-        const existing = findLiveMatchForTeams(currentMatches, teamA.name, teamB.name);
-        if (existing) {
-          newMatches.push({
-            ...existing,
-            tournamentSlug: tournamentSlug || existing.tournamentSlug,
-            categoryId: categoryId || existing.categoryId,
-            stage: existing.stage || `Bracket ${group.letter} (Pool Play)`,
-            bracketLetter: existing.bracketLetter || group.letter,
-          });
-        } else {
-          newMatches.push({
-            id: matchId,
-            court: courtName,
-            teamAName: teamA.name,
-            teamAPlayers: teamA.players,
-            teamBName: teamB.name,
-            teamBPlayers: teamB.players,
-            status: "scheduled",
-            score: createInitialScore(),
-            winnerTeam: undefined,
-            startedAt: undefined,
-            endedAt: undefined,
-            officiatedBy: undefined,
-            tournamentSlug,
-            categoryId,
-            stage: `Bracket ${group.letter} (Pool Play)`,
-            bracketLetter: group.letter,
-          });
-        }
+      // Check if a match for these two teams already exists in the store
+      const existing = findLiveMatchForTeams(currentMatches, teamA.name, teamB.name);
+      if (existing) {
+        newMatches.push({
+          ...existing,
+          tournamentSlug: tournamentSlug || existing.tournamentSlug,
+          categoryId: categoryId || existing.categoryId,
+          stage: existing.stage || `Bracket ${group.letter} (Pool Play)`,
+          bracketLetter: existing.bracketLetter || group.letter,
+        });
+      } else {
+        newMatches.push({
+          id: matchId,
+          court: courtName,
+          teamAName: teamA.name,
+          teamAPlayers: teamA.players,
+          teamBName: teamB.name,
+          teamBPlayers: teamB.players,
+          status: "scheduled",
+          score: createInitialScore(),
+          winnerTeam: undefined,
+          startedAt: undefined,
+          endedAt: undefined,
+          officiatedBy: undefined,
+          tournamentSlug,
+          categoryId,
+          stage: `Bracket ${group.letter} (Pool Play)`,
+          bracketLetter: group.letter,
+        });
       }
-    }
+    });
   }
 
   // Intelligently merge with existing matches:

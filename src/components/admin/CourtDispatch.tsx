@@ -9,6 +9,7 @@ import {
   resetMatch,
   purgeMatchesForCategory,
   purgeMatchesNotInTeams,
+  generateBalancedRoundRobinPairs,
 } from "@/lib/match-store";
 import {
   FACILITY_COURTS,
@@ -126,27 +127,32 @@ function computeCategoryUnassignedMatches(
             (validTeamIds.has(t.id) || validTeamNames.has(t.name.trim().toLowerCase())),
         );
 
-      for (let i = 0; i < teams.length; i++) {
-        for (let j = i + 1; j < teams.length; j++) {
-          const teamA = teams[i]!;
-          const teamB = teams[j]!;
-          if (teamA.name.trim().toLowerCase() === teamB.name.trim().toLowerCase()) continue;
-          const matchId = `live-${tournamentSlug}-${cat.id}-${group.letter}-${i + 1}v${j + 1}`;
-          const existingLive = matches.find((m) => m.id === matchId);
+      const pairs = generateBalancedRoundRobinPairs(teams);
+      pairs.forEach(([teamA, teamB], pIdx) => {
+        if (teamA.name.trim().toLowerCase() === teamB.name.trim().toLowerCase()) return;
+        const matchId = `live-${tournamentSlug}-${cat.id}-${group.letter}-${teamA.id || pIdx + 1}v${teamB.id || pIdx + 2}`;
+        const existingLive = matches.find(
+          (m) =>
+            m.id === matchId ||
+            (m.teamAName.trim().toLowerCase() === teamA.name.trim().toLowerCase() &&
+              m.teamBName.trim().toLowerCase() === teamB.name.trim().toLowerCase()) ||
+            (m.teamAName.trim().toLowerCase() === teamB.name.trim().toLowerCase() &&
+              m.teamBName.trim().toLowerCase() === teamA.name.trim().toLowerCase()),
+        );
 
-          if (existingLive?.status === "final") continue;
-          if (queuedIds.has(matchId) || activeCourtMatchIds.has(matchId)) continue;
+        const effectiveMatchId = existingLive ? existingLive.id : matchId;
+        if (existingLive?.status === "final") return;
+        if (queuedIds.has(effectiveMatchId) || activeCourtMatchIds.has(effectiveMatchId)) return;
 
-          list.push({
-            id: matchId,
-            stage: `Bracket ${group.letter} (Pool Play)`,
-            teamAName: teamA.name,
-            teamAPlayers: teamA.players,
-            teamBName: teamB.name,
-            teamBPlayers: teamB.players,
-          });
-        }
-      }
+        list.push({
+          id: effectiveMatchId,
+          stage: `Bracket ${group.letter} (Pool Play)`,
+          teamAName: teamA.name,
+          teamAPlayers: teamA.players,
+          teamBName: teamB.name,
+          teamBPlayers: teamB.players,
+        });
+      });
     }
   }
 

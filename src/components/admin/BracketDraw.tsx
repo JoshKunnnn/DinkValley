@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import type { Team, Tournament, Category } from "@/data/tournaments";
 import { syncDrawnBracketsToLiveMatches, purgeMatchesForCategory } from "@/lib/match-store";
 import { bulkSetTeamsInCategory, deleteAllTeamsInCategory, getTournaments } from "@/lib/tournament-store";
-import { generate32Teams } from "@/lib/team-generator";
+import { generateMockTeams, generate32Teams } from "@/lib/team-generator";
 import { addMatchesToQueue, purgeQueueForCategory, getDispatchQueue } from "@/lib/court-dispatch";
 import {
   dbSaveDrawnGroups,
@@ -271,6 +271,15 @@ function balancedDistribute(teams: Team[], numGroups: number): Team[][] {
 
 const LETTERS = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"];
 
+function getBracketsForCapacity(cap: number): number {
+  if (cap >= 48) return 12;
+  if (cap >= 32) return 8;
+  if (cap >= 24) return 6;
+  if (cap >= 16) return 4;
+  if (cap >= 12) return 3;
+  return 2;
+}
+
 // ── Main Component ─────────────────────────────────────────────────────────
 export function BracketDraw({
   tournament,
@@ -285,8 +294,9 @@ export function BracketDraw({
   const [groups, setGroups] = useState<BracketGroup[]>([]);
 
   const teams = rawTeams;
-  const initialBrackets = teams.length >= 24 ? 8 : teams.length >= 8 ? 4 : 2;
-  const [numBrackets, setNumBrackets] = useState(initialBrackets);
+  const maxCapacity = category?.maxEntries || (teams.length >= 24 ? 32 : teams.length >= 12 ? 16 : 8);
+  const targetBrackets = getBracketsForCapacity(maxCapacity);
+  const [numBrackets, setNumBrackets] = useState(targetBrackets);
   const [teamsByGroup, setTeamsByGroup] = useState<Team[][]>([]);
   const [drawnCount, setDrawnCount] = useState(0);
   const [drawingBracketIdx, setDrawingBracketIdx] = useState(-1);
@@ -339,6 +349,8 @@ export function BracketDraw({
       return;
     }
 
+    const safeTeams = category?.teams || [];
+
     // Only cancel and reset if the user genuinely switched to a different tournament or category
     const isNewCategory = loadedCategoryKeyRef.current !== currentCategoryKey;
     if (isNewCategory) {
@@ -346,6 +358,11 @@ export function BracketDraw({
       animCancelRef.current = true;
       setDrawingBracketIdx(-1);
       setIsAutoPlaying(false);
+      const existingDrawn = getDrawnGroups(tournamentSlug, effectiveCategoryId);
+      if (!existingDrawn || existingDrawn.length === 0) {
+        const catCap = category?.maxEntries || (safeTeams.length >= 24 ? 32 : safeTeams.length >= 12 ? 16 : 8);
+        setNumBrackets(getBracketsForCapacity(catCap));
+      }
     }
 
     // Skip if a direct populate already set the correct state
@@ -354,7 +371,6 @@ export function BracketDraw({
       return;
     }
 
-    const safeTeams = category?.teams || [];
     if (safeTeams.length === 0) {
       setGroups([]);
       groupsRef.current = [];
@@ -609,11 +625,11 @@ export function BracketDraw({
     label: string;
   } | null>(null);
 
-  const handleQuickPopulate32 = () => {
+  const handleQuickPopulate = () => {
     const confirmMsg =
       teams.length > 0
-        ? `Replace current roster (${teams.length} teams) with 32 verified teams for an 8-bracket draw?`
-        : "Generate and populate 32 verified teams for an 8-bracket draw?";
+        ? `Replace current roster (${teams.length} teams) with ${maxCapacity} verified teams for a ${targetBrackets}-bracket draw?`
+        : `Generate and populate ${maxCapacity} verified teams for a ${targetBrackets}-bracket draw?`;
     if (!window.confirm(confirmMsg)) return;
 
     setUndoRoster({
@@ -628,13 +644,13 @@ export function BracketDraw({
       [categoryId, category?.id].filter(Boolean) as string[]
     );
 
-    const generated = generate32Teams({ verifiedOnly: true });
+    const generated = generateMockTeams(maxCapacity, { verifiedOnly: true });
     bulkSetTeamsInCategory(tournamentSlug, categoryId, generated);
 
-    // Immediately compute the correct 8-bracket distribution with the fresh roster.
+    // Immediately compute the correct bracket distribution with the fresh roster.
     // This prevents the useEffect from running with a stale category.teams count
     // (old value) and producing the wrong number of brackets.
-    const _n = 8;
+    const _n = targetBrackets;
     const _buckets = balancedDistribute(generated, _n);
     const _initial: BracketGroup[] = _buckets.map((bt, i) => ({
       name: `Bracket ${LETTERS[i] ?? i + 1}`,
@@ -790,20 +806,21 @@ export function BracketDraw({
               onChange={(e) => setNumBrackets(parseInt(e.target.value, 10))}
               className="w-full border border-input bg-background px-3 py-2 text-xs sm:text-sm focus:border-pickle focus:outline-none disabled:opacity-60 font-semibold text-pickle"
             >
-              <option value={2}>2 Brackets (A &amp; B)</option>
-              <option value={3}>3 Brackets (A, B, C)</option>
-              <option value={4}>4 Brackets (A, B, C, D)</option>
-              <option value={6}>6 Brackets (A to F)</option>
+              <option value={2}>2 Brackets (A &amp; B - 8 Teams)</option>
+              <option value={3}>3 Brackets (A, B, C - 12 Teams)</option>
+              <option value={4}>4 Brackets (A, B, C, D - 16 Teams)</option>
+              <option value={6}>6 Brackets (A to F - 24 Teams)</option>
               <option value={8}>8 Brackets (A to H - 32 Teams)</option>
+              <option value={12}>12 Brackets (A to L - 48 Teams)</option>
             </select>
-            {teams.length < 32 && (
+            {teams.length < maxCapacity && (
               <button
                 type="button"
-                onClick={handleQuickPopulate32}
+                onClick={handleQuickPopulate}
                 disabled={isAnimating}
                 className="self-start text-[0.65rem] text-pickle hover:text-foreground font-semibold uppercase tracking-wider underline cursor-pointer mt-1"
               >
-                + Auto-Populate 32 Teams (8 Brackets)
+                + Auto-Populate {maxCapacity} Teams ({targetBrackets} Brackets)
               </button>
             )}
           </div>
@@ -816,7 +833,7 @@ export function BracketDraw({
               <span className="h-2 w-2 rounded-full bg-pickle animate-pulse" />
               <span className="text-foreground font-medium">
                 {undoRoster.action === "populate"
-                  ? `Populated 32 teams into ${category.label}.`
+                  ? `Populated ${maxCapacity} teams into ${category.label}.`
                   : `Deleted all teams from ${category.label}.`}
               </span>
             </div>
@@ -995,14 +1012,14 @@ export function BracketDraw({
           </span>
           <h3 className="font-display text-3xl text-foreground">No Teams in Category</h3>
           <p className="max-w-md text-sm text-muted-foreground">
-            Add teams in the <strong>Teams</strong> tab first, or auto-populate 32 verified doubles teams to run an 8-bracket ceremony right now.
+            Add teams in the <strong>Teams</strong> tab first, or auto-populate {maxCapacity} verified doubles teams to run a {targetBrackets}-bracket ceremony right now.
           </p>
           <button
             type="button"
-            onClick={handleQuickPopulate32}
+            onClick={handleQuickPopulate}
             className="px-5 py-2.5 bg-pickle text-sand hover:opacity-90 font-semibold text-xs tracking-wider uppercase rounded transition-all cursor-pointer shadow"
           >
-            Auto-Populate 32 Teams for Draw
+            Auto-Populate {maxCapacity} Teams for Draw
           </button>
         </div>
       )}

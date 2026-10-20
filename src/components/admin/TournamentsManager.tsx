@@ -17,20 +17,23 @@ interface TournamentsManagerProps {
   activeTournamentSlug?: string;
 }
 
+const STANDARD_CAPACITY_OPTIONS = [8, 12, 16, 24, 32, 48] as const;
+
 type PresetCategory = {
   label: string;
   level: Category["level"];
   division: Category["division"];
   defaultFee: string;
+  defaultMaxEntries?: number;
 };
 
 const PRESET_CATEGORIES: PresetCategory[] = [
-  { label: "Open Championship", level: "Open", division: "Open", defaultFee: "PHP 1,500 per team" },
-  { label: "Open Mixed Doubles", level: "Open", division: "Mixed", defaultFee: "PHP 1,200 per team" },
-  { label: "Advance Men's Doubles", level: "Advance", division: "Men's", defaultFee: "PHP 1,000 per team" },
-  { label: "Intermediate Women's Doubles", level: "Intermediate", division: "Women's", defaultFee: "PHP 900 per team" },
-  { label: "Novice Mixed Doubles", level: "Novice", division: "Mixed", defaultFee: "PHP 800 per team" },
-  { label: "Beginners Men's Doubles", level: "Beginners", division: "Men's", defaultFee: "PHP 700 per team" },
+  { label: "Open Championship", level: "Open", division: "Open", defaultFee: "PHP 1,500 per team", defaultMaxEntries: 16 },
+  { label: "Open Mixed Doubles", level: "Open", division: "Mixed", defaultFee: "PHP 1,200 per team", defaultMaxEntries: 16 },
+  { label: "Advance Men's Doubles", level: "Advance", division: "Men's", defaultFee: "PHP 1,000 per team", defaultMaxEntries: 16 },
+  { label: "Intermediate Women's Doubles", level: "Intermediate", division: "Women's", defaultFee: "PHP 900 per team", defaultMaxEntries: 16 },
+  { label: "Novice Mixed Doubles", level: "Novice", division: "Mixed", defaultFee: "PHP 800 per team", defaultMaxEntries: 16 },
+  { label: "Beginners Men's Doubles", level: "Beginners", division: "Men's", defaultFee: "PHP 700 per team", defaultMaxEntries: 16 },
 ];
 
 export function TournamentsManager({
@@ -82,6 +85,7 @@ export function TournamentsManager({
       level: "Open",
       division: "Open",
       fee: "PHP 1,500 per team",
+      maxEntries: 16,
       teams: [],
       pools: [],
       standings: [],
@@ -93,6 +97,7 @@ export function TournamentsManager({
       level: "Novice",
       division: "Mixed",
       fee: "PHP 800 per team",
+      maxEntries: 16,
       teams: [],
       pools: [],
       standings: [],
@@ -105,6 +110,8 @@ export function TournamentsManager({
   const [customLevel, setCustomLevel] = useState<Category["level"]>("Intermediate");
   const [customDivision, setCustomDivision] = useState<Category["division"]>("Men's");
   const [customFee, setCustomFee] = useState("PHP 1,000 per team");
+  const [customMaxEntries, setCustomMaxEntries] = useState<number>(16);
+  const [isCustomMaxEntriesInput, setIsCustomMaxEntriesInput] = useState<boolean>(false);
 
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -128,6 +135,7 @@ export function TournamentsManager({
           level: preset.level,
           division: preset.division,
           fee: preset.defaultFee,
+          maxEntries: preset.defaultMaxEntries || 16,
           teams: [],
           pools: [],
           standings: [],
@@ -149,6 +157,7 @@ export function TournamentsManager({
         level: customLevel,
         division: customDivision,
         fee: customFee.trim() || undefined,
+        maxEntries: customMaxEntries || 16,
         teams: [],
         pools: [],
         standings: [],
@@ -157,6 +166,8 @@ export function TournamentsManager({
     ]);
     setCustomCategoryLabel("");
     setCustomFee("PHP 1,000 per team");
+    setCustomMaxEntries(16);
+    setIsCustomMaxEntriesInput(false);
   };
 
   const handleUpdateCategory = (id: CategoryId, updates: Partial<Category>) => {
@@ -217,6 +228,7 @@ export function TournamentsManager({
         level: "Open",
         division: "Open",
         fee: "PHP 1,500 per team",
+        maxEntries: 16,
         teams: [],
         pools: [],
         standings: [],
@@ -228,6 +240,7 @@ export function TournamentsManager({
         level: "Novice",
         division: "Mixed",
         fee: "PHP 800 per team",
+        maxEntries: 16,
         teams: [],
         pools: [],
         standings: [],
@@ -263,6 +276,7 @@ export function TournamentsManager({
     setSelectedCategories(
       (t.categories || []).map((c) => ({
         ...c,
+        maxEntries: c.maxEntries || 16,
         teams: c.teams || [],
         pools: c.pools || [],
         standings: c.standings || [],
@@ -717,8 +731,8 @@ export function TournamentsManager({
                 <span className="block text-xs uppercase tracking-wider text-foreground font-bold">
                   + Add Custom Division &amp; Pricing
                 </span>
-                <div className="grid grid-cols-1 sm:grid-cols-5 gap-3 items-end">
-                  <div className="sm:col-span-2">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-end">
+                  <div className="lg:col-span-2">
                     <label className="block text-[0.65rem] uppercase tracking-wider text-muted-foreground mb-1 font-semibold">
                       Division Label
                     </label>
@@ -774,6 +788,52 @@ export function TournamentsManager({
                     />
                   </div>
                 </div>
+
+                {/* Entry Capacity Selector for Custom Division */}
+                <div className="pt-1 flex flex-wrap items-center gap-3">
+                  <div className="w-full sm:w-auto">
+                    <label className="block text-[0.65rem] uppercase tracking-wider text-muted-foreground mb-1 font-semibold">
+                      Entries / Pairs Capacity
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <select
+                        value={isCustomMaxEntriesInput ? "custom" : String(customMaxEntries)}
+                        onChange={(e) => {
+                          if (e.target.value === "custom") {
+                            setIsCustomMaxEntriesInput(true);
+                          } else {
+                            setIsCustomMaxEntriesInput(false);
+                            setCustomMaxEntries(Number(e.target.value));
+                          }
+                        }}
+                        className="rounded border border-input bg-background px-2.5 py-2 text-xs text-foreground focus:border-pickle focus:ring-1 focus:ring-pickle focus:outline-none shadow-xs font-medium"
+                      >
+                        <option value="8">8 Pairs (2 pools of 4)</option>
+                        <option value="12">12 Pairs (3 pools of 4)</option>
+                        <option value="16">16 Pairs (4 pools of 4) [Default]</option>
+                        <option value="24">24 Pairs (6 pools of 4)</option>
+                        <option value="32">32 Pairs (8 pools of 4)</option>
+                        <option value="48">48 Pairs (12 pools of 4)</option>
+                        <option value="custom">Custom...</option>
+                      </select>
+
+                      {isCustomMaxEntriesInput && (
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            type="number"
+                            min="2"
+                            max="128"
+                            value={customMaxEntries}
+                            onChange={(e) => setCustomMaxEntries(Math.max(2, parseInt(e.target.value) || 2))}
+                            className="w-20 rounded border border-input bg-background px-2 py-2 text-xs text-foreground font-mono font-bold focus:border-pickle focus:outline-none shadow-xs"
+                          />
+                          <span className="text-xs text-muted-foreground">pairs</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
                 <button
                   type="button"
                   onClick={handleAddCustomCategory}
@@ -799,95 +859,150 @@ export function TournamentsManager({
                   </p>
                 ) : (
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    {selectedCategories.map((c) => (
-                      <div
-                        key={c.id}
-                        className="border-2 border-border bg-background/90 p-3 rounded-lg space-y-2.5 shadow-xs"
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="flex items-center gap-2 flex-wrap min-w-0">
-                            <span className="text-[0.65rem] font-bold uppercase tracking-wider text-pickle">
-                              {c.level} · {c.division}
-                            </span>
-                            {c.teams && c.teams.length > 0 && (
-                              <span className="px-2 py-0.5 rounded text-[0.65rem] font-mono font-bold bg-pickle/15 text-pickle border border-pickle/30">
-                                {c.teams.length} Teams
+                    {selectedCategories.map((c) => {
+                      const maxCapacity = c.maxEntries || 16;
+                      const teamCount = c.teams?.length || 0;
+                      const isStandardCapacity = STANDARD_CAPACITY_OPTIONS.includes(maxCapacity as any);
+
+                      return (
+                        <div
+                          key={c.id}
+                          className="border-2 border-border bg-background/90 p-3 rounded-lg space-y-2.5 shadow-xs"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-2 flex-wrap min-w-0">
+                              <span className="text-[0.65rem] font-bold uppercase tracking-wider text-pickle">
+                                {c.level} · {c.division}
                               </span>
-                            )}
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => handleRemoveCategory(c.id)}
-                            className="text-[0.65rem] text-muted-foreground hover:text-brick font-bold uppercase tracking-wider cursor-pointer"
-                            title="Remove category"
-                          >
-                            Remove
-                          </button>
-                        </div>
-
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                          <div>
-                            <label className="block text-[0.65rem] uppercase tracking-wider text-muted-foreground font-semibold mb-1">
-                              Division Label
-                            </label>
-                            <input
-                              type="text"
-                              value={c.label}
-                              onChange={(e) => handleUpdateCategory(c.id, { label: e.target.value })}
-                              className="w-full rounded border border-input bg-card px-2.5 py-1.5 text-xs text-foreground font-bold focus:border-pickle focus:outline-none shadow-xs"
-                              placeholder="e.g. Beginner Men's"
-                            />
-                          </div>
-
-                          <div>
-                            <label className="block text-[0.65rem] uppercase tracking-wider text-muted-foreground font-semibold mb-1">
-                              Entry Fee
-                            </label>
-                            <input
-                              type="text"
-                              value={c.fee || ""}
-                              onChange={(e) => handleUpdateCategory(c.id, { fee: e.target.value })}
-                              placeholder="e.g. PHP 1,000 per team"
-                              className="w-full rounded border border-input bg-card px-2.5 py-1.5 text-xs text-foreground font-medium focus:border-pickle focus:outline-none shadow-xs"
-                            />
-                          </div>
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-2">
-                          <div>
-                            <label className="block text-[0.65rem] uppercase tracking-wider text-muted-foreground font-semibold mb-1">
-                              Skill Level
-                            </label>
-                            <select
-                              value={c.level}
-                              onChange={(e) => handleUpdateCategory(c.id, { level: e.target.value as Category["level"] })}
-                              className="w-full rounded border border-input bg-card px-2 py-1 text-xs text-foreground font-medium focus:border-pickle focus:outline-none shadow-xs"
+                              <span
+                                className={`px-2 py-0.5 rounded text-[0.65rem] font-mono font-bold border ${
+                                  teamCount >= maxCapacity
+                                    ? "bg-brick/15 text-brick border-brick/30"
+                                    : "bg-pickle/15 text-pickle border-pickle/30"
+                                }`}
+                              >
+                                {teamCount} / {maxCapacity} Pairs{teamCount >= maxCapacity ? " (Full)" : ""}
+                              </span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveCategory(c.id)}
+                              className="text-[0.65rem] text-muted-foreground hover:text-brick font-bold uppercase tracking-wider cursor-pointer"
+                              title="Remove category"
                             >
-                              <option value="Beginners">Beginners</option>
-                              <option value="Novice">Novice</option>
-                              <option value="Intermediate">Intermediate</option>
-                              <option value="Advance">Advance</option>
-                              <option value="Open">Open</option>
-                            </select>
+                              Remove
+                            </button>
                           </div>
-                          <div>
-                            <label className="block text-[0.65rem] uppercase tracking-wider text-muted-foreground font-semibold mb-1">
-                              Division Type
-                            </label>
-                            <select
-                              value={c.division}
-                              onChange={(e) => handleUpdateCategory(c.id, { division: e.target.value as Category["division"] })}
-                              className="w-full rounded border border-input bg-card px-2 py-1 text-xs text-foreground font-medium focus:border-pickle focus:outline-none shadow-xs"
-                            >
-                              <option value="Men's">Men's</option>
-                              <option value="Women's">Women's</option>
-                              <option value="Mixed">Mixed</option>
-                              <option value="Open">Open</option>
-                            </select>
+
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            <div>
+                              <label className="block text-[0.65rem] uppercase tracking-wider text-muted-foreground font-semibold mb-1">
+                                Division Label
+                              </label>
+                              <input
+                                type="text"
+                                value={c.label}
+                                onChange={(e) => handleUpdateCategory(c.id, { label: e.target.value })}
+                                className="w-full rounded border border-input bg-card px-2.5 py-1.5 text-xs text-foreground font-bold focus:border-pickle focus:outline-none shadow-xs"
+                                placeholder="e.g. Beginner Men's"
+                              />
+                            </div>
+
+                            <div>
+                              <label className="block text-[0.65rem] uppercase tracking-wider text-muted-foreground font-semibold mb-1">
+                                Entry Fee
+                              </label>
+                              <input
+                                type="text"
+                                value={c.fee || ""}
+                                onChange={(e) => handleUpdateCategory(c.id, { fee: e.target.value })}
+                                placeholder="e.g. PHP 1,000 per team"
+                                className="w-full rounded border border-input bg-card px-2.5 py-1.5 text-xs text-foreground font-medium focus:border-pickle focus:outline-none shadow-xs"
+                              />
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                            <div>
+                              <label className="block text-[0.65rem] uppercase tracking-wider text-muted-foreground font-semibold mb-1">
+                                Skill Level
+                              </label>
+                              <select
+                                value={c.level}
+                                onChange={(e) => handleUpdateCategory(c.id, { level: e.target.value as Category["level"] })}
+                                className="w-full rounded border border-input bg-card px-2 py-1.5 text-xs text-foreground font-medium focus:border-pickle focus:outline-none shadow-xs"
+                              >
+                                <option value="Beginners">Beginners</option>
+                                <option value="Novice">Novice</option>
+                                <option value="Intermediate">Intermediate</option>
+                                <option value="Advance">Advance</option>
+                                <option value="Open">Open</option>
+                              </select>
+                            </div>
+                            <div>
+                              <label className="block text-[0.65rem] uppercase tracking-wider text-muted-foreground font-semibold mb-1">
+                                Division Type
+                              </label>
+                              <select
+                                value={c.division}
+                                onChange={(e) => handleUpdateCategory(c.id, { division: e.target.value as Category["division"] })}
+                                className="w-full rounded border border-input bg-card px-2 py-1.5 text-xs text-foreground font-medium focus:border-pickle focus:outline-none shadow-xs"
+                              >
+                                <option value="Men's">Men's</option>
+                                <option value="Women's">Women's</option>
+                                <option value="Mixed">Mixed</option>
+                                <option value="Open">Open</option>
+                              </select>
+                            </div>
+                            <div>
+                              <label className="block text-[0.65rem] uppercase tracking-wider text-muted-foreground font-semibold mb-1">
+                                Max Entries (Pairs)
+                              </label>
+                              <div className="space-y-1">
+                                <select
+                                  value={isStandardCapacity ? String(maxCapacity) : "custom"}
+                                  onChange={(e) => {
+                                    if (e.target.value === "custom") {
+                                      handleUpdateCategory(c.id, { maxEntries: maxCapacity });
+                                    } else {
+                                      handleUpdateCategory(c.id, { maxEntries: Number(e.target.value) });
+                                    }
+                                  }}
+                                  className="w-full rounded border border-input bg-card px-2 py-1.5 text-xs text-foreground font-medium focus:border-pickle focus:outline-none shadow-xs"
+                                >
+                                  <option value="8">8 Pairs (2 pools)</option>
+                                  <option value="12">12 Pairs (3 pools)</option>
+                                  <option value="16">16 Pairs (4 pools)</option>
+                                  <option value="24">24 Pairs (6 pools)</option>
+                                  <option value="32">32 Pairs (8 pools)</option>
+                                  <option value="48">48 Pairs (12 pools)</option>
+                                  <option value="custom">
+                                    {isStandardCapacity ? "Custom..." : `Custom (${maxCapacity} Pairs)`}
+                                  </option>
+                                </select>
+                                {!isStandardCapacity && (
+                                  <div className="flex items-center gap-1.5">
+                                    <input
+                                      type="number"
+                                      min="2"
+                                      max="128"
+                                      value={maxCapacity}
+                                      onChange={(e) =>
+                                        handleUpdateCategory(c.id, {
+                                          maxEntries: Math.max(2, parseInt(e.target.value) || 2),
+                                        })
+                                      }
+                                      className="w-full rounded border border-input bg-card px-2 py-1 text-xs text-foreground font-mono font-bold focus:border-pickle focus:outline-none shadow-xs"
+                                    />
+                                    <span className="text-[0.65rem] text-muted-foreground shrink-0">pairs</span>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>

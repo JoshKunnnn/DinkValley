@@ -49,6 +49,7 @@ export type Category = {
   level: "Beginners" | "Novice" | "Intermediate" | "Advance" | "Open";
   division: "Men's" | "Women's" | "Mixed" | "Open";
   fee?: string | undefined;
+  maxEntries?: number | undefined;
   teams: Team[];
   pendingTeams?: Team[] | undefined;
   pools: PoolMatch[];

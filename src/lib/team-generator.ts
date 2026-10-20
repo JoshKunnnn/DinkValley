@@ -97,14 +97,13 @@ const CLUBS = [
 ];
 
 /**
- * Generate 32 realistic, verified pickleball doubles teams.
+ * Generate realistic, verified pickleball doubles teams (default 16 pairs).
  * Guaranteed to have zero emojis and fully formatted payment receipts.
  */
-export function generate32Teams(options: GenerateTeamsOptions = {}): Team[] {
-  const { prefix = "team-32", verifiedOnly = true } = options;
+export function generateMockTeams(count: number = 16, options: GenerateTeamsOptions = {}): Team[] {
+  const { verifiedOnly = true } = options;
 
-  return TEAM_NAMES.slice(0, 32).map((name, index) => {
-    const paddedIndex = String(index + 1).padStart(2, "0");
+  return TEAM_NAMES.slice(0, count).map((name, index) => {
     const id = generateUUID();
     const [p1, p2] = PLAYER_PAIRS[index] || [`Player ${index * 2 + 1}`, `Player ${index * 2 + 2}`];
     const club = CLUBS[index % CLUBS.length];
@@ -122,4 +121,8 @@ export function generate32Teams(options: GenerateTeamsOptions = {}): Team[] {
       paymentProofUrl: isPaid ? createSampleReceiptSvg(name, refNumber) : undefined,
     };
   });
+}
+
+export function generate32Teams(options: GenerateTeamsOptions = {}): Team[] {
+  return generateMockTeams(32, options);
 }
