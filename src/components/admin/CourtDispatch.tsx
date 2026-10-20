@@ -44,6 +44,9 @@ import {
   completeQueueMatch,
   isMatchInSameBracket,
   reconcileCourtStations,
+  setCourtActiveBracket,
+  getCourtActiveBracket,
+  isStageMatchingBracket,
 } from "@/lib/court-dispatch";
 import { getDrawnGroups } from "@/components/admin/BracketDraw";
 import { getMainDrawMatches } from "@/components/admin/DrawsManager";
@@ -271,6 +274,49 @@ export function CourtDispatch({
 
   // Revision counter to invalidate memoized bracket matches on draw events
   const [drawVersion, setDrawVersion] = useState(0);
+
+  // Available bracket options for the active division/category
+  const availableBracketOptions = useMemo(() => {
+    const options: Array<{ value: string; label: string }> = [
+      { value: "all", label: "All Brackets (Any)" },
+    ];
+    const poolGroups = getDrawnGroups(tournamentSlug, categoryId);
+    if (poolGroups && poolGroups.length > 0) {
+      for (const g of poolGroups) {
+        if (g.letter) {
+          options.push({
+            value: `Bracket ${g.letter}`,
+            label: `Bracket ${g.letter} (Pool Play)`,
+          });
+        }
+      }
+    } else {
+      ["A", "B", "C", "D"].forEach((letter) => {
+        options.push({
+          value: `Bracket ${letter}`,
+          label: `Bracket ${letter} (Pool Play)`,
+        });
+      });
+    }
+    options.push({
+      value: "Playoffs",
+      label: "Playoffs (Knockout)",
+    });
+    return options;
+  }, [tournamentSlug, categoryId, drawVersion]);
+
+  const handleSetCourtActiveBracket = (court: FacilityCourt, bracket: string) => {
+    setCourtActiveBracket(court, bracket);
+    setStations((prev) => ({
+      ...prev,
+      [court]: {
+        ...prev[court],
+        activeBracket: bracket,
+      },
+    }));
+    setCopyNotice(`${court} assigned to ${bracket === "all" ? "All Brackets" : bracket}.`);
+    setTimeout(() => setCopyNotice(null), 3000);
+  };
 
   // Sync stations, queue, and announcement with storage and auto-clean conflicts
   const reloadData = useCallback(() => {
@@ -773,6 +819,19 @@ export function CourtDispatch({
     setSelectedCourtForDispatch(court);
     setBracketModalCategory(categoryId);
     setBracketModalShowCompleted(false);
+
+    // If court has an assigned bracket, pre-select that bracket tab in the modal
+    const assignedBracket = stations[court]?.activeBracket;
+    if (assignedBracket && assignedBracket !== "all") {
+      if (assignedBracket.toLowerCase() === "playoffs") {
+        setBracketModalSelectedLetter("Playoffs");
+      } else {
+        const letterMatch = assignedBracket.match(/(?:bracket|pool)?\s*([a-z])/i);
+        if (letterMatch) {
+          setBracketModalSelectedLetter(letterMatch[1]!.toUpperCase());
+        }
+      }
+    }
   };
 
   const handleSelectBracketMatchForCourt = (
@@ -1619,12 +1678,35 @@ export function CourtDispatch({
           {FACILITY_COURTS.map((courtName) => {
             const station = stations[courtName];
             const activeMatch = courtMatches[courtName];
-            const nextInQueue = queue.find((q) => q.status === "queued" || q.status === "on_deck");
+            const courtActiveBracket = station.activeBracket || "all";
+
+            // Next eligible match for this specific court respecting its assigned bracket filter
+            const eligibleMatchesForCourt = queue
+              .map((q, idx) => ({ item: q, queueIndex: idx + 1 }))
+              .filter(({ item: q }) => q.status === "queued" || q.status === "on_deck")
+              .filter(({ item: q }) => !tournamentSlug || !q.tournamentSlug || q.tournamentSlug === tournamentSlug)
+              .filter(({ item: q }) => isStageMatchingBracket(q.stage, courtActiveBracket))
+              .filter(
+                ({ item: q }) =>
+                  !checkSimultaneousPlayConflict(q.teamAName, q.teamAPlayers, q.tournamentSlug || tournamentSlug) &&
+                  !checkSimultaneousPlayConflict(q.teamBName, q.teamBPlayers, q.tournamentSlug || tournamentSlug),
+              )
+              .filter(({ item: q }) =>
+                isMatchInSameBracket(
+                  q.tournamentSlug || tournamentSlug || "",
+                  q.categoryId || "",
+                  q.stage,
+                  q.teamAName,
+                  q.teamBName,
+                ),
+              );
+
+            const nextCourtMatch = eligibleMatchesForCourt[0] ?? null;
             const onDeckMatch = station.onDeckMatchId ? matches.find((m) => m.id === station.onDeckMatchId) : null;
 
-            // Rest & Simultaneous Conflict Warnings for teams on this court
-            const restWarningA = activeMatch ? checkRestPeriodConflict(activeMatch.teamAName) : null;
-            const restWarningB = activeMatch ? checkRestPeriodConflict(activeMatch.teamBName) : null;
+            // Rest & Simultaneous Conflict Warnings for teams on this court (roster-aware)
+            const restWarningA = activeMatch ? checkRestPeriodConflict(activeMatch.teamAName, activeMatch.teamAPlayers) : null;
+            const restWarningB = activeMatch ? checkRestPeriodConflict(activeMatch.teamBName, activeMatch.teamBPlayers) : null;
 
             const hasActiveMatch = Boolean(activeMatch);
             const isCourtLive = (station.status === "live" || activeMatch?.status === "live") && hasActiveMatch;
@@ -1655,8 +1737,8 @@ export function CourtDispatch({
                   }`}
               >
                 {/* Court Card Header */}
-                <div className="bg-charcoal px-4 py-3 border-b border-border flex items-center justify-between">
-                  <div className="flex items-center gap-2.5">
+                <div className="bg-charcoal px-4 py-3 border-b border-border flex flex-wrap items-center justify-between gap-2.5">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <span className="font-display text-xl tracking-wider text-sand">
                       {courtName}
                     </span>
@@ -1686,9 +1768,39 @@ export function CourtDispatch({
                         Hold
                       </span>
                     )}
+
+                    {/* Active Bracket Badge */}
+                    {courtActiveBracket !== "all" ? (
+                      <span className="px-2 py-0.5 text-[0.65rem] font-bold uppercase tracking-widest bg-pickle/25 text-pickle border border-pickle/50">
+                        {courtActiveBracket}
+                      </span>
+                    ) : (
+                      <span className="px-2 py-0.5 text-[0.65rem] font-medium uppercase tracking-wider text-sand/60 border border-sand/20">
+                        All Brackets
+                      </span>
+                    )}
                   </div>
 
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {/* Active Bracket Selector Dropdown */}
+                    <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+                      <label className="text-[0.65rem] uppercase tracking-wider text-sand/60 font-semibold hidden sm:inline">
+                        Bracket:
+                      </label>
+                      <select
+                        value={station.activeBracket || "all"}
+                        onChange={(e) => handleSetCourtActiveBracket(courtName, e.target.value)}
+                        className="bg-charcoal text-sand text-xs font-semibold uppercase tracking-wider border border-border px-2 py-1 rounded focus:border-pickle focus:outline-none cursor-pointer"
+                        title={`Set active bracket for ${courtName}`}
+                      >
+                        {availableBracketOptions.map((opt) => (
+                          <option key={opt.value} value={opt.value} className="bg-charcoal text-sand">
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
@@ -1932,14 +2044,18 @@ export function CourtDispatch({
                           Select Match from Bracket &rarr;
                         </button>
 
-                        {nextInQueue ? (
+                        {nextCourtMatch ? (
                           <div className="p-2.5 bg-card border-2 border-border rounded text-left space-y-1.5">
                             <div className="flex items-center justify-between text-[0.65rem] uppercase tracking-wider text-muted-foreground font-bold">
-                              <span>Next in Queue (#1)</span>
-                              <span className="text-pickle font-bold">{nextInQueue.stage}</span>
+                              <span>
+                                {courtActiveBracket !== "all"
+                                  ? `Next for ${courtActiveBracket} (#${nextCourtMatch.queueIndex})`
+                                  : `Next in Queue (#${nextCourtMatch.queueIndex})`}
+                              </span>
+                              <span className="text-pickle font-bold">{nextCourtMatch.item.stage}</span>
                             </div>
                             <div className="font-bold text-xs text-foreground truncate">
-                              {nextInQueue.teamAName} vs {nextInQueue.teamBName}
+                              {nextCourtMatch.item.teamAName} vs {nextCourtMatch.item.teamBName}
                             </div>
                             <button
                               onClick={(e) => {
@@ -1948,12 +2064,14 @@ export function CourtDispatch({
                               }}
                               className="w-full mt-1 py-1.5 text-[0.65rem] font-bold uppercase tracking-wider bg-charcoal text-sand border border-border hover:border-pickle hover:text-pickle transition-colors cursor-pointer"
                             >
-                              Or Dispatch Next from Queue
+                              Dispatch Next Match to {courtName}
                             </button>
                           </div>
                         ) : (
-                          <div className="text-xs text-muted-foreground italic pt-1">
-                            Queue is empty. Select from bracket above.
+                          <div className="p-2.5 bg-card/40 border border-border/60 rounded text-center text-xs text-muted-foreground">
+                            {courtActiveBracket !== "all"
+                              ? `No pending matches in queue for ${courtActiveBracket}.`
+                              : "No pending matches in queue."}
                           </div>
                         )}
                       </div>
@@ -2456,8 +2574,8 @@ export function CourtDispatch({
               /* Compact single-row list */
               <div className="border border-border divide-y divide-border/50 overflow-hidden">
                 {filteredQueue.map((item, idx) => {
-                  const restA = checkRestPeriodConflict(item.teamAName);
-                  const restB = checkRestPeriodConflict(item.teamBName);
+                  const restA = checkRestPeriodConflict(item.teamAName, item.teamAPlayers);
+                  const restB = checkRestPeriodConflict(item.teamBName, item.teamBPlayers);
                   const liveA = checkSimultaneousPlayConflict(item.teamAName, item.teamAPlayers, item.tournamentSlug || tournamentSlug);
                   const liveB = checkSimultaneousPlayConflict(item.teamBName, item.teamBPlayers, item.tournamentSlug || tournamentSlug);
                   const liveConflict = liveA || liveB;
@@ -2564,8 +2682,8 @@ export function CourtDispatch({
               /* Card view */
               <div className="space-y-2.5">
                 {filteredQueue.map((item, idx) => {
-                  const restA = checkRestPeriodConflict(item.teamAName);
-                  const restB = checkRestPeriodConflict(item.teamBName);
+                  const restA = checkRestPeriodConflict(item.teamAName, item.teamAPlayers);
+                  const restB = checkRestPeriodConflict(item.teamBName, item.teamBPlayers);
                   const liveA = checkSimultaneousPlayConflict(item.teamAName, item.teamAPlayers, item.tournamentSlug || tournamentSlug);
                   const liveB = checkSimultaneousPlayConflict(item.teamBName, item.teamBPlayers, item.tournamentSlug || tournamentSlug);
                   const liveConflict = liveA || liveB;
@@ -3160,8 +3278,8 @@ export function CourtDispatch({
                     ) : (
                       <div className="space-y-2.5">
                         {unplayed.map((match, idx) => {
-                          const restA = checkRestPeriodConflict(match.teamAName);
-                          const restB = checkRestPeriodConflict(match.teamBName);
+                          const restA = checkRestPeriodConflict(match.teamAName, match.teamAPlayers);
+                          const restB = checkRestPeriodConflict(match.teamBName, match.teamBPlayers);
                           const liveA = checkSimultaneousPlayConflict(match.teamAName, match.teamAPlayers, tournamentSlug);
                           const liveB = checkSimultaneousPlayConflict(match.teamBName, match.teamBPlayers, tournamentSlug);
                           const activeConflict = liveA || liveB;

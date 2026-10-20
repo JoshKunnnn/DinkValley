@@ -37,6 +37,7 @@ export type CourtStation = {
   assignedUmpire: string | null;
   dispatchedAt: number | null;
   maintenanceNote: string | null;
+  activeBracket?: string | null;
 };
 
 export type QueueItem = {
@@ -87,6 +88,7 @@ export function getInitialCourtStations(): Record<FacilityCourt, CourtStation> {
       assignedUmpire: null,
       dispatchedAt: null,
       maintenanceNote: null,
+      activeBracket: "all",
     },
     "Court 2": {
       court: "Court 2",
@@ -96,6 +98,7 @@ export function getInitialCourtStations(): Record<FacilityCourt, CourtStation> {
       assignedUmpire: null,
       dispatchedAt: null,
       maintenanceNote: null,
+      activeBracket: "all",
     },
     "Court 3": {
       court: "Court 3",
@@ -105,6 +108,7 @@ export function getInitialCourtStations(): Record<FacilityCourt, CourtStation> {
       assignedUmpire: null,
       dispatchedAt: null,
       maintenanceNote: null,
+      activeBracket: "all",
     },
     "Court 4": {
       court: "Court 4",
@@ -114,6 +118,7 @@ export function getInitialCourtStations(): Record<FacilityCourt, CourtStation> {
       assignedUmpire: null,
       dispatchedAt: null,
       maintenanceNote: null,
+      activeBracket: "all",
     },
   };
 }
@@ -128,7 +133,11 @@ export function getCourtStations(): Record<FacilityCourt, CourtStation> {
     const base = getInitialCourtStations();
     for (const c of FACILITY_COURTS) {
       if (parsed[c]) {
-        base[c] = { ...base[c], ...parsed[c] };
+        base[c] = {
+          ...base[c],
+          ...parsed[c],
+          activeBracket: parsed[c].activeBracket || base[c].activeBracket || "all",
+        };
       }
     }
     return base;
@@ -510,14 +519,80 @@ export function dispatchMatchToCourt(
 }
 
 /**
+ * Determines whether a given match stage matches the court's active bracket assignment.
+ * - 'all' or empty allows any stage.
+ * - 'Playoffs' matches knockout stages (Quarterfinal, Semifinal, Final, Bronze, Round of 16, etc.) and excludes Pool Play.
+ * - 'Bracket A' (or 'Pool A') matches stages belonging to that pool letter (e.g. 'Bracket A (Pool Play)', 'Pool A - Round 1').
+ */
+export function isStageMatchingBracket(
+  stage?: string,
+  activeBracket?: string | null,
+): boolean {
+  if (!activeBracket || activeBracket === "all" || activeBracket === "ALL") {
+    return true;
+  }
+  if (!stage) {
+    return false;
+  }
+
+  const cleanBracket = activeBracket.trim().toLowerCase();
+  const cleanStage = stage.trim().toLowerCase();
+
+  // Playoffs assignment: matches any playoff/knockout stage, excludes pool play
+  if (cleanBracket === "playoffs" || cleanBracket === "playoff") {
+    const isPool = /(?:bracket|pool)\s+[a-z]/i.test(cleanStage);
+    return !isPool;
+  }
+
+  // Pool bracket assignment: extract the target letter, e.g. "Bracket A" -> "A", "Pool B" -> "B"
+  const targetLetterMatch = cleanBracket.match(/(?:bracket|pool)?\s*([a-z])/i);
+  if (!targetLetterMatch) {
+    return cleanStage.includes(cleanBracket);
+  }
+
+  const targetLetter = targetLetterMatch[1]!.toUpperCase();
+
+  // Extract letter from match stage
+  const stageLetterMatch = cleanStage.match(/(?:bracket|pool)\s+([a-z])/i);
+  if (!stageLetterMatch) {
+    return false;
+  }
+
+  const stageLetter = stageLetterMatch[1]!.toUpperCase();
+  return stageLetter === targetLetter;
+}
+
+export function setCourtActiveBracket(court: FacilityCourt, bracket: string | null): void {
+  const stations = getCourtStations();
+  if (stations[court]) {
+    stations[court] = {
+      ...stations[court],
+      activeBracket: bracket || "all",
+    };
+    saveCourtStations(stations);
+  }
+}
+
+export function getCourtActiveBracket(court: FacilityCourt): string {
+  const stations = getCourtStations();
+  return stations[court]?.activeBracket || "all";
+}
+
+/**
  * Auto-dispatches the #1 priority match from the queue to the given court.
- * Skips any match where a team is currently playing on an active facility court.
+ * Respects the court's assigned activeBracket filter (e.g. 'Bracket A', 'Bracket B', or 'all').
+ * Skips any match where a team or player is currently playing on an active facility court.
  */
 export function autoDispatchNext(court: FacilityCourt, tournamentSlug?: string, umpire?: string): QueueItem | null {
+  const stations = getCourtStations();
+  const station = stations[court];
+  const activeBracket = station?.activeBracket || "all";
+
   const queue = getDispatchQueue();
   const pending = queue
     .filter((q) => q.status === "queued" || q.status === "on_deck")
     .filter((q) => !tournamentSlug || !q.tournamentSlug || q.tournamentSlug === tournamentSlug)
+    .filter((q) => isStageMatchingBracket(q.stage, activeBracket))
     .filter((q) => !checkSimultaneousPlayConflict(q.teamAName, q.teamAPlayers, q.tournamentSlug || tournamentSlug) && !checkSimultaneousPlayConflict(q.teamBName, q.teamBPlayers, q.tournamentSlug || tournamentSlug))
     .filter((q) => isMatchInSameBracket(q.tournamentSlug || tournamentSlug || "", q.categoryId || "", q.stage, q.teamAName, q.teamBName))
     .sort((a, b) => a.priority - b.priority);
@@ -1003,17 +1078,31 @@ export type RestWarning = {
 
 export function checkRestPeriodConflict(
   teamName: string,
+  players?: string[],
   thresholdMinutes = 20,
 ): RestWarning | null {
   const matches = getMatches();
   const now = Date.now();
-  const clean = teamName.trim().toLowerCase();
+  const cleanTeam = teamName.trim().toLowerCase();
+  const cleanPlayers = (players ?? []).map((p) => p.trim().toLowerCase()).filter(Boolean);
 
   const finishedMatches = matches.filter((m) => {
     if (m.status !== "final" || !m.endedAt) return false;
+
+    if (cleanPlayers.length > 0) {
+      const matchPlayers = [
+        ...(m.teamAPlayers ?? []).map((p) => p.trim().toLowerCase()),
+        ...(m.teamBPlayers ?? []).map((p) => p.trim().toLowerCase()),
+      ].filter(Boolean);
+
+      if (matchPlayers.length > 0) {
+        return cleanPlayers.some((p) => matchPlayers.includes(p));
+      }
+    }
+
     const a = m.teamAName.trim().toLowerCase();
     const b = m.teamBName.trim().toLowerCase();
-    return a === clean || b === clean;
+    return cleanTeam && (a === cleanTeam || b === cleanTeam);
   });
 
   if (finishedMatches.length === 0) return null;
@@ -1225,28 +1314,51 @@ export function checkSimultaneousPlayConflict(
     const partA = part.teamAName.trim().toLowerCase();
     const partB = part.teamBName.trim().toLowerCase();
 
-    // 1. Direct Team Name Match (either Pair A or Pair B in active match)
-    if (cleanTeam && (cleanTeam === partA || cleanTeam === partB)) {
-      return {
-        teamName,
-        court: part.court,
-        matchId: part.matchId,
-        status: part.state,
-      };
-    }
+    const partAPlayers = (part.teamAPlayers ?? []).map((p) => p.trim().toLowerCase()).filter(Boolean);
+    const partBPlayers = (part.teamBPlayers ?? []).map((p) => p.trim().toLowerCase()).filter(Boolean);
+    const allPartPlayers = [...partAPlayers, ...partBPlayers];
 
-    // 2. Individual Player Match in either Pair A or Pair B
-    const partPlayers = [
-      ...part.teamAPlayers.map((p) => p.trim().toLowerCase()),
-      ...part.teamBPlayers.map((p) => p.trim().toLowerCase()),
-    ].filter(Boolean);
+    // Priority 1: If candidate team has players specified,
+    // evaluate conflict strictly on individual player identity!
+    // Teams sharing a club or sponsor name (e.g. Nanomoly) with distinct rosters
+    // can play simultaneously on different courts without blocking each other.
+    if (cleanPlayers.length > 0) {
+      for (const player of cleanPlayers) {
+        if (allPartPlayers.includes(player)) {
+          const origPlayer = (players ?? []).find((p) => p.trim().toLowerCase() === player) || player;
+          return {
+            teamName,
+            playerName: origPlayer,
+            isPlayerConflict: true,
+            court: part.court,
+            matchId: part.matchId,
+            status: part.state,
+          };
+        }
+      }
 
-    for (const player of cleanPlayers) {
-      if (partPlayers.includes(player)) {
+      // If active teams on this court both have known player rosters and none of cleanPlayers matched,
+      // there is NO player conflict (e.g. Nanomoly Team 1 vs Nanomoly Team 2 with different players).
+      // Only if an active team on court matches by name AND has NO player roster on file,
+      // fall back to treating it as a team conflict.
+      const partTeamMatchesWithoutPlayers =
+        (cleanTeam === partA && partAPlayers.length === 0) ||
+        (cleanTeam === partB && partBPlayers.length === 0);
+
+      if (cleanTeam && partTeamMatchesWithoutPlayers) {
         return {
           teamName,
-          playerName: player,
-          isPlayerConflict: true,
+          court: part.court,
+          matchId: part.matchId,
+          status: part.state,
+        };
+      }
+    } else {
+      // Priority 2: Candidate team has NO player roster on file.
+      // Fall back to matching team name.
+      if (cleanTeam && (cleanTeam === partA || cleanTeam === partB)) {
+        return {
+          teamName,
           court: part.court,
           matchId: part.matchId,
           status: part.state,
