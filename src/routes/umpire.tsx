@@ -1594,6 +1594,33 @@ function UmpireConsole({
     [matches, isDispatchedMatch],
   );
 
+  const matchOperatingOfficial =
+    match?.officiatedBy ||
+    (match?.court && currentStations[match.court as FacilityCourt]?.assignedUmpire);
+  const isOperatedByOther = Boolean(
+    match &&
+    match.status !== "final" &&
+    matchOperatingOfficial &&
+    matchOperatingOfficial !== currentUmpire
+  );
+
+  // Auto-assign umpire identity upon entering unassigned match
+  useEffect(() => {
+    if (match && !match.officiatedBy && match.status !== "final" && !isOperatedByOther) {
+      onUpdate(match.id, (m) => ({
+        ...m,
+        officiatedBy: currentUmpire,
+      }));
+      if (match.court && (FACILITY_COURTS as readonly string[]).includes(match.court as FacilityCourt)) {
+        dbUpdateCourtStation(match.court as FacilityCourt, {
+          currentMatchId: match.id,
+          assignedUmpire: currentUmpire,
+        }).catch(() => {});
+        claimCourtStation(match.court as FacilityCourt, currentUmpire);
+      }
+    }
+  }, [match?.id, match?.officiatedBy, match?.status, isOperatedByOther, currentUmpire]);
+
   if (!match) {
     // Completed matches strictly for active event
     const completedMatches = matches
@@ -1881,32 +1908,6 @@ function UmpireConsole({
     );
   }
 
-
-  const matchOperatingOfficial =
-    match.officiatedBy ||
-    (match.court && currentStations[match.court as FacilityCourt]?.assignedUmpire);
-  const isOperatedByOther = Boolean(
-    match.status !== "final" &&
-    matchOperatingOfficial &&
-    matchOperatingOfficial !== currentUmpire
-  );
-
-  // Auto-assign umpire identity upon entering unassigned match
-  useEffect(() => {
-    if (match && !match.officiatedBy && match.status !== "final" && !isOperatedByOther) {
-      onUpdate(match.id, (m) => ({
-        ...m,
-        officiatedBy: currentUmpire,
-      }));
-      if (match.court && (FACILITY_COURTS as readonly string[]).includes(match.court as FacilityCourt)) {
-        dbUpdateCourtStation(match.court as FacilityCourt, {
-          currentMatchId: match.id,
-          assignedUmpire: currentUmpire,
-        }).catch(() => {});
-        claimCourtStation(match.court as FacilityCourt, currentUmpire);
-      }
-    }
-  }, [match?.id, match?.officiatedBy, match?.status, isOperatedByOther, currentUmpire]);
 
   if (isOperatedByOther) {
     return (

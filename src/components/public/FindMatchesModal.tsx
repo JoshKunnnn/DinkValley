@@ -33,6 +33,8 @@ export function FindMatchesModal({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [isOpen, onClose]);
 
+  const [copied, setCopied] = useState(false);
+
   if (!isOpen || !team) return null;
 
   // Find which bracket group this team belongs to
@@ -90,7 +92,6 @@ export function FindMatchesModal({
   const lostCount = completed.filter((m) => (m.scoreOur ?? 0) < (m.scoreOpp ?? 0)).length;
   const pointDiff = completed.reduce((acc, m) => acc + ((m.scoreOur ?? 0) - (m.scoreOpp ?? 0)), 0);
 
-  const [copied, setCopied] = useState(false);
 
   const handleShare = () => {
     if (typeof window !== "undefined") {
