@@ -123,11 +123,6 @@ export function isMatchMatchingStation(
     }
   }
 
-  // 4. Assigned to this court
-  if (courtName && m.court === courtName && (m.status === "live" || m.status === "scheduled")) {
-    return true;
-  }
-
   return false;
 }
 

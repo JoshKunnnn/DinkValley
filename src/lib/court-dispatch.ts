@@ -232,38 +232,14 @@ export function reconcileCourtStations(
         activeMatch = matches.find((m) => m.status !== "final" && isMatchMatchingStation(m, st.currentMatchId, c)) || null;
       }
 
-      // Self-heal: If station has currentMatchId but matches list is missing it, restore the match
+      // If station has currentMatchId but matches list is missing it or it concluded, cleanly reset station
       if (!activeMatch && st.currentMatchId) {
-        let teamA = "Team A";
-        let teamB = "Team B";
-        if (st.currentMatchId.includes("-vs-")) {
-          const vsIdx = st.currentMatchId.indexOf("-vs-");
-          const p0 = st.currentMatchId.substring(0, vsIdx);
-          const p1 = st.currentMatchId.substring(vsIdx + 4);
-          const rawA = p0.includes("--") ? p0.split("--").pop()! : p0.split("-").slice(-2).join(" ");
-          const rawB = p1.replace(/--.*/, "");
-          teamA = rawA.replace(/-/g, " ").trim();
-          teamB = rawB.replace(/-/g, " ").trim();
-          if (teamA) teamA = teamA.charAt(0).toUpperCase() + teamA.slice(1);
-          if (teamB) teamB = teamB.charAt(0).toUpperCase() + teamB.slice(1);
-        }
-
-        const restoredMatch: LiveMatch = {
-          id: st.currentMatchId,
-          court: c,
-          teamAName: teamA,
-          teamAPlayers: [],
-          teamBName: teamB,
-          teamBPlayers: [],
-          status: st.status === "live" ? "live" : "scheduled",
-          score: createInitialScore(),
-          winnerTeam: undefined,
-          startedAt: st.dispatchedAt ?? Date.now(),
-          endedAt: undefined,
-          officiatedBy: st.assignedUmpire ?? undefined,
+        stations[c] = {
+          ...st,
+          status: "available",
+          currentMatchId: null,
+          dispatchedAt: null,
         };
-        matches.push(restoredMatch);
-        activeMatch = restoredMatch;
         modified = true;
       }
 
@@ -1068,10 +1044,36 @@ export async function hydrateCourtStationsFromCloud(): Promise<Record<FacilityCo
             cloud.status === "idle" ||
             !cloud.currentMatchId;
 
-          // If local station is actively live or in warm-up, and cloud is idle / has no match:
-          // Local is the source of truth! Do NOT wipe out local with stale cloud idle.
-          // Heal Supabase by pushing local active state to the database.
+          // Check if local's assigned match is concluded or missing
+          const allLocalMatches = getMatches();
+          const activeMatchInStore = isLocalActive ? allLocalMatches.find((m) => m.id === loc?.currentMatchId) : null;
+          const isLocalFinishedOrMissing = isLocalActive && (!activeMatchInStore || activeMatchInStore.status === "final");
+
+          if (isLocalFinishedOrMissing) {
+            local[court] = {
+              ...local[court],
+              status: "available",
+              currentMatchId: null,
+              dispatchedAt: null,
+              assignedUmpire: null,
+            };
+            continue;
+          }
+
+          // If local station is active and cloud is idle / available:
+          // If local dispatch occurred more than 4 seconds ago, adopt cloud idle state (e.g. vacated by umpire)
           if (isLocalActive && isCloudIdleOrNull && loc) {
+            const timeSinceLocalDispatch = loc.dispatchedAt ? now - loc.dispatchedAt : Infinity;
+            if (timeSinceLocalDispatch > 4000) {
+              local[court] = {
+                ...local[court],
+                status: "available",
+                currentMatchId: null,
+                dispatchedAt: null,
+                assignedUmpire: null,
+              };
+              continue;
+            }
             dbUpdateCourtStation(court, {
               status: loc.status,
               currentMatchId: loc.currentMatchId,
@@ -1977,4 +1979,48 @@ export function isConfirmedDispatchedMatch(
 
   return false;
 }
+
+/**
+ * Contingency self-healing and re-sync function for Admin Court Dispatch.
+ * Clears orphaned station match IDs, purges phantom matches, and pulls fresh state from Supabase.
+ */
+export async function healAndSyncDispatchStations(): Promise<Record<FacilityCourt, CourtStation>> {
+  const currentMatches = getMatches();
+  const validLiveIds = new Set(
+    currentMatches
+      .filter((m) => m.status === "live" || m.status === "scheduled")
+      .map((m) => m.id)
+  );
+
+  const stations = getCourtStations();
+  let modified = false;
+
+  for (const c of FACILITY_COURTS) {
+    const st = stations[c];
+    if (st && st.currentMatchId && !validLiveIds.has(st.currentMatchId)) {
+      stations[c] = {
+        ...st,
+        status: "available",
+        currentMatchId: null,
+        dispatchedAt: null,
+        assignedUmpire: null,
+      };
+      modified = true;
+      dbUpdateCourtStation(c, {
+        status: "available",
+        currentMatchId: null,
+        dispatchedAt: null,
+        assignedUmpire: null,
+      }).catch(() => {});
+    }
+  }
+
+  if (modified) {
+    saveCourtStations(stations, false);
+  }
+
+  const synced = await hydrateCourtStationsFromCloud();
+  return synced;
+}
+
 

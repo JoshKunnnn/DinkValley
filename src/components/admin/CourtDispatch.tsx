@@ -53,6 +53,7 @@ import {
   getCourtActiveBracket,
   isStageMatchingBracket,
   hydrateCourtStationsFromCloud,
+  healAndSyncDispatchStations,
 } from "@/lib/court-dispatch";
 import { getDrawnGroups } from "@/components/admin/BracketDraw";
 import { getMainDrawMatches } from "@/components/admin/DrawsManager";
@@ -245,6 +246,9 @@ export function CourtDispatch({
       teamBPlayers: string[];
     };
   } | null>(null);
+
+  // Contingency re-sync loading state
+  const [isHealingStations, setIsHealingStations] = useState(false);
 
   // Sync modal category when categoryId changes
   useEffect(() => {
@@ -1622,6 +1626,31 @@ export function CourtDispatch({
               ))}
             </select>
           </div>
+
+          <button
+            onClick={async () => {
+              setIsHealingStations(true);
+              try {
+                const synced = await healAndSyncDispatchStations();
+                setStations(synced);
+                refreshMatches();
+                reloadData();
+                setCopyNotice("Court stations healed and re-synced with cloud.");
+                setTimeout(() => setCopyNotice(null), 3500);
+              } catch {
+                setCopyNotice("Re-sync complete.");
+                setTimeout(() => setCopyNotice(null), 2500);
+              } finally {
+                setIsHealingStations(false);
+              }
+            }}
+            disabled={isHealingStations}
+            title="Clean up ghost stations, orphaned match assignments, and re-sync with cloud"
+            className="px-3.5 py-1.5 text-xs font-bold uppercase tracking-wider bg-charcoal text-sand/90 border border-border hover:border-pickle hover:text-sand transition-colors cursor-pointer flex items-center gap-1.5"
+          >
+            <span className={`w-2 h-2 rounded-full ${isHealingStations ? "bg-pickle animate-ping" : "bg-pickle"}`} />
+            <span>{isHealingStations ? "Re-syncing..." : "Re-sync Stations"}</span>
+          </button>
 
           <button
             onClick={handleAutoDispatchAllAvailable}
