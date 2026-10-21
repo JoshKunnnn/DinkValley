@@ -5,6 +5,7 @@ import { DrawsManager } from "@/components/admin/DrawsManager";
 import { BracketDraw } from "@/components/admin/BracketDraw";
 import { CourtDispatch } from "@/components/admin/CourtDispatch";
 import { TournamentsManager } from "@/components/admin/TournamentsManager";
+import { MasterlistManager } from "@/components/admin/MasterlistManager";
 import { AdminMobileNav } from "@/components/admin/AdminMobileNav";
 import {
   useTournamentStore,
@@ -125,7 +126,7 @@ function AdminErrorComponent({ error, reset }: { error: Error; reset: () => void
 const levels = ["Beginners", "Novice", "Intermediate", "Advance", "Open"];
 const divisions = ["Men's", "Women's", "Mixed"];
 
-type TabKey = "draw" | "dispatch" | "setup" | "teams" | "access-codes";
+type TabKey = "draw" | "dispatch" | "setup" | "teams" | "masterlist" | "access-codes";
 type DrawSubTab = "bracket-draw" | "brackets";
 type SetupSection = "tournaments" | "teams" | "access-codes";
 
@@ -134,6 +135,7 @@ const tabs: { key: TabKey; label: string }[] = [
   { key: "dispatch", label: "Dispatch" },
   { key: "setup", label: "Setup" },
   { key: "teams", label: "Teams & Payments" },
+  { key: "masterlist", label: "Masterlist" },
   { key: "access-codes", label: "Access Codes" },
 ];
 
@@ -829,6 +831,11 @@ function Admin() {
                 />
               )}
             </div>
+          )}
+
+          {/* ── MASTERLIST TAB ── */}
+          {activeTab === "masterlist" && (
+            <MasterlistManager onNavigateTab={(tab) => setActiveTab(tab as TabKey)} />
           )}
 
           {/* ── ACCESS CODES TAB ── */}

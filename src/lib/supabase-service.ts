@@ -1382,13 +1382,18 @@ export type CloudStaffUser = {
   role: "admin" | "umpire";
   accessCode?: string | undefined;
   certifiedAt?: string | undefined;
+  status?: "active" | "deactivated" | undefined;
 };
 
 /**
  * Fetch all registered staff accounts from Supabase cloud.
+ * Queries both tournaments.rules.staffAccounts and access_codes (used_by_email).
  */
 export async function dbGetCloudStaffAccounts(): Promise<CloudStaffUser[]> {
   try {
+    const cloudStaffMap: Record<string, CloudStaffUser> = {};
+
+    // 1. Fetch from tournaments rules staffAccounts
     const { data: tourney } = await supabase
       .from("tournaments")
       .select("rules")
@@ -1396,15 +1401,53 @@ export async function dbGetCloudStaffAccounts(): Promise<CloudStaffUser[]> {
       .limit(1)
       .maybeSingle();
 
-    if (!tourney?.rules || typeof tourney.rules !== "object" || Array.isArray(tourney.rules)) {
-      return [];
+    if (tourney?.rules && typeof tourney.rules === "object" && !Array.isArray(tourney.rules)) {
+      const map = (tourney.rules as any).staffAccounts;
+      if (map && typeof map === "object" && !Array.isArray(map)) {
+        Object.entries(map).forEach(([k, v]) => {
+          cloudStaffMap[k.toLowerCase()] = v as CloudStaffUser;
+        });
+      }
     }
 
-    const map = (tourney.rules as any).staffAccounts;
-    if (map && typeof map === "object" && !Array.isArray(map)) {
-      return Object.values(map) as CloudStaffUser[];
+    // 2. Fetch from access_codes where used_by_email is recorded (accounts registered on other devices)
+    try {
+      const { data: usedCodes } = await supabase
+        .from("access_codes")
+        .select("code, role, used_at, used_by_email, used_by")
+        .not("used_by_email", "is", null);
+
+      if (usedCodes && usedCodes.length > 0) {
+        usedCodes.forEach((ac) => {
+          if (!ac.used_by_email) return;
+          const emailKey = ac.used_by_email.toLowerCase();
+          if (!cloudStaffMap[emailKey]) {
+            const rawPart = emailKey.split("@")[0] || "official";
+            const formattedName = rawPart
+              .split(/[\._\-]/)
+              .map((s) => s.charAt(0).toUpperCase() + s.slice(1))
+              .join(" ");
+
+            cloudStaffMap[emailKey] = {
+              name: formattedName || (ac.role === "admin" ? "Tournament Director" : "Match Official"),
+              email: emailKey,
+              role: ac.role === "admin" ? "admin" : "umpire",
+              accessCode: ac.code,
+              certifiedAt: ac.used_at ? ac.used_at.split("T")[0] : undefined,
+              status: "active",
+            };
+          } else {
+            const existing = cloudStaffMap[emailKey]!;
+            if (!existing.accessCode && ac.code) existing.accessCode = ac.code;
+            if (!existing.certifiedAt && ac.used_at) existing.certifiedAt = ac.used_at.split("T")[0];
+          }
+        });
+      }
+    } catch (err) {
+      console.warn("[Supabase] Notice querying access_codes in dbGetCloudStaffAccounts:", err);
     }
-    return [];
+
+    return Object.values(cloudStaffMap);
   } catch (err) {
     console.warn("[Supabase] Failed to fetch cloud staff accounts:", err);
     return [];
@@ -1434,6 +1477,7 @@ export async function dbSaveCloudStaffAccount(user: CloudStaffUser): Promise<boo
     const updatedStaffMap = {
       ...currentStaffMap,
       [user.email.toLowerCase()]: {
+        ...(currentStaffMap[user.email.toLowerCase()] || {}),
         ...user,
         email: user.email.toLowerCase(),
       },
@@ -1477,7 +1521,107 @@ export async function dbSaveCloudStaffAccount(user: CloudStaffUser): Promise<boo
 }
 
 /**
+ * Update a specific staff account in Supabase cloud.
+ */
+export async function dbUpdateCloudStaffAccount(
+  email: string,
+  updates: Partial<CloudStaffUser>
+): Promise<boolean> {
+  try {
+    const { data: tourney } = await supabase
+      .from("tournaments")
+      .select("id, rules")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (!tourney) return false;
+
+    const existingRules =
+      tourney.rules && typeof tourney.rules === "object" && !Array.isArray(tourney.rules)
+        ? (tourney.rules as any)
+        : { rules: [] };
+
+    const currentStaffMap = existingRules.staffAccounts || {};
+    const emailKey = email.toLowerCase();
+    const existing = currentStaffMap[emailKey] || {};
+
+    const updatedStaffMap = {
+      ...currentStaffMap,
+      [emailKey]: {
+        ...existing,
+        ...updates,
+        email: emailKey,
+      },
+    };
+
+    const updatedRules = {
+      ...existingRules,
+      staffAccounts: updatedStaffMap,
+    };
+
+    const { error } = await supabase
+      .from("tournaments")
+      .update({ rules: updatedRules, updated_at: new Date().toISOString() })
+      .eq("id", tourney.id);
+
+    if (error) {
+      console.warn("[Supabase] Error updating cloud staff account:", error.message);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn("[Supabase] Unexpected error updating cloud staff account:", err);
+    return false;
+  }
+}
+
+/**
+ * Delete a registered staff account from Supabase cloud.
+ */
+export async function dbDeleteCloudStaffAccount(email: string): Promise<boolean> {
+  try {
+    const { data: tourney } = await supabase
+      .from("tournaments")
+      .select("id, rules")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (!tourney) return false;
+
+    const existingRules =
+      tourney.rules && typeof tourney.rules === "object" && !Array.isArray(tourney.rules)
+        ? (tourney.rules as any)
+        : { rules: [] };
+
+    const currentStaffMap = { ...(existingRules.staffAccounts || {}) };
+    delete currentStaffMap[email.toLowerCase()];
+
+    const updatedRules = {
+      ...existingRules,
+      staffAccounts: currentStaffMap,
+    };
+
+    const { error } = await supabase
+      .from("tournaments")
+      .update({ rules: updatedRules, updated_at: new Date().toISOString() })
+      .eq("id", tourney.id);
+
+    if (error) {
+      console.warn("[Supabase] Error deleting staff account from cloud:", error.message);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn("[Supabase] Unexpected error deleting cloud staff account:", err);
+    return false;
+  }
+}
+
+/**
  * Two-way merge of local staff accounts and Supabase cloud staff accounts.
+ * Also scans access_codes for accounts registered on other machines.
  */
 export async function dbSyncCloudStaffAccounts(localUsers: CloudStaffUser[]): Promise<CloudStaffUser[]> {
   try {
@@ -1501,21 +1645,73 @@ export async function dbSyncCloudStaffAccounts(localUsers: CloudStaffUser[]): Pr
 
     let needsCloudUpdate = false;
 
-    // Check if any local users are not in cloud
+    // 1. Scan access_codes table to discover accounts registered on other PCs
+    try {
+      const { data: usedCodes } = await supabase
+        .from("access_codes")
+        .select("code, role, used_at, used_by_email, used_by")
+        .not("used_by_email", "is", null);
+
+      if (usedCodes && usedCodes.length > 0) {
+        usedCodes.forEach((ac) => {
+          if (!ac.used_by_email) return;
+          const emailKey = ac.used_by_email.toLowerCase();
+          if (!cloudStaffMap[emailKey]) {
+            const rawPart = emailKey.split("@")[0] || "official";
+            const formattedName = rawPart
+              .split(/[\._\-]/)
+              .map((s) => s.charAt(0).toUpperCase() + s.slice(1))
+              .join(" ");
+
+            cloudStaffMap[emailKey] = {
+              name: formattedName || (ac.role === "admin" ? "Tournament Director" : "Match Official"),
+              email: emailKey,
+              role: ac.role === "admin" ? "admin" : "umpire",
+              accessCode: ac.code,
+              certifiedAt: ac.used_at ? ac.used_at.split("T")[0] : undefined,
+              status: "active",
+            };
+            needsCloudUpdate = true;
+          } else {
+            const existing = cloudStaffMap[emailKey]!;
+            if (!existing.accessCode && ac.code) {
+              existing.accessCode = ac.code;
+              needsCloudUpdate = true;
+            }
+            if (!existing.certifiedAt && ac.used_at) {
+              existing.certifiedAt = ac.used_at.split("T")[0];
+              needsCloudUpdate = true;
+            }
+          }
+        });
+      }
+    } catch (err) {
+      console.warn("[Supabase] Notice scanning access_codes during sync:", err);
+    }
+
+    // 2. Check if any local users are not in cloud
     for (const u of localUsers) {
       const emailKey = u.email.toLowerCase();
       if (!cloudStaffMap[emailKey]) {
         cloudStaffMap[emailKey] = {
           ...u,
+          status: u.status || "active",
           email: emailKey,
         };
         needsCloudUpdate = true;
-      } else if (u.password && !cloudStaffMap[emailKey].password) {
-        cloudStaffMap[emailKey].password = u.password;
-        needsCloudUpdate = true;
+      } else {
+        if (u.status && !cloudStaffMap[emailKey].status) {
+          cloudStaffMap[emailKey].status = u.status;
+          needsCloudUpdate = true;
+        }
+        if (u.password && !cloudStaffMap[emailKey].password) {
+          cloudStaffMap[emailKey].password = u.password;
+          needsCloudUpdate = true;
+        }
       }
     }
 
+    // 3. Persist back to tournament rules if new accounts were discovered
     if (needsCloudUpdate) {
       const updatedRules = {
         ...existingRules,
@@ -1538,5 +1734,6 @@ export async function dbSyncCloudStaffAccounts(localUsers: CloudStaffUser[]): Pr
     return localUsers;
   }
 }
+
 
 

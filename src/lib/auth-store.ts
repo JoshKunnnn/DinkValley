@@ -3,6 +3,8 @@ import { getAccessCodes, saveAccessCodes, validateAndUseCode, validateAndUseCode
 import {
   dbCheckAccessCode,
   dbSaveCloudStaffAccount,
+  dbUpdateCloudStaffAccount,
+  dbDeleteCloudStaffAccount,
   dbSyncCloudStaffAccounts,
   type CloudStaffUser,
 } from "./supabase-service";
@@ -12,10 +14,11 @@ export type StaffRole = "admin" | "umpire";
 export type StaffUser = {
   name: string;
   email: string;
-  password: string;
+  password?: string | undefined;
   role: StaffRole;
   accessCode?: string | undefined;
   certifiedAt?: string | undefined;
+  status?: "active" | "deactivated" | undefined;
 };
 
 const USERS_STORAGE_KEY = "dv_user_accounts";
@@ -28,6 +31,7 @@ const DEFAULT_STAFF_ACCOUNTS: StaffUser[] = [
     role: "admin",
     accessCode: "DV-ADMIN",
     certifiedAt: "2026-01-01",
+    status: "active",
   },
   {
     name: "Match Official",
@@ -36,6 +40,7 @@ const DEFAULT_STAFF_ACCOUNTS: StaffUser[] = [
     role: "umpire",
     accessCode: "UMP-2026",
     certifiedAt: "2026-01-15",
+    status: "active",
   },
 ];
 
@@ -52,7 +57,10 @@ export function getStaffUsers(): StaffUser[] {
       localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(DEFAULT_STAFF_ACCOUNTS));
       return DEFAULT_STAFF_ACCOUNTS;
     }
-    return parsed as StaffUser[];
+    return parsed.map((u: any) => ({
+      ...u,
+      status: u.status || "active",
+    })) as StaffUser[];
   } catch {
     return DEFAULT_STAFF_ACCOUNTS;
   }
@@ -84,6 +92,7 @@ export function mergeAndSaveStaffUsers(cloudUsers: (StaffUser | CloudStaffUser)[
       role: cu.role,
       accessCode: cu.accessCode || existing?.accessCode,
       certifiedAt: cu.certifiedAt || existing?.certifiedAt,
+      status: cu.status || existing?.status || "active",
     });
   });
   const merged = Array.from(map.values());
@@ -91,7 +100,7 @@ export function mergeAndSaveStaffUsers(cloudUsers: (StaffUser | CloudStaffUser)[
   return merged;
 }
 
-export function getAuthenticatedStaff(): { role: StaffRole; name: string } | null {
+export function getAuthenticatedStaff(): { role: StaffRole; name: string; email?: string } | null {
   if (typeof window === "undefined") return null;
   try {
     const isAdmin = localStorage.getItem("mock_auth") === "true";
@@ -101,12 +110,14 @@ export function getAuthenticatedStaff(): { role: StaffRole; name: string } | nul
       return {
         role: "admin",
         name: localStorage.getItem("mock_admin_name") || "Tournament Director",
+        email: localStorage.getItem("mock_admin_email") || "admin@dinkvalley.com",
       };
     }
     if (isUmpire) {
       return {
         role: "umpire",
         name: localStorage.getItem("mock_umpire_name") || "Match Official",
+        email: localStorage.getItem("mock_umpire_email") || "umpire@dinkvalley.com",
       };
     }
     return null;
@@ -115,19 +126,23 @@ export function getAuthenticatedStaff(): { role: StaffRole; name: string } | nul
   }
 }
 
-export function setStaffSession(role: StaffRole, name: string): void {
+export function setStaffSession(role: StaffRole, name: string, email?: string): void {
   if (typeof window === "undefined") return;
   try {
     if (role === "admin") {
       localStorage.setItem("mock_auth", "true");
       localStorage.setItem("mock_admin_name", name);
+      if (email) localStorage.setItem("mock_admin_email", email.toLowerCase());
       localStorage.removeItem("mock_umpire_auth");
       localStorage.removeItem("mock_umpire_name");
+      localStorage.removeItem("mock_umpire_email");
     } else {
       localStorage.setItem("mock_umpire_auth", "true");
       localStorage.setItem("mock_umpire_name", name);
+      if (email) localStorage.setItem("mock_umpire_email", email.toLowerCase());
       localStorage.removeItem("mock_auth");
       localStorage.removeItem("mock_admin_name");
+      localStorage.removeItem("mock_admin_email");
     }
     window.dispatchEvent(new Event("dv_auth_changed"));
     window.dispatchEvent(new Event("storage"));
@@ -146,8 +161,10 @@ export async function logoutStaff(): Promise<void> {
   try {
     localStorage.removeItem("mock_auth");
     localStorage.removeItem("mock_admin_name");
+    localStorage.removeItem("mock_admin_email");
     localStorage.removeItem("mock_umpire_auth");
     localStorage.removeItem("mock_umpire_name");
+    localStorage.removeItem("mock_umpire_email");
     window.dispatchEvent(new Event("dv_auth_changed"));
     window.dispatchEvent(new Event("storage"));
   } catch {
@@ -205,9 +222,19 @@ export async function loginWithCredentials(
         .eq("id", authData.user.id)
         .maybeSingle();
 
+      const users = getStaffUsers();
+      const existingUser = users.find((u) => u.email.toLowerCase() === cleanEmail);
+      if (existingUser?.status === "deactivated") {
+        await supabase.auth.signOut().catch(() => {});
+        return {
+          success: false,
+          error: "This official account has been deactivated. Please contact the tournament director.",
+        };
+      }
+
       const role: StaffRole = profile?.role === "admin" ? "admin" : "umpire";
       const name = profile?.name || (role === "admin" ? "Tournament Director" : "Match Official");
-      setStaffSession(role, name);
+      setStaffSession(role, name, cleanEmail);
       return { success: true, role, name };
     }
   } catch {
@@ -244,6 +271,7 @@ export async function loginWithCredentials(
         email: cleanEmail,
         password: cleanPassword,
         role: "admin",
+        status: "active",
       };
     } else if (cleanEmail === "umpire@dinkvalley.com" && cleanPassword === "umpire123") {
       user = {
@@ -251,6 +279,7 @@ export async function loginWithCredentials(
         email: cleanEmail,
         password: cleanPassword,
         role: "umpire",
+        status: "active",
       };
     }
   }
@@ -262,7 +291,14 @@ export async function loginWithCredentials(
     };
   }
 
-  setStaffSession(user.role, user.name);
+  if (user.status === "deactivated") {
+    return {
+      success: false,
+      error: "This official account has been deactivated. Please contact the tournament director.",
+    };
+  }
+
+  setStaffSession(user.role, user.name, user.email);
   return { success: true, role: user.role, name: user.name };
 }
 
@@ -326,7 +362,7 @@ export async function registerStaffAccount(data: {
       }
       console.warn("[Auth] Supabase signup warning, registering certified session locally:", signUpError.message);
     } else if (authData?.user) {
-      setStaffSession(finalRole, cleanName);
+      setStaffSession(finalRole, cleanName, cleanEmail);
     }
   } catch (err: any) {
     console.warn("[Auth] Unexpected signup notice:", err);
@@ -342,6 +378,7 @@ export async function registerStaffAccount(data: {
     role: finalRole,
     accessCode: cleanCode,
     certifiedAt: new Date().toISOString().split("T")[0],
+    status: "active",
   };
 
   if (existingIdx >= 0) {
@@ -358,8 +395,201 @@ export async function registerStaffAccount(data: {
     console.warn("[Auth] Failed to sync new staff account to cloud:", err);
   }
 
-  setStaffSession(finalRole, cleanName);
+  setStaffSession(finalRole, cleanName, cleanEmail);
+  window.dispatchEvent(new Event("dv_staff_users_changed"));
   return { success: true, role: finalRole };
+}
+
+/**
+ * Update a staff user's password in local store and cloud.
+ */
+export async function updateStaffPassword(
+  email: string,
+  newPassword: string
+): Promise<{ success: boolean; error?: string }> {
+  const cleanEmail = email.trim().toLowerCase();
+  const cleanPassword = newPassword.trim();
+
+  if (cleanPassword.length < 6) {
+    return { success: false, error: "Password must be at least 6 characters." };
+  }
+
+  const users = getStaffUsers();
+  const idx = users.findIndex((u) => u.email.toLowerCase() === cleanEmail);
+  if (idx < 0) {
+    return { success: false, error: "User account not found." };
+  }
+
+  users[idx] = {
+    ...users[idx]!,
+    password: cleanPassword,
+  };
+  saveStaffUsers(users);
+
+  try {
+    await dbUpdateCloudStaffAccount(cleanEmail, { password: cleanPassword });
+  } catch (err) {
+    console.warn("[Auth] Failed to sync password update to cloud:", err);
+  }
+
+  // If current Supabase Auth user is updating their own password
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    if (sessionData?.session?.user?.email?.toLowerCase() === cleanEmail) {
+      await supabase.auth.updateUser({ password: cleanPassword });
+    }
+  } catch {
+    // ignore
+  }
+
+  window.dispatchEvent(new Event("dv_staff_users_changed"));
+  return { success: true };
+}
+
+/**
+ * Toggle active / deactivated status of a staff account.
+ */
+export async function toggleStaffStatus(
+  email: string,
+  newStatus: "active" | "deactivated"
+): Promise<{ success: boolean; error?: string }> {
+  const cleanEmail = email.trim().toLowerCase();
+  const current = getAuthenticatedStaff();
+
+  if (current?.email && current.email.toLowerCase() === cleanEmail && newStatus === "deactivated") {
+    return {
+      success: false,
+      error: "You cannot deactivate your own currently active administrator session.",
+    };
+  }
+
+  const users = getStaffUsers();
+  const idx = users.findIndex((u) => u.email.toLowerCase() === cleanEmail);
+  if (idx < 0) {
+    return { success: false, error: "User account not found." };
+  }
+
+  users[idx] = {
+    ...users[idx]!,
+    status: newStatus,
+  };
+  saveStaffUsers(users);
+
+  try {
+    await dbUpdateCloudStaffAccount(cleanEmail, { status: newStatus });
+  } catch (err) {
+    console.warn("[Auth] Failed to sync status update to cloud:", err);
+  }
+
+  window.dispatchEvent(new Event("dv_staff_users_changed"));
+  return { success: true };
+}
+
+/**
+ * Update a staff user's role (admin <-> umpire) in local store and cloud.
+ */
+export async function updateStaffRole(
+  email: string,
+  newRole: StaffRole
+): Promise<{ success: boolean; error?: string }> {
+  const cleanEmail = email.trim().toLowerCase();
+  const current = getAuthenticatedStaff();
+
+  if (current?.email && current.email.toLowerCase() === cleanEmail && newRole !== "admin") {
+    return {
+      success: false,
+      error: "You cannot remove administrator privileges from your own currently active session.",
+    };
+  }
+
+  const users = getStaffUsers();
+  const idx = users.findIndex((u) => u.email.toLowerCase() === cleanEmail);
+  if (idx < 0) {
+    return { success: false, error: "User account not found." };
+  }
+
+  users[idx] = {
+    ...users[idx]!,
+    role: newRole,
+  };
+  saveStaffUsers(users);
+
+  try {
+    await dbUpdateCloudStaffAccount(cleanEmail, { role: newRole });
+  } catch (err) {
+    console.warn("[Auth] Failed to sync role update to cloud:", err);
+  }
+
+  // Also update access_codes table if applicable
+  try {
+    await supabase
+      .from("access_codes")
+      .update({ role: newRole })
+      .eq("used_by_email", cleanEmail);
+  } catch {
+    // ignore
+  }
+
+  // Also update profiles table if applicable
+  try {
+    await supabase
+      .from("profiles")
+      .update({ role: newRole })
+      .eq("email", cleanEmail);
+  } catch {
+    // ignore
+  }
+
+  window.dispatchEvent(new Event("dv_staff_users_changed"));
+  return { success: true };
+}
+
+/**
+ * Permanently delete a staff account from local store and cloud.
+ */
+export async function deleteStaffUser(
+  email: string
+): Promise<{ success: boolean; error?: string }> {
+  const cleanEmail = email.trim().toLowerCase();
+  const current = getAuthenticatedStaff();
+
+  if (current?.email && current.email.toLowerCase() === cleanEmail) {
+    return {
+      success: false,
+      error: "You cannot delete your own currently active administrator session.",
+    };
+  }
+
+  const users = getStaffUsers();
+  const updated = users.filter((u) => u.email.toLowerCase() !== cleanEmail);
+  saveStaffUsers(updated);
+
+  try {
+    await dbDeleteCloudStaffAccount(cleanEmail);
+  } catch (err) {
+    console.warn("[Auth] Failed to sync deletion to cloud:", err);
+  }
+
+  window.dispatchEvent(new Event("dv_staff_users_changed"));
+  return { success: true };
+}
+
+/**
+ * Synchronize staff users between local store and Supabase cloud.
+ */
+export async function syncStaffUsers(): Promise<StaffUser[]> {
+  try {
+    const local = getStaffUsers();
+    const cloud = await dbSyncCloudStaffAccounts(local);
+    if (Array.isArray(cloud) && cloud.length > 0) {
+      const merged = mergeAndSaveStaffUsers(cloud);
+      window.dispatchEvent(new Event("dv_staff_users_changed"));
+      return merged;
+    }
+    return local;
+  } catch {
+    return getStaffUsers();
+  }
 }
 
 // Background auto-sync on initialization to ensure cross-device parity

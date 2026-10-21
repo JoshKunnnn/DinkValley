@@ -1,5 +1,6 @@
 import { createFileRoute, redirect, useNavigate } from "@tanstack/react-router";
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { X, Trophy, AlertTriangle } from "lucide-react";
 import { UmpireMobileNav } from "@/components/admin/UmpireMobileNav";
 
 import {
@@ -158,8 +159,8 @@ function Umpire() {
 
   return (
     <div className="min-h-[calc(100vh-4rem)] bg-background pb-20 sm:pb-0">
-      {/* Top bar */}
-      <div className="sticky top-16 z-40 border-b border-border bg-charcoal/95 backdrop-blur">
+      {/* Top bar (Hidden on mobile when actively scoring a match to maximize court visibility) */}
+      <div className={`${selectedMatch ? "hidden sm:block" : "block"} sm:sticky sm:top-16 z-30 border-b border-border bg-charcoal/95 backdrop-blur`}>
         <div className="mx-auto max-w-6xl px-4 py-3">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             {/* Umpire Profile & Connection Indicator */}
@@ -248,7 +249,7 @@ function Umpire() {
       </div>
 
       {/* Main Content Area */}
-      <div className="mx-auto max-w-6xl px-4 py-6">
+      <div className="mx-auto max-w-6xl px-2 sm:px-4 py-2 sm:py-6">
         {activeTab === "console" && (
           <UmpireConsole
             match={selectedMatch}
@@ -852,6 +853,538 @@ export function isMatchTossDone(match: LiveMatch | null | undefined): boolean {
   return false;
 }
 
+export interface CourtPlayerInfo {
+  name: string;
+  base: 1 | 2;
+  isServing: boolean;
+  isReceiver: boolean;
+}
+
+export interface TeamCourtPositions {
+  right: CourtPlayerInfo;
+  left: CourtPlayerInfo;
+  isSingles: boolean;
+}
+
+export function computeCourtPositions(
+  match: LiveMatch
+): { teamA: TeamCourtPositions; teamB: TeamCourtPositions } {
+  const s = match.score;
+  const isFinal = match.status === "final";
+
+  // Team A
+  const rawAPlayers =
+    match.teamAPlayers && match.teamAPlayers.length > 0
+      ? match.teamAPlayers
+      : [match.teamAName || "Player A1"];
+  const isSinglesA = rawAPlayers.length === 1;
+  const localBase1A =
+    typeof localStorage !== "undefined"
+      ? localStorage.getItem(`dv_base1_A_${match.id}`)
+      : null;
+  const aBase1 =
+    match.teamABase1Player ||
+    (localBase1A && rawAPlayers.includes(localBase1A) ? localBase1A : rawAPlayers[0]) ||
+    "Player A1";
+  const aBase2 =
+    rawAPlayers.find((p) => p !== aBase1) || rawAPlayers[1] || aBase1;
+  const teamAScoreEven = s.teamAScore % 2 === 0;
+
+  // Team B
+  const rawBPlayers =
+    match.teamBPlayers && match.teamBPlayers.length > 0
+      ? match.teamBPlayers
+      : [match.teamBName || "Player B1"];
+  const isSinglesB = rawBPlayers.length === 1;
+  const localBase1B =
+    typeof localStorage !== "undefined"
+      ? localStorage.getItem(`dv_base1_B_${match.id}`)
+      : null;
+  const bBase1 =
+    match.teamBBase1Player ||
+    (localBase1B && rawBPlayers.includes(localBase1B) ? localBase1B : rawBPlayers[0]) ||
+    "Player B1";
+  const bBase2 =
+    rawBPlayers.find((p) => p !== bBase1) || rawBPlayers[1] || bBase1;
+  const teamBScoreEven = s.teamBScore % 2 === 0;
+
+  // Serving court (Right if serving team score is even, Left if odd)
+  const servingCourt: "right" | "left" =
+    s.servingTeam === "A"
+      ? teamAScoreEven
+        ? "right"
+        : "left"
+      : teamBScoreEven
+        ? "right"
+        : "left";
+
+  if (isSinglesA && isSinglesB) {
+    const aOnRight = teamAScoreEven;
+    const bOnRight = teamBScoreEven;
+    return {
+      teamA: {
+        isSingles: true,
+        right: {
+          name: aOnRight ? aBase1 : "-",
+          base: 1,
+          isServing: !isFinal && s.servingTeam === "A" && aOnRight,
+          isReceiver: !isFinal && s.servingTeam === "B" && servingCourt === "right",
+        },
+        left: {
+          name: !aOnRight ? aBase1 : "-",
+          base: 1,
+          isServing: !isFinal && s.servingTeam === "A" && !aOnRight,
+          isReceiver: !isFinal && s.servingTeam === "B" && servingCourt === "left",
+        },
+      },
+      teamB: {
+        isSingles: true,
+        right: {
+          name: bOnRight ? bBase1 : "-",
+          base: 1,
+          isServing: !isFinal && s.servingTeam === "B" && bOnRight,
+          isReceiver: !isFinal && s.servingTeam === "A" && servingCourt === "right",
+        },
+        left: {
+          name: !bOnRight ? bBase1 : "-",
+          base: 1,
+          isServing: !isFinal && s.servingTeam === "B" && !bOnRight,
+          isReceiver: !isFinal && s.servingTeam === "A" && servingCourt === "left",
+        },
+      },
+    };
+  }
+
+  // Doubles positioning:
+  // When score is even: Base 1 is on Right (Even) court, Base 2 on Left (Odd) court.
+  // When score is odd: Base 2 is on Right (Even) court, Base 1 on Left (Odd) court.
+  const aRightPlayerName = teamAScoreEven ? aBase1 : aBase2;
+  const aRightBase: 1 | 2 = teamAScoreEven ? 1 : 2;
+  const aLeftPlayerName = teamAScoreEven ? aBase2 : aBase1;
+  const aLeftBase: 1 | 2 = teamAScoreEven ? 2 : 1;
+
+  const bRightPlayerName = teamBScoreEven ? bBase1 : bBase2;
+  const bRightBase: 1 | 2 = teamBScoreEven ? 1 : 2;
+  const bLeftPlayerName = teamBScoreEven ? bBase2 : bBase1;
+  const bLeftBase: 1 | 2 = teamBScoreEven ? 2 : 1;
+
+  return {
+    teamA: {
+      isSingles: false,
+      right: {
+        name: aRightPlayerName,
+        base: aRightBase,
+        isServing: !isFinal && s.servingTeam === "A" && servingCourt === "right",
+        isReceiver: !isFinal && s.servingTeam === "B" && servingCourt === "right",
+      },
+      left: {
+        name: aLeftPlayerName,
+        base: aLeftBase,
+        isServing: !isFinal && s.servingTeam === "A" && servingCourt === "left",
+        isReceiver: !isFinal && s.servingTeam === "B" && servingCourt === "left",
+      },
+    },
+    teamB: {
+      isSingles: false,
+      right: {
+        name: bRightPlayerName,
+        base: bRightBase,
+        isServing: !isFinal && s.servingTeam === "B" && servingCourt === "right",
+        isReceiver: !isFinal && s.servingTeam === "A" && servingCourt === "right",
+      },
+      left: {
+        name: bLeftPlayerName,
+        base: bLeftBase,
+        isServing: !isFinal && s.servingTeam === "B" && servingCourt === "left",
+        isReceiver: !isFinal && s.servingTeam === "A" && servingCourt === "left",
+      },
+    },
+  };
+}
+
+type CourtTeamPosition = NonNullable<ReturnType<typeof computeCourtPositions>>["teamA"];
+
+interface CourtDiagramViewProps {
+  match: LiveMatch;
+  teamAPos: CourtTeamPosition;
+  teamBPos: CourtTeamPosition;
+  teamASide?: "left" | "right";
+  onToggleSide?: () => void;
+  onChangeCourt?: () => void;
+  onSwapBaseA?: () => void;
+  onSwapBaseB?: () => void;
+  disabled?: boolean;
+}
+
+function CourtDiagramView({
+  match,
+  teamAPos,
+  teamBPos,
+  teamASide = "left",
+  onToggleSide,
+  onChangeCourt,
+  onSwapBaseA,
+  onSwapBaseB,
+  disabled = false,
+}: CourtDiagramViewProps) {
+  if (!teamAPos || !teamBPos) return null;
+
+  const s = match.score;
+  const isFinal = match.status === "final";
+
+  // Identify server and receiver
+  let serverInfo: {
+    team: string;
+    teamLetter: "A" | "B";
+    name: string;
+    court: "Right court" | "Left court";
+    serverNum: number;
+    base: 1 | 2;
+  } | null = null;
+
+  let receiverInfo: {
+    team: string;
+    teamLetter: "A" | "B";
+    name: string;
+    court: "Right court" | "Left court";
+    base: 1 | 2;
+  } | null = null;
+
+  if (teamAPos.right.isServing) {
+    serverInfo = {
+      team: match.teamAName,
+      teamLetter: "A",
+      name: teamAPos.right.name,
+      court: "Right court",
+      serverNum: s.serverNumber,
+      base: teamAPos.right.base,
+    };
+  } else if (teamAPos.left.isServing) {
+    serverInfo = {
+      team: match.teamAName,
+      teamLetter: "A",
+      name: teamAPos.left.name,
+      court: "Left court",
+      serverNum: s.serverNumber,
+      base: teamAPos.left.base,
+    };
+  } else if (teamBPos.right.isServing) {
+    serverInfo = {
+      team: match.teamBName,
+      teamLetter: "B",
+      name: teamBPos.right.name,
+      court: "Right court",
+      serverNum: s.serverNumber,
+      base: teamBPos.right.base,
+    };
+  } else if (teamBPos.left.isServing) {
+    serverInfo = {
+      team: match.teamBName,
+      teamLetter: "B",
+      name: teamBPos.left.name,
+      court: "Left court",
+      serverNum: s.serverNumber,
+      base: teamBPos.left.base,
+    };
+  }
+
+  if (teamAPos.right.isReceiver) {
+    receiverInfo = {
+      team: match.teamAName,
+      teamLetter: "A",
+      name: teamAPos.right.name,
+      court: "Right court",
+      base: teamAPos.right.base,
+    };
+  } else if (teamAPos.left.isReceiver) {
+    receiverInfo = {
+      team: match.teamAName,
+      teamLetter: "A",
+      name: teamAPos.left.name,
+      court: "Left court",
+      base: teamAPos.left.base,
+    };
+  } else if (teamBPos.right.isReceiver) {
+    receiverInfo = {
+      team: match.teamBName,
+      teamLetter: "B",
+      name: teamBPos.right.name,
+      court: "Right court",
+      base: teamBPos.right.base,
+    };
+  } else if (teamBPos.left.isReceiver) {
+    receiverInfo = {
+      team: match.teamBName,
+      teamLetter: "B",
+      name: teamBPos.left.name,
+      court: "Left court",
+      base: teamBPos.left.base,
+    };
+  }
+
+  // Determine physical sides of the court
+  const leftTeam = teamASide === "right" ? "B" : "A";
+  const rightTeam = teamASide === "right" ? "A" : "B";
+  const leftPos = leftTeam === "A" ? teamAPos : teamBPos;
+  const rightPos = rightTeam === "A" ? teamAPos : teamBPos;
+  const leftName = leftTeam === "A" ? match.teamAName : match.teamBName;
+  const rightName = rightTeam === "A" ? match.teamAName : match.teamBName;
+  const onSwapBaseLeft = leftTeam === "A" ? onSwapBaseA : onSwapBaseB;
+  const onSwapBaseRight = rightTeam === "A" ? onSwapBaseA : onSwapBaseB;
+
+  // Helper to render player chip
+  const renderPlayerChip = (
+    player: { name: string; base: 1 | 2; isServing: boolean; isReceiver: boolean },
+    teamLetter: "A" | "B"
+  ) => {
+    if (!player.name || player.name === "-") {
+      return (
+        <span className="text-[0.65rem] sm:text-xs font-mono text-sand/40 italic select-none">
+          (Empty)
+        </span>
+      );
+    }
+
+    const isServing = player.isServing;
+    const isReceiver = player.isReceiver;
+
+    return (
+      <div
+        key={`${player.name}-${player.base}-${player.isServing ? "srv" : "nosrv"}`}
+        className={`relative inline-flex items-center gap-1.5 px-2.5 py-1 sm:px-3 sm:py-1.5 rounded-full font-bold text-xs sm:text-sm max-w-[95%] transition-all duration-300 animate-in fade-in zoom-in-95 ${
+          isReceiver
+            ? "border-2 border-dashed border-amber-300 ring-2 ring-amber-400/40 text-sand shadow-md"
+            : isServing
+            ? "ring-2 ring-sand/80 shadow-md text-sand"
+            : "text-sand border border-sand/30"
+        } ${teamLetter === "A" ? "bg-pickle" : "bg-brick"}`}
+        title={`${player.name} (Base ${player.base})`}
+      >
+        {/* Ball marker on active server */}
+        {isServing && (
+          <span
+            className="w-3.5 h-3.5 sm:w-4 sm:h-4 rounded-full bg-sand text-charcoal flex items-center justify-center flex-shrink-0 shadow-xs border border-charcoal/30"
+            title="Active Server"
+          >
+            <span className="w-2 h-2 rounded-full bg-pickle inline-block" />
+          </span>
+        )}
+
+        <span className="truncate max-w-[75px] sm:max-w-[120px]">
+          {player.name}
+        </span>
+
+        {/* Base number tag */}
+        <span
+          className="text-[0.55rem] sm:text-[0.6rem] font-mono font-black px-1.5 py-0.2 rounded bg-charcoal/80 text-sand/90 border border-sand/20 flex-shrink-0"
+          title={`Base ${player.base}`}
+        >
+          B{player.base}
+        </span>
+      </div>
+    );
+  };
+
+  return (
+    <div className="surface-card p-0 overflow-hidden border-2 border-pickle/50 rounded-lg shadow-sm">
+      {/* Top Banner: Server, Receiver & Quick Court/Side Controls */}
+      {!isFinal && (
+        <div className="bg-card px-2.5 sm:px-4 py-1.5 sm:py-2 border-b-2 border-border flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1.5 text-xs">
+          {/* Status Badges */}
+          <div className="grid grid-cols-2 gap-1.5 flex-1">
+            {/* Server Badge */}
+            {serverInfo ? (
+              <div className="flex items-center justify-between gap-1 bg-pickle/15 border border-pickle/40 px-2 py-1 rounded min-w-0">
+                <div className="flex items-center gap-1 min-w-0">
+                  <span className="px-1 py-0.2 text-[0.55rem] sm:text-[0.6rem] font-mono font-bold uppercase tracking-wider bg-pickle text-sand rounded flex-shrink-0">
+                    Srv
+                  </span>
+                  <span className="w-1.5 h-1.5 rounded-full bg-pickle inline-block flex-shrink-0" />
+                  <span className="font-bold text-foreground text-xs sm:text-sm truncate">
+                    {serverInfo.name}
+                  </span>
+                </div>
+                <span className="text-[0.6rem] sm:text-xs font-mono font-semibold text-muted-foreground whitespace-nowrap flex-shrink-0">
+                  #{serverInfo.serverNum}
+                </span>
+              </div>
+            ) : (
+              <div />
+            )}
+
+            {/* Receiver Badge */}
+            {receiverInfo ? (
+              <div className="flex items-center justify-between gap-1 bg-muted/40 border border-border px-2 py-1 rounded min-w-0">
+                <div className="flex items-center gap-1 min-w-0">
+                  <span className="px-1 py-0.2 text-[0.55rem] sm:text-[0.6rem] font-mono font-bold uppercase tracking-wider bg-charcoal text-sand rounded border border-border flex-shrink-0">
+                    Rec
+                  </span>
+                  <span className="w-1.5 h-1.5 rounded-full border border-dashed border-amber-400 inline-block flex-shrink-0" />
+                  <span className="font-bold text-foreground text-xs sm:text-sm truncate">
+                    {receiverInfo.name}
+                  </span>
+                </div>
+                <span className="text-[0.6rem] sm:text-xs font-mono font-semibold text-muted-foreground whitespace-nowrap flex-shrink-0">
+                  {receiverInfo.court.split(" ")[0]}
+                </span>
+              </div>
+            ) : (
+              <div />
+            )}
+          </div>
+
+          {/* Quick Court & Side Buttons */}
+          <div className="flex items-center justify-end gap-1.5 flex-shrink-0 pt-0.5 sm:pt-0">
+            {onToggleSide && !isFinal && (
+              <button
+                type="button"
+                onClick={onToggleSide}
+                disabled={disabled}
+                className="inline-flex items-center gap-1 px-2 py-1 text-[0.6rem] font-mono font-bold uppercase tracking-wider bg-charcoal text-sand border border-border hover:border-pickle hover:text-pickle rounded cursor-pointer transition-colors shadow-xs"
+                title="Change court sides for players (Switch Ends)"
+              >
+                <svg className="w-2.5 h-2.5 fill-current" viewBox="0 0 24 24">
+                  <path d="M6.99 11L3 15l3.99 4v-3H14v-2H6.99v-3zM21 9l-3.99-4v3H10v2h7.01v3L21 9z" />
+                </svg>
+                <span>Change Side</span>
+              </button>
+            )}
+            {onChangeCourt && (
+              <button
+                type="button"
+                onClick={onChangeCourt}
+                className="inline-flex items-center gap-1 px-2 py-1 text-[0.6rem] font-mono font-bold uppercase tracking-wider bg-charcoal text-sand border border-border hover:border-pickle hover:text-pickle rounded cursor-pointer transition-colors shadow-xs"
+                title="Relocate match to another facility court"
+              >
+                <span>Change Court</span>
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* 2D Pickleball Court Canvas */}
+      <div className="p-2.5 sm:p-4 bg-charcoal">
+        <div className="relative w-full h-44 sm:h-56 bg-[#12281c] border-2 border-sand/50 rounded overflow-hidden flex">
+          {/* LEFT HALF (Current Left Team) */}
+          <div className="w-1/2 h-full flex border-r-2 border-sand">
+            {/* Service Boxes (Left court on top, Right court on bottom) */}
+            <div className="w-[64%] h-full flex flex-col border-r border-sand/40">
+              {/* Left Court (Top, Odd) */}
+              <div className="relative h-1/2 w-full border-b border-sand/40 flex items-center justify-center p-1 bg-[#152e20]/90">
+                <span className="absolute top-1 left-1.5 text-[0.65rem] font-mono font-black text-sand/40 select-none">
+                  L
+                </span>
+                {renderPlayerChip(leftPos.left, leftTeam)}
+              </div>
+
+              {/* Right Court (Bottom, Even) */}
+              <div className="relative h-1/2 w-full flex items-center justify-center p-1 bg-[#152e20]/90">
+                <span className="absolute bottom-1 left-1.5 text-[0.65rem] font-mono font-black text-sand/40 select-none">
+                  R
+                </span>
+                {renderPlayerChip(leftPos.right, leftTeam)}
+              </div>
+            </div>
+
+            {/* Non-Volley Zone / Kitchen */}
+            <div className="w-[36%] h-full bg-[#1b4332] relative flex flex-col items-center justify-center select-none">
+              <span className="text-[0.55rem] sm:text-[0.6rem] font-mono font-bold uppercase tracking-widest text-sand/40 [writing-mode:vertical-lr] rotate-180">
+                Kitchen (NVZ)
+              </span>
+            </div>
+          </div>
+
+          {/* RIGHT HALF (Current Right Team) */}
+          <div className="w-1/2 h-full flex">
+            {/* Non-Volley Zone / Kitchen */}
+            <div className="w-[36%] h-full bg-[#1b4332] border-r border-sand/40 relative flex flex-col items-center justify-center select-none">
+              <span className="text-[0.55rem] sm:text-[0.6rem] font-mono font-bold uppercase tracking-widest text-sand/40 [writing-mode:vertical-lr]">
+                Kitchen (NVZ)
+              </span>
+            </div>
+
+            {/* Service Boxes (Right court on top, Left court on bottom) */}
+            <div className="w-[64%] h-full flex flex-col">
+              {/* Right Court (Top, Even) */}
+              <div className="relative h-1/2 w-full border-b border-sand/40 flex items-center justify-center p-1 bg-[#152e20]/90">
+                <span className="absolute top-1 right-1.5 text-[0.65rem] font-mono font-black text-sand/40 select-none">
+                  R
+                </span>
+                {renderPlayerChip(rightPos.right, rightTeam)}
+              </div>
+
+              {/* Left Court (Bottom, Odd) */}
+              <div className="relative h-1/2 w-full flex items-center justify-center p-1 bg-[#152e20]/90">
+                <span className="absolute bottom-1 right-1.5 text-[0.65rem] font-mono font-black text-sand/40 select-none">
+                  L
+                </span>
+                {renderPlayerChip(rightPos.left, rightTeam)}
+              </div>
+            </div>
+          </div>
+
+          {/* NET DIVIDER (Center) */}
+          <div className="absolute top-0 bottom-0 left-1/2 -translate-x-1/2 w-1.5 bg-sand flex flex-col justify-between items-center pointer-events-none z-10 shadow-xs">
+            <span className="w-2.5 h-2.5 rounded-full bg-charcoal border border-sand -mt-1" />
+            <span className="w-2.5 h-2.5 rounded-full bg-charcoal border border-sand -mb-1" />
+          </div>
+        </div>
+
+        {/* BOTTOM BAR: Team Names, Umpire "YOU" Position Indicator & Change Sides */}
+        <div className="mt-3 flex items-center justify-between text-xs gap-2">
+          {/* Left Team Details & Swap Base */}
+          <div className="flex-1 flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2 min-w-0">
+            <span className="font-bold text-sand text-xs sm:text-sm truncate" title={leftName}>
+              {leftName}
+            </span>
+            {!leftPos.isSingles && !isFinal && onSwapBaseLeft && (
+              <button
+                type="button"
+                onClick={onSwapBaseLeft}
+                disabled={disabled}
+                className="text-[0.6rem] font-mono font-bold uppercase tracking-wider text-sand/80 hover:text-pickle border border-border/70 hover:border-pickle px-2 py-0.5 rounded cursor-pointer transition-colors w-fit bg-card/60"
+                title={`Swap Base 1 & 2 for ${leftName}`}
+              >
+                Swap Base
+              </button>
+            )}
+          </div>
+
+          {/* Center: Umpire Perspective Marker "YOU" & Side Toggle */}
+          <div className="flex flex-col items-center flex-shrink-0">
+            <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-charcoal border-2 border-sand text-sand font-mono text-[0.65rem] sm:text-xs font-black tracking-widest uppercase shadow-md">
+              <span className="w-1.5 h-1.5 rounded-full bg-pickle animate-ping" />
+              YOU
+            </span>
+            <span className="text-[0.55rem] font-mono font-semibold text-sand/60 tracking-wider uppercase mt-0.5">
+              Net Chair
+            </span>
+          </div>
+
+          {/* Right Team Details & Swap Base */}
+          <div className="flex-1 flex flex-col sm:flex-row sm:items-center justify-end gap-1 sm:gap-2 text-right min-w-0">
+            {!rightPos.isSingles && !isFinal && onSwapBaseRight && (
+              <button
+                type="button"
+                onClick={onSwapBaseRight}
+                disabled={disabled}
+                className="text-[0.6rem] font-mono font-bold uppercase tracking-wider text-sand/80 hover:text-pickle border border-border/70 hover:border-pickle px-2 py-0.5 rounded cursor-pointer transition-colors w-fit bg-card/60 self-end sm:self-auto"
+                title={`Swap Base 1 & 2 for ${rightName}`}
+              >
+                Swap Base
+              </button>
+            )}
+            <span className="font-bold text-sand text-xs sm:text-sm truncate" title={rightName}>
+              {rightName}
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function UmpireConsole({
   match,
   matches,
@@ -886,6 +1419,37 @@ function UmpireConsole({
   const [timeoutTeam, setTimeoutTeam] = useState<"A" | "B" | null>(null);
   const [timeoutSeconds, setTimeoutSeconds] = useState(60);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Court player positions and Base tracking
+  const positions = useMemo(() => (match ? computeCourtPositions(match) : null), [match]);
+  const teamAPos = positions?.teamA;
+  const teamBPos = positions?.teamB;
+
+  // Physical court sides for players: "left" means Team A is on the left, "right" means Team A is on the right
+  const [teamASide, setTeamASide] = useState<"left" | "right">(() => {
+    if (typeof localStorage !== "undefined" && match) {
+      const saved = localStorage.getItem(`dv_court_side_${match.id}`);
+      if (saved === "right" || saved === "left") return saved;
+    }
+    return "left";
+  });
+
+  const [showChangeCourtModal, setShowChangeCourtModal] = useState(false);
+  const [showCourtSideModal, setShowCourtSideModal] = useState(false);
+
+  const handleToggleCourtSides = () => {
+    setTeamASide((prev) => {
+      const next = prev === "left" ? "right" : "left";
+      if (typeof localStorage !== "undefined" && match) {
+        try {
+          localStorage.setItem(`dv_court_side_${match.id}`, next);
+        } catch {
+          // ignore
+        }
+      }
+      return next;
+    });
+  };
 
   const handleRequestResetToss = () => {
     if (!match) return;
@@ -1256,6 +1820,39 @@ function UmpireConsole({
   const serverScore = s.servingTeam === "A" ? s.teamAScore : s.teamBScore;
   const receiverScore = s.servingTeam === "A" ? s.teamBScore : s.teamAScore;
 
+  const leftTeam = teamASide === "right" ? "B" : "A";
+  const rightTeam = teamASide === "right" ? "A" : "B";
+  const leftTeamName = leftTeam === "A" ? match.teamAName : match.teamBName;
+  const rightTeamName = rightTeam === "A" ? match.teamAName : match.teamBName;
+  const leftScore = leftTeam === "A" ? s.teamAScore : s.teamBScore;
+  const rightScore = rightTeam === "A" ? s.teamAScore : s.teamBScore;
+
+  const handleChangeCourt = (newCourt: FacilityCourt) => {
+    if (!match || match.court === newCourt) {
+      setShowChangeCourtModal(false);
+      setShowCourtSideModal(false);
+      return;
+    }
+    const oldCourt = match.court;
+    if (oldCourt && (FACILITY_COURTS as readonly string[]).includes(oldCourt as string)) {
+      vacateCourt(oldCourt as FacilityCourt);
+    }
+    onUpdate(match.id, (m) => ({
+      ...m,
+      court: newCourt,
+      officiatedBy: m.officiatedBy ?? currentUmpire,
+    }));
+    if (newCourt) {
+      dbUpdateCourtStation(newCourt, {
+        status: isLiveOrScheduled ? "live" : "standby",
+        currentMatchId: match.id,
+        assignedUmpire: effectiveUmpire,
+      }).catch(() => {});
+    }
+    setShowChangeCourtModal(false);
+    setShowCourtSideModal(false);
+  };
+
   const handlePoint = () => {
     if (!isLiveOrScheduled || needsToss) return;
     onUpdate(match.id, (m) => {
@@ -1315,6 +1912,50 @@ function UmpireConsole({
     }));
   };
 
+  const handleSwapTeamABase = () => {
+    if (!match) return;
+    const raw =
+      match.teamAPlayers && match.teamAPlayers.length > 0
+        ? match.teamAPlayers
+        : [match.teamAName || "Player A1"];
+    if (raw.length < 2) return;
+    const currentBase1 = match.teamABase1Player || raw[0] || "Player A1";
+    const newBase1 = raw.find((p) => p !== currentBase1) || raw[1] || raw[0] || "Player A1";
+    if (typeof localStorage !== "undefined") {
+      try {
+        localStorage.setItem(`dv_base1_A_${match.id}`, newBase1);
+      } catch {
+        // ignore
+      }
+    }
+    onUpdate(match.id, (m) => ({
+      ...m,
+      teamABase1Player: newBase1,
+    }));
+  };
+
+  const handleSwapTeamBBase = () => {
+    if (!match) return;
+    const raw =
+      match.teamBPlayers && match.teamBPlayers.length > 0
+        ? match.teamBPlayers
+        : [match.teamBName || "Player B1"];
+    if (raw.length < 2) return;
+    const currentBase1 = match.teamBBase1Player || raw[0] || "Player B1";
+    const newBase1 = raw.find((p) => p !== currentBase1) || raw[1] || raw[0] || "Player B1";
+    if (typeof localStorage !== "undefined") {
+      try {
+        localStorage.setItem(`dv_base1_B_${match.id}`, newBase1);
+      } catch {
+        // ignore
+      }
+    }
+    onUpdate(match.id, (m) => ({
+      ...m,
+      teamBBase1Player: newBase1,
+    }));
+  };
+
   const handleEndGame = () => {
     onUpdate(match.id, (m) => {
       const updated = endGame(m);
@@ -1337,13 +1978,23 @@ function UmpireConsole({
     onUpdate(match.id, undoLastRally);
   };
 
-  const handleTossDone = (serving: "A" | "B", winner?: "A" | "B") => {
+  const handleTossDone = (
+    serving: "A" | "B",
+    winner?: "A" | "B",
+    bases?: { teamABase1?: string; teamBBase1?: string }
+  ) => {
     setTossDone(true);
     setTossServingTeam(serving);
     setShowToss(false);
     if (typeof localStorage !== "undefined") {
       try {
         localStorage.setItem(`dv_toss_done_${match.id}`, "true");
+        if (bases?.teamABase1) {
+          localStorage.setItem(`dv_base1_A_${match.id}`, bases.teamABase1);
+        }
+        if (bases?.teamBBase1) {
+          localStorage.setItem(`dv_base1_B_${match.id}`, bases.teamBBase1);
+        }
       } catch {
         // ignore
       }
@@ -1353,18 +2004,24 @@ function UmpireConsole({
       ...m,
       tossDone: true,
       tossWinner: winnerName ?? m.tossWinner,
+      teamABase1Player: bases?.teamABase1 ?? m.teamABase1Player ?? m.teamAPlayers?.[0],
+      teamBBase1Player: bases?.teamBBase1 ?? m.teamBBase1Player ?? m.teamBPlayers?.[0],
       officiatedBy: m.officiatedBy ?? currentUmpire,
       score: { ...m.score, servingTeam: serving, serverNumber: 2, teamAScore: 0, teamBScore: 0 },
     }));
   };
 
   return (
-    <div className="space-y-6 max-w-2xl mx-auto">
+    <div className="space-y-2.5 sm:space-y-5 max-w-2xl mx-auto">
       {/* Coin Toss Overlay */}
       {showToss && (
         <CoinTossOverlay
           teamAName={match.teamAName}
           teamBName={match.teamBName}
+          teamAPlayers={match.teamAPlayers}
+          teamBPlayers={match.teamBPlayers}
+          initialTeamABase1={match.teamABase1Player}
+          initialTeamBBase1={match.teamBBase1Player}
           onDone={handleTossDone}
           onClose={() => setShowToss(false)}
         />
@@ -1411,19 +2068,60 @@ function UmpireConsole({
         </div>
       )}
 
-      {/* Navigation Header */}
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+      {/* Floating Side Button for Court / Side Setup */}
+      <button
+        type="button"
+        onClick={() => setShowCourtSideModal(true)}
+        title="Change Court or Player Sides"
+        aria-label="Change Court or Player Sides"
+        className="fixed right-0 top-[40%] -translate-y-1/2 z-40 bg-charcoal/95 border-l-2 border-y-2 border-pickle text-sand px-2 py-3.5 rounded-l-lg shadow-2xl backdrop-blur-md hover:bg-black transition-all cursor-pointer group flex flex-col items-center gap-1.5 active:scale-95"
+      >
+        <svg
+          className="w-4 h-4 text-pickle group-hover:scale-110 transition-transform"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={2.2}
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+        </svg>
+        <span className="text-[0.58rem] font-mono font-bold tracking-widest uppercase [writing-mode:vertical-lr] text-sand group-hover:text-pickle select-none">
+          Court &bull; Side
+        </span>
+      </button>
+
+      {/* Navigation & Match Info Header */}
+      <div className="flex items-center justify-between gap-2">
         <button
           type="button"
           onClick={() => onSelectMatch("")}
-          className="flex items-center gap-2 px-3 py-1.5 text-xs font-bold uppercase tracking-widest bg-charcoal border border-border text-sand hover:border-pickle hover:text-pickle transition-colors cursor-pointer w-fit"
+          className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-bold uppercase tracking-widest bg-charcoal border border-border text-sand hover:border-pickle hover:text-pickle transition-colors cursor-pointer"
         >
-          <span className="text-base leading-none">&larr;</span> Back to Court Selection
+          <span className="text-base leading-none">&larr;</span> Back
         </button>
 
-        <div className="flex flex-wrap items-center gap-2">
-          {/* Umpire / Official Badge */}
-          <div className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs uppercase tracking-widest border border-border bg-charcoal text-sand">
+        <div className="flex items-center gap-1.5 flex-wrap justify-end">
+          {/* Court Station Badge & Setup Button */}
+          <button
+            type="button"
+            onClick={() => setShowCourtSideModal(true)}
+            title="Click to change court or player sides"
+            className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-bold uppercase tracking-widest font-mono bg-charcoal border border-border hover:border-pickle text-sand cursor-pointer transition-colors"
+          >
+            <span className="text-pickle font-bold">{match.court}</span>
+            <span className="text-[0.6rem] text-sand/60">SETUP</span>
+          </button>
+
+          {match.stage && (
+            <span className="text-xs font-bold uppercase tracking-widest font-mono bg-pickle/20 text-pickle px-2 py-1 border border-pickle/40">
+              {match.stage}
+            </span>
+          )}
+
+          <MatchStatusBadge status={match.status} />
+
+          {/* Official Badge */}
+          <div className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 text-xs uppercase tracking-widest border border-border bg-charcoal text-sand">
             <span className="h-1.5 w-1.5 rounded-full bg-pickle animate-pulse" />
             <span className="text-xs font-bold text-sand">Official:</span>
             <span className="font-bold text-pickle font-sans">
@@ -1433,25 +2131,6 @@ function UmpireConsole({
               <span className="text-xs text-sand/90 font-bold">(You)</span>
             )}
           </div>
-
-          <MatchStatusBadge status={match.status} />
-          {match.stage && (
-            <span className="text-xs font-bold uppercase tracking-widest font-mono bg-pickle/20 text-pickle px-2.5 py-1 border border-pickle/40">
-              {match.stage}
-            </span>
-          )}
-          <span className="text-xs font-bold uppercase tracking-widest font-mono bg-charcoal text-sand px-2.5 py-1 border border-border">
-            {match.court}
-          </span>
-          <button
-            type="button"
-            onClick={handleRequestResetToss}
-            title="Reset match score to 0-0 and rerun coin toss"
-            className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-bold uppercase tracking-widest bg-charcoal text-sand border border-pickle/50 hover:bg-pickle hover:text-sand transition-colors cursor-pointer"
-          >
-            <span className="h-1.5 w-1.5 rounded-full bg-pickle" />
-            Coin Toss (Reset)
-          </button>
         </div>
       </div>
 
@@ -1472,103 +2151,25 @@ function UmpireConsole({
         </div>
       )}
 
-      {/* Score Display: 3-number call for Pickleball */}
-      <div className="surface-card p-0 overflow-hidden border-2 border-pickle/40">
-        <div className="bg-pickle/15 px-4 py-2 text-center border-b border-pickle/30">
-          <span className="text-[0.65rem] uppercase tracking-[0.28em] font-bold text-pickle">
-            {match.status === "final" ? "Final Score" : `Serving: ${servingTeamName}`}
-          </span>
-        </div>
-
-        {/* The 3-Number Score Call */}
-        {match.status !== "final" && (
-          <div className="bg-charcoal px-4 py-6 text-center">
-            <div className="font-display text-7xl sm:text-8xl text-sand tracking-widest">
-              {serverScore}
-              <span className="text-pickle mx-2 sm:mx-4">-</span>
-              {receiverScore}
-              <span className="text-pickle mx-2 sm:mx-4">-</span>
-              {s.serverNumber}
-            </div>
-            <div className="mt-2 flex justify-center gap-8 text-[0.65rem] uppercase tracking-[0.2em] text-sand/90 font-semibold">
-              <span>Server</span>
-              <span>Receiver</span>
-              <span>Server #</span>
-            </div>
+      {/* Pre-match Toss Banner */}
+      {needsToss && !showToss && (
+        <div className="border border-pickle/40 bg-pickle/10 px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <div>
+            <span className="block text-[0.6rem] uppercase tracking-[0.28em] font-bold text-pickle">
+              Pre-Match Required
+            </span>
+            <span className="block text-sm font-semibold text-foreground mt-0.5">
+              Conduct coin toss before scoring begins
+            </span>
           </div>
-        )}
-
-        {/* Team scores breakdown */}
-        <div className="grid grid-cols-2 divide-x divide-border">
-          {/* Team A */}
-          <div
-            className={`p-4 sm:p-5 text-center transition-colors ${s.servingTeam === "A" && match.status !== "final"
-              ? "bg-pickle/10"
-              : match.winnerTeam === match.teamAName
-                ? "bg-pickle/15"
-                : ""
-              }`}
+          <button
+            onClick={() => setShowToss(true)}
+            className="px-4 py-2 bg-pickle text-sand text-xs font-bold uppercase tracking-widest hover:opacity-90 transition-opacity cursor-pointer w-fit"
           >
-            <span
-              className={`block font-display text-4xl sm:text-5xl ${match.winnerTeam === match.teamAName ? "text-pickle" : "text-foreground"
-                }`}
-            >
-              {s.teamAScore}
-            </span>
-            <span className="block text-xs font-semibold text-foreground mt-1 truncate">
-              {match.teamAName}
-            </span>
-            <span className="block text-[0.7rem] text-foreground/80 font-medium truncate">
-              {match.teamAPlayers.join(" / ")}
-            </span>
-            {s.servingTeam === "A" && match.status !== "final" && (
-              <span className="inline-block mt-2 text-[0.55rem] uppercase tracking-widest bg-pickle text-sand px-2 py-0.5 font-bold">
-                Serving (#{s.serverNumber})
-              </span>
-            )}
-          </div>
-
-          {/* Team B */}
-          <div
-            className={`p-4 sm:p-5 text-center transition-colors ${s.servingTeam === "B" && match.status !== "final"
-              ? "bg-pickle/10"
-              : match.winnerTeam === match.teamBName
-                ? "bg-pickle/15"
-                : ""
-              }`}
-          >
-            <span
-              className={`block font-display text-4xl sm:text-5xl ${match.winnerTeam === match.teamBName ? "text-pickle" : "text-foreground"
-                }`}
-            >
-              {s.teamBScore}
-            </span>
-            <span className="block text-xs font-semibold text-foreground mt-1 truncate">
-              {match.teamBName}
-            </span>
-            <span className="block text-[0.7rem] text-foreground/80 font-medium truncate">
-              {match.teamBPlayers.join(" / ")}
-            </span>
-            {s.servingTeam === "B" && match.status !== "final" && (
-              <span className="inline-block mt-2 text-[0.55rem] uppercase tracking-widest bg-pickle text-sand px-2 py-0.5 font-bold">
-                Serving (#{s.serverNumber})
-              </span>
-            )}
-          </div>
+            Start Coin Toss
+          </button>
         </div>
-
-        {/* Winner banner */}
-        {match.status === "final" && match.winnerTeam && (
-          <div className="bg-pickle/20 px-4 py-3 text-center border-t border-pickle/40">
-            <span className="text-[0.65rem] uppercase tracking-[0.28em] font-bold text-pickle">
-              Winner
-            </span>
-            <span className="block font-display text-2xl text-foreground mt-0.5">
-              {match.winnerTeam}
-            </span>
-          </div>
-        )}
-      </div>
+      )}
 
       {/* Concluded Match Reset / Replay Banner */}
       {match.status === "final" && (
@@ -1590,34 +2191,114 @@ function UmpireConsole({
         </div>
       )}
 
-      {/* Pre-match Toss Banner */}
-      {needsToss && !showToss && (
-        <div className="border border-pickle/40 bg-pickle/10 px-4 py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-          <div>
-            <span className="block text-[0.6rem] uppercase tracking-[0.28em] font-bold text-pickle">
-              Pre-Match Required
-            </span>
-            <span className="block text-sm font-semibold text-foreground mt-0.5">
-              Conduct coin toss before scoring begins
+      {/* Compact Score Call Bar (Directly Above 2D Court Diagram) */}
+      <div className="surface-card p-0 overflow-hidden border-2 border-pickle/40 bg-charcoal">
+        <div className="bg-pickle/15 px-3 py-1 flex items-center justify-between border-b border-pickle/20 text-xs">
+          <div className="flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-pickle animate-pulse" />
+            <span className="text-[0.62rem] font-mono uppercase tracking-widest text-pickle font-bold">
+              {match.status === "final" ? "Final Score" : `Serving: ${servingTeamName}`}
             </span>
           </div>
-          <button
-            onClick={() => setShowToss(true)}
-            className="px-4 py-2 bg-pickle text-sand text-xs font-bold uppercase tracking-widest hover:opacity-90 transition-opacity cursor-pointer w-fit"
-          >
-            Start Coin Toss
-          </button>
+          <span className="text-[0.6rem] font-mono text-sand/80 uppercase tracking-wider">
+            {match.court} &middot; {match.stage || "Regulation"}
+          </span>
         </div>
+
+        {/* Score & 3-Number Call Line */}
+        <div className="px-3 py-2 sm:py-3 flex items-center justify-between gap-2">
+          {/* Left Team (Matches Left Court End) */}
+          <div className="flex-1 min-w-0 flex items-center gap-2">
+            <span
+              className={`font-display text-3xl sm:text-5xl font-bold leading-none ${
+                s.servingTeam === leftTeam ? "text-pickle" : "text-foreground"
+              }`}
+            >
+              {leftScore}
+            </span>
+            <div className="min-w-0">
+              <span className="block text-xs sm:text-sm font-bold text-sand truncate" title={leftTeamName}>
+                {leftTeamName}
+              </span>
+              {s.servingTeam === leftTeam && (
+                <span className="text-[0.58rem] font-mono font-bold text-pickle uppercase tracking-wider">
+                  Server #{s.serverNumber}
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* Center 3-Number Pickleball Score Call */}
+          {match.status !== "final" && (
+            <div className="flex-shrink-0 text-center px-3 py-1 bg-black/50 border border-pickle/40 rounded shadow-inner">
+              <div className="font-display text-3xl sm:text-5xl text-sand tracking-wider leading-none font-bold">
+                {serverScore}
+                <span className="text-pickle mx-1">-</span>
+                {receiverScore}
+                <span className="text-pickle mx-1">-</span>
+                {s.serverNumber}
+              </div>
+              <div className="text-[0.55rem] uppercase tracking-widest text-sand/80 font-mono mt-0.5 font-semibold">
+                Score Call
+              </div>
+            </div>
+          )}
+
+          {/* Right Team (Matches Right Court End) */}
+          <div className="flex-1 min-w-0 flex items-center justify-end gap-2 text-right">
+            <div className="min-w-0 text-right">
+              <span className="block text-xs sm:text-sm font-bold text-sand truncate" title={rightTeamName}>
+                {rightTeamName}
+              </span>
+              {s.servingTeam === rightTeam && (
+                <span className="text-[0.58rem] font-mono font-bold text-pickle uppercase tracking-wider">
+                  Server #{s.serverNumber}
+                </span>
+              )}
+            </div>
+            <span
+              className={`font-display text-3xl sm:text-5xl font-bold leading-none ${
+                s.servingTeam === rightTeam ? "text-pickle" : "text-foreground"
+              }`}
+            >
+              {rightScore}
+            </span>
+          </div>
+        </div>
+
+        {/* Winner banner if final */}
+        {match.status === "final" && match.winnerTeam && (
+          <div className="bg-pickle/20 px-3 py-2 text-center border-t border-pickle/40">
+            <span className="text-[0.62rem] uppercase tracking-widest font-bold text-pickle">
+              Winner: {match.winnerTeam}
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* 2D Visual Court Diagram (Viewed by umpire before clicking Point Scored/Side Out) */}
+      {teamAPos && teamBPos && (
+        <CourtDiagramView
+          match={match}
+          teamAPos={teamAPos}
+          teamBPos={teamBPos}
+          teamASide={teamASide}
+          onToggleSide={handleToggleCourtSides}
+          onChangeCourt={() => setShowCourtSideModal(true)}
+          onSwapBaseA={handleSwapTeamABase}
+          onSwapBaseB={handleSwapTeamBBase}
+          disabled={needsToss}
+        />
       )}
 
-      {/* Primary Scoring Action Buttons */}
+      {/* Primary Scoring Action Buttons (Directly below 2D court diagram) */}
       {isLiveOrScheduled && (
         <div className="space-y-3">
           <div className="grid grid-cols-2 gap-3">
             <button
               onClick={handlePoint}
               disabled={needsToss}
-              className={`font-display text-2xl sm:text-3xl tracking-widest py-5 sm:py-6 transition-all ${needsToss
+              className={`font-display text-2xl sm:text-3xl tracking-widest py-4 sm:py-6 transition-all ${needsToss
                 ? "bg-pickle/30 text-sand/40 cursor-not-allowed"
                 : "bg-pickle text-sand active:scale-[0.97] hover:opacity-90 cursor-pointer shadow-lg shadow-pickle/20"
                 }`}
@@ -1628,7 +2309,7 @@ function UmpireConsole({
             <button
               onClick={handleSideOut}
               disabled={needsToss}
-              className={`font-display text-2xl sm:text-3xl tracking-widest py-5 sm:py-6 transition-all ${needsToss
+              className={`font-display text-2xl sm:text-3xl tracking-widest py-4 sm:py-6 transition-all ${needsToss
                 ? "bg-brick/30 text-sand/40 cursor-not-allowed"
                 : "bg-brick text-sand active:scale-[0.97] hover:bg-brick-deep cursor-pointer shadow-lg shadow-brick/20"
                 }`}
@@ -1638,11 +2319,11 @@ function UmpireConsole({
           </div>
 
           {/* Tactical and Management Controls */}
-          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 text-xs">
+          <div className="grid grid-cols-2 sm:grid-cols-6 gap-2 text-xs">
             <button
               onClick={handleUndo}
               disabled={s.rallies.length === 0}
-              className={`py-3 border font-bold uppercase tracking-wider transition-all ${s.rallies.length > 0
+              className={`py-2.5 border font-bold uppercase tracking-wider transition-all ${s.rallies.length > 0
                 ? "border-sand/40 bg-charcoal text-sand hover:border-sand hover:bg-black/40 cursor-pointer shadow-sm"
                 : "border-border/40 bg-charcoal/40 text-sand/30 cursor-not-allowed"
                 }`}
@@ -1651,34 +2332,42 @@ function UmpireConsole({
             </button>
 
             <button
+              onClick={handleToggleCourtSides}
+              disabled={needsToss}
+              title="Change court sides for players (Switch ends)"
+              className="py-2.5 border border-border bg-charcoal text-sand font-semibold uppercase tracking-wider hover:border-pickle hover:text-pickle transition-colors cursor-pointer"
+            >
+              Change Sides
+            </button>
+
+            <button
+              onClick={() => setShowCourtSideModal(true)}
+              title="Relocate this match to another facility court or flip player sides"
+              className="py-2.5 border border-border bg-charcoal text-sand font-semibold uppercase tracking-wider hover:border-pickle hover:text-pickle transition-colors cursor-pointer"
+            >
+              Change Court
+            </button>
+
+            <button
               onClick={handleSwapServerNumber}
               disabled={needsToss}
               title="Toggle between Server 1 and Server 2"
-              className="py-3 border border-border bg-charcoal text-sand font-semibold uppercase tracking-wider hover:border-pickle hover:text-pickle transition-colors cursor-pointer"
+              className="py-2.5 border border-border bg-charcoal text-sand font-semibold uppercase tracking-wider hover:border-pickle hover:text-pickle transition-colors cursor-pointer"
             >
               Swap Server #
             </button>
 
             <button
-              onClick={handleSwapServingTeam}
-              disabled={needsToss}
-              title="Switch initial serving side"
-              className="py-3 border border-border bg-charcoal text-sand font-semibold uppercase tracking-wider hover:border-pickle hover:text-pickle transition-colors cursor-pointer"
-            >
-              Swap Team
-            </button>
-
-            <button
               onClick={handleRequestResetToss}
               title="Reset match score to 0-0 and launch coin toss"
-              className="py-3 border border-pickle/50 bg-pickle/10 text-pickle font-bold uppercase tracking-wider hover:bg-pickle hover:text-sand transition-colors cursor-pointer"
+              className="py-2.5 border border-pickle/50 bg-pickle/10 text-pickle font-bold uppercase tracking-wider hover:bg-pickle hover:text-sand transition-colors cursor-pointer"
             >
               Coin Toss (Reset)
             </button>
 
             <button
               onClick={() => setShowEndConfirm(true)}
-              className="py-3 border border-brick/50 bg-brick/10 text-brick font-semibold uppercase tracking-wider hover:bg-brick/20 transition-colors cursor-pointer col-span-2 sm:col-span-1"
+              className="py-2.5 border border-brick/50 bg-brick/10 text-brick font-semibold uppercase tracking-wider hover:bg-brick/20 transition-colors cursor-pointer col-span-2 sm:col-span-1"
             >
               End Match
             </button>
@@ -1687,48 +2376,225 @@ function UmpireConsole({
           {/* Official Timeouts */}
           <div className="flex items-center gap-2 pt-1">
             <button
-              onClick={() => handleStartTimeout("A")}
+              onClick={() => handleStartTimeout(leftTeam)}
               disabled={needsToss || timeoutActive}
               className="flex-1 py-2 text-[0.65rem] font-bold uppercase tracking-wider border-2 border-border bg-card text-foreground hover:border-pickle hover:text-pickle transition-colors cursor-pointer rounded"
             >
-              Timeout {match.teamAName} (60s)
+              Timeout {leftTeamName} (60s)
             </button>
             <button
-              onClick={() => handleStartTimeout("B")}
+              onClick={() => handleStartTimeout(rightTeam)}
               disabled={needsToss || timeoutActive}
               className="flex-1 py-2 text-[0.65rem] font-bold uppercase tracking-wider border-2 border-border bg-card text-foreground hover:border-pickle hover:text-pickle transition-colors cursor-pointer rounded"
             >
-              Timeout {match.teamBName} (60s)
+              Timeout {rightTeamName} (60s)
             </button>
           </div>
         </div>
       )}
 
-      {/* End Game Confirmation Dialog */}
+      {/* Court & Player Sides Settings Modal (Triggered by Side Button or Change Controls) */}
+      {showCourtSideModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-charcoal/95 backdrop-blur-sm p-4 animate-in fade-in duration-150">
+          <div className="surface-card border-2 border-pickle max-w-md w-full p-5 sm:p-6 space-y-5 bg-card">
+            <div className="flex items-center justify-between border-b border-border pb-3">
+              <div>
+                <span className="text-[0.65rem] uppercase tracking-[0.28em] font-bold text-pickle block">
+                  Umpire Match Setup
+                </span>
+                <h3 className="font-display text-2xl text-foreground mt-0.5">
+                  Court &amp; Player Sides
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowCourtSideModal(false)}
+                className="text-foreground/70 hover:text-foreground text-sm font-mono font-bold px-2.5 py-1.5 border border-border hover:border-pickle rounded cursor-pointer transition-colors"
+                aria-label="Close"
+              >
+                Close
+              </button>
+            </div>
+
+            {/* Option 1: Change Player Sides (Switch Ends) */}
+            <div className="p-3.5 bg-charcoal rounded-lg border border-border/80 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-mono font-bold uppercase tracking-wider text-sand">
+                  1. Player Court Sides
+                </span>
+                <span className="text-[0.62rem] font-mono px-2 py-0.5 rounded bg-pickle/20 text-pickle border border-pickle/40">
+                  {teamASide === "left" ? "Team A Left / Team B Right" : "Team B Left / Team A Right"}
+                </span>
+              </div>
+              <p className="text-xs text-sand/80">
+                Adjust the 2D court diagram and scoreboard to mirror your physical vantage point from the umpire chair.
+              </p>
+              <div className="flex items-center justify-between gap-2 p-2 bg-black/40 border border-sand/20 rounded text-xs font-mono">
+                <div className="flex-1 text-center">
+                  <span className="text-[0.6rem] uppercase tracking-wider text-sand/60 block">Left Side</span>
+                  <span className="font-bold text-pickle truncate block">{leftTeamName}</span>
+                </div>
+                <span className="text-sand/40 font-bold">&harr;</span>
+                <div className="flex-1 text-center">
+                  <span className="text-[0.6rem] uppercase tracking-wider text-sand/60 block">Right Side</span>
+                  <span className="font-bold text-brick truncate block">{rightTeamName}</span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  handleToggleCourtSides();
+                }}
+                disabled={needsToss}
+                className="w-full py-2.5 bg-charcoal border-2 border-pickle text-sand font-mono font-bold text-xs uppercase tracking-wider hover:bg-pickle hover:text-sand transition-all cursor-pointer shadow-sm flex items-center justify-center gap-2"
+              >
+                <svg className="w-3.5 h-3.5 fill-current" viewBox="0 0 24 24">
+                  <path d="M6.99 11L3 15l3.99 4v-3H14v-2H6.99v-3zM21 9l-3.99-4v3H10v2h7.01v3L21 9z" />
+                </svg>
+                Switch Ends ({teamASide === "left" ? "Flip to B | A" : "Flip to A | B"})
+              </button>
+            </div>
+
+            {/* Option 2: Change Court Facility */}
+            <div className="p-3.5 bg-charcoal rounded-lg border border-border/80 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-mono font-bold uppercase tracking-wider text-sand">
+                  2. Court Facility
+                </span>
+                <span className="text-[0.62rem] font-mono px-2 py-0.5 rounded bg-sand/20 text-sand border border-sand/30 font-bold">
+                  Current: {match.court}
+                </span>
+              </div>
+              <p className="text-xs text-sand/80">
+                Relocate this live match to another facility court station:
+              </p>
+              <div className="grid grid-cols-2 gap-2">
+                {FACILITY_COURTS.map((c) => (
+                  <button
+                    key={c}
+                    type="button"
+                    onClick={() => {
+                      handleChangeCourt(c);
+                    }}
+                    className={`py-2 px-3 rounded font-mono font-bold text-xs uppercase tracking-wider border-2 transition-all cursor-pointer text-center ${
+                      match.court === c
+                        ? "border-pickle bg-pickle text-sand shadow-sm"
+                        : "border-border bg-card text-foreground hover:border-pickle hover:text-pickle"
+                    }`}
+                  >
+                    {c} {match.court === c ? "(Current)" : ""}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="pt-1 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setShowCourtSideModal(false)}
+                className="w-full sm:w-auto px-5 py-2 text-xs font-bold uppercase tracking-widest bg-pickle text-sand hover:opacity-90 transition-opacity cursor-pointer text-center"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* End Game Confirmation Modal Pop-up Card */}
       {showEndConfirm && (
-        <div className="surface-card p-6 border-2 border-brick space-y-4">
-          <h3 className="font-display text-2xl text-foreground text-center">
-            Finalize this match?
-          </h3>
-          <p className="text-sm text-foreground/80 font-medium text-center">
-            Score: {match.teamAName} {s.teamAScore} - {s.teamBScore} {match.teamBName}
-          </p>
-          <p className="text-xs text-foreground/60 text-center">
-            Confirming will declare the winner, record final scores in Supabase, and vacate {match.court}.
-          </p>
-          <div className="flex gap-3 justify-center pt-2">
-            <button
-              onClick={handleEndGame}
-              className="bg-brick text-sand font-display text-xl tracking-widest px-8 py-3 hover:bg-brick-deep transition-colors cursor-pointer"
-            >
-              Confirm End Match
-            </button>
-            <button
-              onClick={() => setShowEndConfirm(false)}
-              className="border border-border text-foreground font-display text-xl tracking-widest px-8 py-3 hover:border-foreground/50 transition-colors cursor-pointer"
-            >
-              Cancel
-            </button>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-charcoal/90 backdrop-blur-sm p-4 animate-in fade-in duration-150">
+          <div className="surface-card bg-card border-2 border-brick max-w-md w-full p-6 sm:p-7 rounded-xl shadow-2xl space-y-4 animate-in zoom-in-95 duration-150 relative text-left">
+            {/* Header */}
+            <div className="flex items-center justify-between border-b border-border pb-3">
+              <div>
+                <span className="text-[0.65rem] uppercase tracking-[0.28em] font-bold text-brick block">
+                  Match Finalization
+                </span>
+                <h3 className="font-display text-2xl sm:text-3xl text-foreground mt-0.5">
+                  Finalize this match?
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowEndConfirm(false)}
+                className="text-muted-foreground hover:text-foreground p-1 cursor-pointer transition-colors"
+                aria-label="Close"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* Scorecard Summary Box */}
+            <div className="p-4 rounded-lg border-2 border-border bg-background space-y-3">
+              <div className="flex items-center justify-between text-xs font-mono text-muted-foreground uppercase">
+                <span className="font-bold text-foreground">{match.court || "Court"}</span>
+                <span>{match.stage || "Match Play"}</span>
+              </div>
+
+              <div className="flex items-center justify-between gap-3 text-center py-1">
+                {/* Team A */}
+                <div className={`flex-1 p-2 rounded-lg ${s.teamAScore > s.teamBScore ? "bg-pickle/15 ring-2 ring-pickle/40" : "bg-card border border-border"}`}>
+                  <span className="font-bold text-xs sm:text-sm text-foreground block truncate" title={match.teamAName}>
+                    {match.teamAName}
+                  </span>
+                  <span className={`font-display text-3xl sm:text-4xl block mt-1 ${s.teamAScore > s.teamBScore ? "text-pickle font-bold" : "text-foreground"}`}>
+                    {s.teamAScore}
+                  </span>
+                </div>
+
+                <span className="font-display text-xl text-muted-foreground">VS</span>
+
+                {/* Team B */}
+                <div className={`flex-1 p-2 rounded-lg ${s.teamBScore > s.teamAScore ? "bg-pickle/15 ring-2 ring-pickle/40" : "bg-card border border-border"}`}>
+                  <span className="font-bold text-xs sm:text-sm text-foreground block truncate" title={match.teamBName}>
+                    {match.teamBName}
+                  </span>
+                  <span className={`font-display text-3xl sm:text-4xl block mt-1 ${s.teamBScore > s.teamAScore ? "text-pickle font-bold" : "text-foreground"}`}>
+                    {s.teamBScore}
+                  </span>
+                </div>
+              </div>
+
+              {/* Declared Winner Banner */}
+              <div className="text-center pt-2 border-t border-border/60">
+                {s.teamAScore !== s.teamBScore ? (
+                  <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-pickle/15 text-pickle text-xs font-bold uppercase tracking-wider">
+                    <Trophy size={14} />
+                    <span>
+                      Declared Winner: {s.teamAScore > s.teamBScore ? match.teamAName : match.teamBName}
+                    </span>
+                  </div>
+                ) : (
+                  <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-muted text-muted-foreground text-xs font-bold uppercase tracking-wider">
+                    <AlertTriangle size={14} />
+                    <span>Match is Tied ({s.teamAScore} - {s.teamBScore})</span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <p className="text-xs text-muted-foreground text-center">
+              Confirming will declare the winner, record final scores in Supabase, and vacate {match.court}.
+            </p>
+
+            {/* Buttons */}
+            <div className="flex flex-col sm:flex-row gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setShowEndConfirm(false)}
+                className="w-full sm:flex-1 py-3 px-4 border border-border text-foreground font-display text-lg tracking-wider hover:border-foreground/50 transition-colors cursor-pointer rounded-lg text-center order-2 sm:order-1"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleEndGame}
+                className="w-full sm:flex-1 bg-brick text-sand font-display text-lg tracking-wider py-3 px-4 hover:bg-brick-deep transition-colors cursor-pointer rounded-lg shadow-md text-center order-1 sm:order-2"
+              >
+                Confirm End Match
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -2470,18 +3336,30 @@ function QuickMatchModal({
    SUB-COMPONENT: COIN TOSS OVERLAY
 ═══════════════════════════════════════════════ */
 
-type TossPhase = "idle" | "flipping" | "result" | "choosing" | "done";
+type TossPhase = "idle" | "flipping" | "result" | "choosing" | "positioning" | "done";
 
 function CoinTossOverlay({
   teamAName,
   teamBName,
+  teamAPlayers = [],
+  teamBPlayers = [],
+  initialTeamABase1,
+  initialTeamBBase1,
   onDone,
   onClose,
 }: {
   teamAName: string;
   teamBName: string;
-  onDone: (servingTeam: "A" | "B", winnerTeam?: "A" | "B") => void;
-  onClose?: () => void;
+  teamAPlayers?: string[] | undefined;
+  teamBPlayers?: string[] | undefined;
+  initialTeamABase1?: string | undefined;
+  initialTeamBBase1?: string | undefined;
+  onDone: (
+    servingTeam: "A" | "B",
+    winnerTeam?: "A" | "B" | undefined,
+    bases?: { teamABase1?: string; teamBBase1?: string } | undefined
+  ) => void;
+  onClose?: (() => void) | undefined;
 }) {
   const [phase, setPhase] = useState<TossPhase>("idle");
   const [face, setFace] = useState<"heads" | "tails">("heads");
@@ -2489,6 +3367,23 @@ function CoinTossOverlay({
   const [callingChoice, setCallingChoice] = useState<"heads" | "tails">("heads");
   const [winnerTeam, setWinnerTeam] = useState<"A" | "B" | null>(null);
   const [choosingTeam, setChoosingTeam] = useState<"A" | "B" | null>(null);
+  const [chosenServingTeam, setChosenServingTeam] = useState<"A" | "B">("A");
+
+  const rawA = teamAPlayers && teamAPlayers.length > 0 ? teamAPlayers : [teamAName || "Player A1"];
+  const rawB = teamBPlayers && teamBPlayers.length > 0 ? teamBPlayers : [teamBName || "Player B1"];
+
+  const [teamABase1, setTeamABase1] = useState<string>(() => {
+    if (initialTeamABase1 && rawA.includes(initialTeamABase1)) return initialTeamABase1;
+    return rawA[0] || "Player A1";
+  });
+  const [teamBBase1, setTeamBBase1] = useState<string>(() => {
+    if (initialTeamBBase1 && rawB.includes(initialTeamBBase1)) return initialTeamBBase1;
+    return rawB[0] || "Player B1";
+  });
+
+  const teamABase2 = rawA.find((p) => p !== teamABase1) || rawA[1] || rawA[0] || "Player A2";
+  const teamBBase2 = rawB.find((p) => p !== teamBBase1) || rawB[1] || rawB[0] || "Player B2";
+
   const flipRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const callingTeamName = callingTeam === "A" ? teamAName : teamBName;
@@ -2523,15 +3418,29 @@ function CoinTossOverlay({
   const handleChoice = (choice: "serve" | "receive") => {
     const serving: "A" | "B" =
       choice === "serve" ? (choosingTeam ?? "A") : choosingTeam === "A" ? "B" : "A";
+    setChosenServingTeam(serving);
+    setPhase("positioning");
+  };
+
+  const handleConfirmPositions = () => {
     setPhase("done");
-    setTimeout(() => onDone(serving, winnerTeam ?? undefined), 600);
+    setTimeout(() => {
+      onDone(chosenServingTeam, winnerTeam ?? undefined, {
+        teamABase1,
+        teamBBase1,
+      });
+    }, 400);
   };
 
   const winnerName = winnerTeam === "A" ? teamAName : teamBName;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-charcoal/96 backdrop-blur-sm p-4">
-      <div className="surface-card border-2 border-pickle/50 max-w-sm w-full p-5 sm:p-6 space-y-4 text-center relative max-h-[92vh] overflow-y-auto">
+      <div
+        className={`surface-card border-2 border-pickle/50 w-full p-5 sm:p-6 space-y-4 text-center relative max-h-[92vh] overflow-y-auto transition-all ${
+          phase === "positioning" ? "max-w-lg" : "max-w-sm"
+        }`}
+      >
         <div className="flex items-center justify-between border-b border-border/40 pb-2">
           <span className="block text-[0.6rem] uppercase tracking-[0.3em] font-bold text-pickle">
             Pre-Match Officiating
@@ -2546,47 +3455,54 @@ function CoinTossOverlay({
           )}
         </div>
         <div>
-          <h2 className="font-display text-2xl sm:text-3xl text-foreground">Coin Toss</h2>
+          <h2 className="font-display text-2xl sm:text-3xl text-foreground">
+            {phase === "positioning" ? "Player Positions" : "Coin Toss"}
+          </h2>
           <p className="text-xs text-foreground/70 mt-0.5 font-medium truncate">
             {teamAName} vs {teamBName}
           </p>
         </div>
 
-        {/* Coin representation */}
-        <div className="flex flex-col items-center gap-1.5">
-          <div
-            className={`relative h-24 w-24 sm:h-28 sm:w-28 rounded-full overflow-hidden select-none ${phase === "flipping"
-              ? "coin-flip"
-              : phase === "result" || phase === "choosing"
-                ? "coin-land"
-                : phase === "done"
+        {/* Coin representation (hidden during positioning phase to preserve focus and space) */}
+        {phase !== "positioning" && (
+          <div className="flex flex-col items-center gap-1.5">
+            <div
+              className={`relative h-24 w-24 sm:h-28 sm:w-28 rounded-full overflow-hidden select-none ${
+                phase === "flipping"
+                  ? "coin-flip"
+                  : phase === "result" || phase === "choosing"
+                  ? "coin-land"
+                  : phase === "done"
                   ? "opacity-0 scale-90 transition-all duration-500"
                   : ""
               }`}
-            style={{ willChange: "transform" }}
-          >
-            <img
-              src="/coin_heads.png"
-              alt="Heads"
-              className={`absolute inset-0 h-full w-full object-cover rounded-full transition-opacity duration-75 ${face === "heads" || phase === "idle" ? "opacity-100" : "opacity-0"
+              style={{ willChange: "transform" }}
+            >
+              <img
+                src="/coin_heads.png"
+                alt="Heads"
+                className={`absolute inset-0 h-full w-full object-cover rounded-full transition-opacity duration-75 ${
+                  face === "heads" || phase === "idle" ? "opacity-100" : "opacity-0"
                 }`}
-              draggable={false}
-            />
-            <img
-              src="/coin_tails.png"
-              alt="Tails"
-              className={`absolute inset-0 h-full w-full object-cover rounded-full transition-opacity duration-75 ${face === "tails" && phase !== "idle" ? "opacity-100" : "opacity-0"
+                draggable={false}
+              />
+              <img
+                src="/coin_tails.png"
+                alt="Tails"
+                className={`absolute inset-0 h-full w-full object-cover rounded-full transition-opacity duration-75 ${
+                  face === "tails" && phase !== "idle" ? "opacity-100" : "opacity-0"
                 }`}
-              draggable={false}
-            />
-          </div>
+                draggable={false}
+              />
+            </div>
 
-          {phase !== "idle" && phase !== "done" && (
-            <span className="text-[0.65rem] font-bold uppercase tracking-[0.25em] text-sand font-mono bg-charcoal px-2 py-0.5 border border-border">
-              {face === "heads" ? "Heads" : "Tails"}
-            </span>
-          )}
-        </div>
+            {phase !== "idle" && phase !== "done" && (
+              <span className="text-[0.65rem] font-bold uppercase tracking-[0.25em] text-sand font-mono bg-charcoal px-2 py-0.5 border border-border">
+                {face === "heads" ? "Heads" : "Tails"}
+              </span>
+            )}
+          </div>
+        )}
 
         {/* Single Streamlined Prompt: Which team will choose tails or heads? */}
         {phase === "idle" && (
@@ -2754,6 +3670,152 @@ function CoinTossOverlay({
                 className="border border-border bg-charcoal text-sand font-display text-lg tracking-widest py-3.5 hover:border-sand/50 active:scale-[0.97] transition-all cursor-pointer shadow-md"
               >
                 Receive
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Positioning Phase: Assign Base 1 (Right/Even) and Base 2 (Left/Odd) */}
+        {phase === "positioning" && (
+          <div className="space-y-4 pt-1 font-sans text-left">
+            <div className="text-center">
+              <span className="text-[0.6rem] uppercase tracking-widest text-pickle font-bold block">
+                Court Starting Positions
+              </span>
+              <p className="text-xs text-foreground/80 font-medium mt-0.5">
+                Confirm starting sides. Base 1 starts on Right (Even) court, Base 2 starts on Left (Odd) court.
+              </p>
+            </div>
+
+            {/* Team A Box */}
+            <div className="p-3 border-2 border-border bg-card rounded-lg space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-sm font-bold uppercase tracking-wider text-foreground truncate">
+                  {teamAName}
+                </span>
+                <span
+                  className={`text-[0.6rem] font-bold uppercase px-2 py-0.5 rounded font-mono shrink-0 ${
+                    chosenServingTeam === "A"
+                      ? "bg-pickle text-sand"
+                      : "bg-muted text-foreground border border-border"
+                  }`}
+                >
+                  {chosenServingTeam === "A" ? "Opening Server (0-0-2)" : "Opening Receiver"}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div className="p-2.5 border-2 border-border bg-background rounded space-y-1">
+                  <div className="flex items-center justify-between text-[0.6rem] font-mono font-bold">
+                    <span className="text-muted-foreground uppercase">Right (Even)</span>
+                    <span className="font-bold text-sand bg-pickle px-1.5 py-0.2 rounded">BASE 1</span>
+                  </div>
+                  <div className="text-sm font-bold text-foreground truncate" title={teamABase1}>
+                    {teamABase1}
+                  </div>
+                  <span className="text-[0.65rem] text-muted-foreground block font-medium">
+                    {chosenServingTeam === "A" ? "Opening server" : "Opening receiver"}
+                  </span>
+                </div>
+
+                <div className="p-2.5 border-2 border-border bg-background rounded space-y-1">
+                  <div className="flex items-center justify-between text-[0.6rem] font-mono font-bold">
+                    <span className="text-muted-foreground uppercase">Left (Odd)</span>
+                    <span className="font-bold text-sand bg-charcoal px-1.5 py-0.2 rounded border border-border">BASE 2</span>
+                  </div>
+                  <div className="text-sm font-bold text-foreground truncate" title={teamABase2}>
+                    {teamABase2}
+                  </div>
+                  <span className="text-[0.65rem] text-muted-foreground block font-medium">Partner</span>
+                </div>
+              </div>
+
+              {rawA.length >= 2 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = rawA.find((p) => p !== teamABase1) || rawA[1] || rawA[0] || "Player A1";
+                    setTeamABase1(next);
+                  }}
+                  className="w-full py-1.5 text-xs font-mono font-bold uppercase tracking-wider text-foreground hover:text-pickle border-2 border-border hover:border-pickle transition-colors cursor-pointer text-center rounded bg-card"
+                >
+                  Swap Starting Sides (Base 1 &harr; 2)
+                </button>
+              )}
+            </div>
+
+            {/* Team B Box */}
+            <div className="p-3 border-2 border-border bg-card rounded-lg space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-sm font-bold uppercase tracking-wider text-foreground truncate">
+                  {teamBName}
+                </span>
+                <span
+                  className={`text-[0.6rem] font-bold uppercase px-2 py-0.5 rounded font-mono shrink-0 ${
+                    chosenServingTeam === "B"
+                      ? "bg-pickle text-sand"
+                      : "bg-muted text-foreground border border-border"
+                  }`}
+                >
+                  {chosenServingTeam === "B" ? "Opening Server (0-0-2)" : "Opening Receiver"}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div className="p-2.5 border-2 border-border bg-background rounded space-y-1">
+                  <div className="flex items-center justify-between text-[0.6rem] font-mono font-bold">
+                    <span className="text-muted-foreground uppercase">Right (Even)</span>
+                    <span className="font-bold text-sand bg-pickle px-1.5 py-0.2 rounded">BASE 1</span>
+                  </div>
+                  <div className="text-sm font-bold text-foreground truncate" title={teamBBase1}>
+                    {teamBBase1}
+                  </div>
+                  <span className="text-[0.65rem] text-muted-foreground block font-medium">
+                    {chosenServingTeam === "B" ? "Opening server" : "Opening receiver"}
+                  </span>
+                </div>
+
+                <div className="p-2.5 border-2 border-border bg-background rounded space-y-1">
+                  <div className="flex items-center justify-between text-[0.6rem] font-mono font-bold">
+                    <span className="text-muted-foreground uppercase">Left (Odd)</span>
+                    <span className="font-bold text-sand bg-charcoal px-1.5 py-0.2 rounded border border-border">BASE 2</span>
+                  </div>
+                  <div className="text-sm font-bold text-foreground truncate" title={teamBBase2}>
+                    {teamBBase2}
+                  </div>
+                  <span className="text-[0.65rem] text-muted-foreground block font-medium">Partner</span>
+                </div>
+              </div>
+
+              {rawB.length >= 2 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = rawB.find((p) => p !== teamBBase1) || rawB[1] || rawB[0] || "Player B1";
+                    setTeamBBase1(next);
+                  }}
+                  className="w-full py-1.5 text-xs font-mono font-bold uppercase tracking-wider text-foreground hover:text-pickle border-2 border-border hover:border-pickle transition-colors cursor-pointer text-center rounded bg-card"
+                >
+                  Swap Starting Sides (Base 1 &harr; 2)
+                </button>
+              )}
+            </div>
+
+            {/* Action buttons */}
+            <div className="flex flex-col gap-2 pt-1">
+              <button
+                type="button"
+                onClick={handleConfirmPositions}
+                className="w-full bg-pickle text-sand font-display text-lg tracking-widest py-3.5 hover:opacity-90 active:scale-[0.97] transition-all cursor-pointer shadow-md text-center"
+              >
+                Confirm Positions &amp; Start Match
+              </button>
+              <button
+                type="button"
+                onClick={() => setPhase("choosing")}
+                className="w-full py-2 text-xs font-bold uppercase tracking-wider text-foreground hover:text-pickle border-2 border-border bg-card hover:bg-muted transition-colors cursor-pointer text-center"
+              >
+                Back to Serve / Receive
               </button>
             </div>
           </div>

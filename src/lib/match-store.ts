@@ -55,6 +55,8 @@ export type LiveMatch = {
   bracketLetter?: string | undefined;
   tossDone?: boolean | undefined;
   tossWinner?: string | undefined;
+  teamABase1Player?: string | undefined;
+  teamBBase1Player?: string | undefined;
   resetAt?: number | undefined;
 };
 
@@ -257,6 +259,8 @@ function mergeMatchesSafely(cloudMatches: LiveMatch[], localMatches: LiveMatch[]
         court: lm.court,
         tossDone: lm.tossDone,
         tossWinner: lm.tossWinner,
+        teamABase1Player: lm.teamABase1Player,
+        teamBBase1Player: lm.teamBBase1Player,
         resetAt: lm.resetAt,
         winnerTeam: lm.winnerTeam,
         startedAt: lm.startedAt,
@@ -271,6 +275,10 @@ function mergeMatchesSafely(cloudMatches: LiveMatch[], localMatches: LiveMatch[]
         status: "live" as const,
         court: lm.court,
         score: lm.score,
+        tossDone: lm.tossDone ?? cm.tossDone,
+        tossWinner: lm.tossWinner ?? cm.tossWinner,
+        teamABase1Player: lm.teamABase1Player ?? cm.teamABase1Player,
+        teamBBase1Player: lm.teamBBase1Player ?? cm.teamBBase1Player,
         startedAt: lm.startedAt ?? cm.startedAt,
       };
     }
@@ -284,6 +292,10 @@ function mergeMatchesSafely(cloudMatches: LiveMatch[], localMatches: LiveMatch[]
         score: lm.score,
         status: lm.status,
         court: lm.court,
+        tossDone: lm.tossDone ?? cm.tossDone,
+        tossWinner: lm.tossWinner ?? cm.tossWinner,
+        teamABase1Player: lm.teamABase1Player ?? cm.teamABase1Player,
+        teamBBase1Player: lm.teamBBase1Player ?? cm.teamBBase1Player,
       };
     }
 
@@ -617,6 +629,8 @@ export function resetMatch(match: LiveMatch): LiveMatch {
     endedAt: undefined,
     tossDone: false,
     tossWinner: undefined,
+    teamABase1Player: undefined,
+    teamBBase1Player: undefined,
     resetAt: Date.now(),
   };
 }

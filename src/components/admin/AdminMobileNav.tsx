@@ -13,12 +13,13 @@ import {
   Radio,
   Settings,
   Users,
+  UserCheck,
   KeyRound,
   Home,
   LogOut,
 } from "lucide-react";
 
-type AdminTabKey = "draw" | "dispatch" | "setup" | "teams" | "access-codes";
+type AdminTabKey = "draw" | "dispatch" | "setup" | "teams" | "masterlist" | "access-codes";
 
 interface AdminMobileNavProps {
   activeTab: AdminTabKey;
@@ -35,6 +36,7 @@ const ADMIN_TABS: {
   { key: "dispatch", label: "Dispatch", icon: Radio },
   { key: "setup", label: "Setup", icon: Settings },
   { key: "teams", label: "Teams", icon: Users },
+  { key: "masterlist", label: "Users", icon: UserCheck },
   { key: "access-codes", label: "Codes", icon: KeyRound },
 ];
 
@@ -57,7 +59,7 @@ export function AdminMobileNav({
           relative
           bg-charcoal/96 backdrop-blur-md
           border-t border-white/10
-          grid grid-cols-7
+          grid grid-cols-8 px-0.5
           pb-[env(safe-area-inset-bottom,0.75rem)]
         "
         style={{ boxShadow: "0 -4px 24px rgba(0,0,0,0.5)" }}
