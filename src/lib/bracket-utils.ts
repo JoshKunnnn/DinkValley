@@ -1,5 +1,21 @@
 import { getCachedDrawnGroups } from "./supabase-service";
 
+// Memoized JSON.parse results keyed by localStorage key; reused while the raw string is unchanged.
+const _parsedGroupsCache = new Map<string, { raw: string; parsed: any }>();
+
+function readGroupsFromStorage(key: string): any | null {
+  const raw = localStorage.getItem(key);
+  if (!raw) {
+    _parsedGroupsCache.delete(key);
+    return null;
+  }
+  const hit = _parsedGroupsCache.get(key);
+  if (hit && hit.raw === raw) return hit.parsed;
+  const parsed = JSON.parse(raw);
+  _parsedGroupsCache.set(key, { raw, parsed });
+  return parsed;
+}
+
 /**
  * Validates that a pool play match only pairs teams that are actually in the exact same bracket.
  * If drawn groups exist for the tournament and category, both teamAName and teamBName
@@ -38,22 +54,23 @@ export function isMatchInSameBracket(
   if (!groups && typeof localStorage !== "undefined") {
     try {
       if (tournamentSlug && categoryId) {
-        const raw = localStorage.getItem(`dv_drawn_groups_${tournamentSlug}_${categoryId}`);
-        if (raw) groups = JSON.parse(raw);
+        const direct = readGroupsFromStorage(`dv_drawn_groups_${tournamentSlug}_${categoryId}`);
+        if (direct) groups = direct;
       }
       if (!groups) {
         // Fallback: search localStorage keys for any drawn groups matching this tournament/category
         for (let i = 0; i < localStorage.length; i++) {
           const key = localStorage.key(i);
           if (key && key.startsWith("dv_drawn_groups_")) {
-            if (categoryId && !key.includes(categoryId)) continue;
             if (tournamentSlug && !key.includes(tournamentSlug)) continue;
-            const raw = localStorage.getItem(key);
-            if (raw) {
-              const parsed = JSON.parse(raw);
+            const parsed = readGroupsFromStorage(key);
+            if (parsed) {
               if (Array.isArray(parsed) && parsed.length > 0) {
-                groups = parsed;
-                break;
+                const hasLetter = parsed.some((g: any) => g.letter?.toUpperCase() === bracketLetter);
+                if (hasLetter) {
+                  groups = parsed;
+                  break;
+                }
               }
             }
           }
@@ -71,14 +88,26 @@ export function isMatchInSameBracket(
 
   const targetGroup = groups.find((g: any) => g.letter?.toUpperCase() === bracketLetter);
   if (!targetGroup || !Array.isArray(targetGroup.slots)) {
-    return false; // The bracket doesn't exist in drawn groups
+    return true;
   }
 
   const groupTeamNames = new Set(
     targetGroup.slots
-      .map((s: any) => s.team?.name?.trim().toLowerCase())
+      .map((s: any) => (s?.team?.name || s?.name || "")?.trim().toLowerCase())
       .filter(Boolean),
   );
+
+  if (groupTeamNames.size < 2) {
+    return true;
+  }
+
+  // If categoryId was not specified, verify the target group actually includes at least one team before rejecting
+  if (!categoryId) {
+    const hasEither = groupTeamNames.has(cleanA) || groupTeamNames.has(cleanB);
+    if (!hasEither) {
+      return true;
+    }
+  }
 
   return groupTeamNames.has(cleanA) && groupTeamNames.has(cleanB);
 }

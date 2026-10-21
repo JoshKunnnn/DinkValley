@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
 import type { Team, Tournament, Category } from "@/data/tournaments";
 import { getDrawnGroups } from "./BracketDraw";
-import { getMatches, saveMatches, sanitizeCourtName, type LiveMatch } from "@/lib/match-store";
+import { getMatches, saveMatches, sanitizeCourtName, type LiveMatch, createPairMatchId, findMatchForPair } from "@/lib/match-store";
 import {
   dbSaveMainDraw,
   dbDeleteMainDraw,
@@ -128,10 +128,12 @@ export function getMainDrawMatches(slug: string, catId: string): KnockoutMatch[]
       return m;
     });
 
-    if (modified) {
-      saveMainDrawMatches(slug, catId, sanitized);
-    } else {
-      dbSaveMainDraw(slug, catId, sanitized).catch(() => {});
+    if (modified && typeof localStorage !== "undefined") {
+      try {
+        localStorage.setItem(MAIN_DRAW_KEY(slug, catId), JSON.stringify(sanitized));
+      } catch {
+        // ignore
+      }
     }
     return sanitized;
   } catch {
@@ -194,7 +196,7 @@ export function syncKnockoutToLiveMatches(
 
   const updatedIds = new Set(newMatches.map((m) => m.id));
   const retained = current.filter((m) => !updatedIds.has(m.id));
-  saveMatches([...newMatches, ...retained]);
+  saveMatches([...newMatches, ...retained], false);
 }
 
 /* ─────────────────────────────────────────────
@@ -243,16 +245,10 @@ export function DrawsManager({
         for (let j = i + 1; j < teams.length; j++) {
           const teamA = teams[i]!;
           const teamB = teams[j]!;
-          const matchId = `live-${tournamentSlug}-${categoryId}-${dGrp.letter}-${i + 1}v${j + 1}`;
+          const matchId = createPairMatchId(tournamentSlug, categoryId, `Bracket ${dGrp.letter}`, teamA.name, teamB.name);
           const bracketMatchId = `bracket-${dGrp.letter}-m${i + 1}-${j + 1}`;
 
-          const liveMatch = liveMatches.find(
-            (lm) =>
-              lm.id === matchId ||
-              (lm.categoryId === categoryId &&
-                ((lm.teamAName === teamA.name && lm.teamBName === teamB.name) ||
-                  (lm.teamAName === teamB.name && lm.teamBName === teamA.name)))
-          );
+          const liveMatch = findMatchForPair(liveMatches, teamA.name, teamB.name, tournamentSlug, categoryId, dGrp.letter);
 
           let scoreA: number | undefined = undefined;
           let scoreB: number | undefined = undefined;

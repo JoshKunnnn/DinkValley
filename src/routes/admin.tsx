@@ -66,6 +66,7 @@ function AdminErrorComponent({ error, reset }: { error: Error; reset: () => void
     try {
       localStorage.removeItem("dv_tournaments");
       localStorage.removeItem("dv_matches");
+      localStorage.removeItem("dv_live_matches");
       localStorage.removeItem("dv_court_stations");
       localStorage.removeItem("dv_dispatch_queue");
     } catch {
@@ -151,7 +152,26 @@ function Admin() {
 
   const [isMounted, setIsMounted] = useState(false);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [activeTab, setActiveTab] = useState<TabKey>("setup");
+  const [activeTab, setActiveTabState] = useState<TabKey>(() => {
+    if (typeof localStorage !== "undefined") {
+      const saved = localStorage.getItem("dv_admin_active_tab");
+      if (saved && ["draw", "dispatch", "setup", "teams", "masterlist", "access-codes"].includes(saved)) {
+        return saved as TabKey;
+      }
+    }
+    return "dispatch";
+  });
+
+  const setActiveTab = (tab: TabKey) => {
+    setActiveTabState(tab);
+    if (typeof localStorage !== "undefined") {
+      try {
+        localStorage.setItem("dv_admin_active_tab", tab);
+      } catch {
+        // ignore
+      }
+    }
+  };
   const [drawSubTab, setDrawSubTab] = useState<DrawSubTab>("bracket-draw");
   const [openSetupSections, setOpenSetupSections] = useState<Set<SetupSection>>(
     new Set(["tournaments"])
@@ -189,7 +209,6 @@ function Admin() {
         if (list[0]!.categories && list[0]!.categories.length > 0) {
           setCategoryId(list[0]!.categories[0]!.id);
         }
-        setActiveTab("draw");
       }
     }
   }, []);

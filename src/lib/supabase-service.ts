@@ -649,65 +649,156 @@ export async function dbGetMatches(tournamentSlug?: string): Promise<LiveMatch[]
   }
 }
 
+const _tourneyIdBySlug = new Map<string, string>();
+const _lastSavedMatchHash = new Map<string, string>();
+const _inFlightMatchSaves = new Map<string, Promise<boolean>>();
+
+function getMatchFingerprint(m: LiveMatch, slug?: string): string {
+  return `${m.id}|${slug || m.tournamentSlug || ""}|${m.categoryId || ""}|${m.court || ""}|${m.status}|${m.score?.teamAScore}|${m.score?.teamBScore}|${m.score?.servingTeam}|${m.score?.serverNumber}|${m.winnerTeam || ""}|${m.startedAt || 0}|${m.endedAt || 0}|${m.officiatedBy || ""}`;
+}
+
+function formatMatchRow(match: LiveMatch, tourneyId: string | null, slug: string | null) {
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const catId = match.categoryId && isUuid.test(match.categoryId) ? match.categoryId : null;
+
+  return {
+    id: match.id,
+    tournament_id: tourneyId,
+    tournament_slug: slug || null,
+    category_id: catId,
+    stage: match.stage || "Pool Play",
+    court: match.court,
+    team_a_name: match.teamAName,
+    team_a_players: match.teamAPlayers,
+    team_b_name: match.teamBName,
+    team_b_players: match.teamBPlayers,
+    status: match.status,
+    team_a_score: match.score.teamAScore,
+    team_b_score: match.score.teamBScore,
+    serving_team: match.score.servingTeam,
+    server_number: match.score.serverNumber,
+    rallies: match.score.rallies as any,
+    winner_team: match.winnerTeam || null,
+    started_at: match.startedAt ? new Date(match.startedAt).toISOString() : null,
+    ended_at: match.endedAt ? new Date(match.endedAt).toISOString() : null,
+    officiated_by: match.officiatedBy || null,
+    updated_at: new Date().toISOString(),
+  };
+}
+
 /**
- * Save or update match state in Supabase.
+ * Save multiple matches in a single batched Supabase upsert request
+ * to prevent socket pool exhaustion (ERR_INSUFFICIENT_RESOURCES).
  */
-export async function dbSaveMatch(
-  match: LiveMatch,
+export async function dbSaveMatchesBatch(
+  matches: LiveMatch[],
   tournamentSlug?: string
 ): Promise<boolean> {
-  try {
-    const slug = match.tournamentSlug || tournamentSlug;
-    let tourneyId: string | null = null;
+  if (!matches || matches.length === 0) return true;
 
+  const dirtyMatches = matches.filter((m) => {
+    const slug = m.tournamentSlug || tournamentSlug;
+    const fp = getMatchFingerprint(m, slug);
+    return _lastSavedMatchHash.get(m.id) !== fp;
+  });
+
+  if (dirtyMatches.length === 0) return true;
+
+  try {
+    const slug = dirtyMatches[0]?.tournamentSlug || tournamentSlug;
+    let tourneyId: string | null = null;
     if (slug) {
-      const { data: tourney } = await supabase
-        .from("tournaments")
-        .select("id")
-        .eq("slug", slug)
-        .maybeSingle();
-      if (tourney) {
-        tourneyId = tourney.id;
+      if (_tourneyIdBySlug.has(slug)) {
+        tourneyId = _tourneyIdBySlug.get(slug)!;
+      } else {
+        const { data: tourney } = await supabase
+          .from("tournaments")
+          .select("id")
+          .eq("slug", slug)
+          .maybeSingle();
+        if (tourney) {
+          tourneyId = tourney.id;
+          _tourneyIdBySlug.set(slug, tourney.id);
+        }
       }
     }
 
-    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    const catId = match.categoryId && isUuid.test(match.categoryId) ? match.categoryId : null;
-
-    const { error } = await supabase.from("matches").upsert({
-      id: match.id,
-      tournament_id: tourneyId,
-      tournament_slug: slug || null,
-      category_id: catId,
-      stage: match.stage || "Pool Play",
-      court: match.court,
-      team_a_name: match.teamAName,
-      team_a_players: match.teamAPlayers,
-      team_b_name: match.teamBName,
-      team_b_players: match.teamBPlayers,
-      status: match.status,
-      team_a_score: match.score.teamAScore,
-      team_b_score: match.score.teamBScore,
-      serving_team: match.score.servingTeam,
-      server_number: match.score.serverNumber,
-      rallies: match.score.rallies as any,
-      winner_team: match.winnerTeam || null,
-      started_at: match.startedAt ? new Date(match.startedAt).toISOString() : null,
-      ended_at: match.endedAt ? new Date(match.endedAt).toISOString() : null,
-      officiated_by: match.officiatedBy || null,
-      updated_at: new Date().toISOString(),
-    });
-
-    if (error) {
-      console.error("[Supabase] Error saving match:", error);
-      return false;
+    const CHUNK_SIZE = 40;
+    for (let i = 0; i < dirtyMatches.length; i += CHUNK_SIZE) {
+      const chunk = dirtyMatches.slice(i, i + CHUNK_SIZE);
+      const rows = chunk.map((m) => formatMatchRow(m, tourneyId, m.tournamentSlug || slug || null));
+      const { error } = await supabase.from("matches").upsert(rows);
+      if (error) {
+        console.warn("[Supabase] Error batch saving matches:", error.message);
+        return false;
+      }
+      for (const m of chunk) {
+        _lastSavedMatchHash.set(m.id, getMatchFingerprint(m, m.tournamentSlug || slug));
+      }
     }
 
     return true;
   } catch (err) {
-    console.error("[Supabase] Error saving match:", err);
+    console.warn("[Supabase] Unexpected error batch saving matches:", err);
     return false;
   }
+}
+
+export async function dbSaveMatch(
+  match: LiveMatch,
+  tournamentSlug?: string
+): Promise<boolean> {
+  const slug = match.tournamentSlug || tournamentSlug;
+  const fp = getMatchFingerprint(match, slug);
+
+  if (_lastSavedMatchHash.get(match.id) === fp) {
+    return true;
+  }
+
+  if (_inFlightMatchSaves.has(match.id)) {
+    return _inFlightMatchSaves.get(match.id)!;
+  }
+
+  const savePromise = (async () => {
+    try {
+      let tourneyId: string | null = null;
+
+      if (slug) {
+        if (_tourneyIdBySlug.has(slug)) {
+          tourneyId = _tourneyIdBySlug.get(slug)!;
+        } else {
+          const { data: tourney } = await supabase
+            .from("tournaments")
+            .select("id")
+            .eq("slug", slug)
+            .maybeSingle();
+          if (tourney) {
+            tourneyId = tourney.id;
+            _tourneyIdBySlug.set(slug, tourney.id);
+          }
+        }
+      }
+
+      const row = formatMatchRow(match, tourneyId, slug || null);
+      const { error } = await supabase.from("matches").upsert(row);
+
+      if (error) {
+        console.warn("[Supabase] Error saving match:", error.message);
+        return false;
+      }
+
+      _lastSavedMatchHash.set(match.id, fp);
+      return true;
+    } catch (err) {
+      console.warn("[Supabase] Error saving match:", err);
+      return false;
+    } finally {
+      _inFlightMatchSaves.delete(match.id);
+    }
+  })();
+
+  _inFlightMatchSaves.set(match.id, savePromise);
+  return savePromise;
 }
 
 /**

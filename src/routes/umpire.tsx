@@ -1,6 +1,6 @@
 import { createFileRoute, redirect, useNavigate } from "@tanstack/react-router";
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { X, Trophy, AlertTriangle } from "lucide-react";
+import { X, Trophy, AlertTriangle, Lock } from "lucide-react";
 import { UmpireMobileNav } from "@/components/admin/UmpireMobileNav";
 
 import {
@@ -417,16 +417,26 @@ function TournamentDesk({
               matches.find((m) => m.id === st.currentMatchId) ??
               matches.find((m) => m.court === court && (m.status === "live" || m.status === "scheduled"));
 
-            const isAssignedToMe = st.assignedUmpire === currentUmpire;
+            const operatingOfficial = courtMatch?.officiatedBy || (st.status === "live" || st.status === "warmup" ? st.assignedUmpire : null);
+            const isAssignedToMe = Boolean(courtMatch?.officiatedBy === currentUmpire || (!courtMatch?.officiatedBy && st.assignedUmpire === currentUmpire));
+            const isOperatedByOther = Boolean(
+              courtMatch &&
+              courtMatch.status !== "final" &&
+              operatingOfficial &&
+              operatingOfficial !== currentUmpire
+            );
 
             return (
               <div
                 key={court}
-                className={`surface-card p-0 overflow-hidden border flex flex-col justify-between transition-all ${courtMatch?.status === "live"
-                  ? "border-pickle/70 shadow-md shadow-pickle/10"
-                  : st.status === "maintenance"
-                    ? "border-brick/50 bg-brick/5"
-                    : "border-border hover:border-foreground/40"
+                className={`surface-card p-0 overflow-hidden border flex flex-col justify-between transition-all ${
+                  isOperatedByOther
+                    ? "border-brick/50 bg-charcoal text-sand"
+                    : courtMatch?.status === "live"
+                    ? "border-pickle/70 shadow-md shadow-pickle/10"
+                    : st.status === "maintenance"
+                      ? "border-brick/50 bg-brick/5"
+                      : "border-border hover:border-foreground/40"
                   }`}
               >
                 {/* Court Card Header */}
@@ -502,22 +512,29 @@ function TournamentDesk({
 
                     <div className="flex items-center gap-1.5 pt-1">
                       {courtMatch ? (
-                        <div className="flex items-center gap-1 w-full flex-1">
-                          <button
-                            onClick={() => onSelectMatch(courtMatch.id)}
-                            className="flex-1 py-1.5 text-[0.65rem] font-bold uppercase tracking-widest bg-pickle text-sand hover:opacity-90 transition-opacity text-center cursor-pointer truncate"
-                          >
-                            {isMatchTossDone(courtMatch) ? "Score Match" : "Start Coin Toss"}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleDeskResetToss(courtMatch)}
-                            title="Reset match score to 0-0 and rerun coin toss"
-                            className="px-2 py-1.5 text-[0.6rem] font-bold uppercase tracking-wider bg-charcoal text-sand border border-pickle/50 hover:bg-pickle hover:text-sand transition-colors cursor-pointer whitespace-nowrap"
-                          >
-                            Toss (Reset)
-                          </button>
-                        </div>
+                        isOperatedByOther ? (
+                          <div className="flex items-center gap-1.5 w-full py-2 px-2.5 bg-brick/10 border border-brick/40 text-brick text-[0.65rem] font-bold uppercase tracking-wider justify-center">
+                            <Lock size={12} />
+                            <span>In Use: {operatingOfficial}</span>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-1 w-full flex-1">
+                            <button
+                              onClick={() => onSelectMatch(courtMatch.id)}
+                              className="flex-1 py-1.5 text-[0.65rem] font-bold uppercase tracking-widest bg-pickle text-sand hover:opacity-90 transition-opacity text-center cursor-pointer truncate"
+                            >
+                              {isMatchTossDone(courtMatch) ? "Score Match" : "Start Coin Toss"}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeskResetToss(courtMatch)}
+                              title="Reset match score to 0-0 and rerun coin toss"
+                              className="px-2 py-1.5 text-[0.6rem] font-bold uppercase tracking-wider bg-charcoal text-sand border border-pickle/50 hover:bg-pickle hover:text-sand transition-colors cursor-pointer whitespace-nowrap"
+                            >
+                              Toss (Reset)
+                            </button>
+                          </div>
+                        )
                       ) : (
                         <button
                           onClick={() => onOpenQuickMatch(court)}
@@ -527,22 +544,24 @@ function TournamentDesk({
                         </button>
                       )}
 
-                      {isAssignedToMe ? (
-                        <button
-                          onClick={() => onReleaseCourt(court)}
-                          title="Release court claim"
-                          className="px-2 py-1.5 text-[0.65rem] font-bold uppercase tracking-wider bg-charcoal text-sand/70 border border-border hover:text-brick hover:border-brick transition-colors cursor-pointer"
-                        >
-                          Release
-                        </button>
-                      ) : (
-                        <button
-                          onClick={() => onClaimCourt(court)}
-                          title="Claim this station"
-                          className="px-2 py-1.5 text-[0.65rem] font-bold uppercase tracking-wider bg-charcoal text-sand border border-border hover:border-pickle hover:text-pickle transition-colors cursor-pointer"
-                        >
-                          Claim
-                        </button>
+                      {!isOperatedByOther && (
+                        isAssignedToMe ? (
+                          <button
+                            onClick={() => onReleaseCourt(court)}
+                            title="Release court claim"
+                            className="px-2 py-1.5 text-[0.65rem] font-bold uppercase tracking-wider bg-charcoal text-sand/70 border border-border hover:text-brick hover:border-brick transition-colors cursor-pointer"
+                          >
+                            Release
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => onClaimCourt(court)}
+                            title="Claim this station"
+                            className="px-2 py-1.5 text-[0.65rem] font-bold uppercase tracking-wider bg-charcoal text-sand border border-border hover:border-pickle hover:text-pickle transition-colors cursor-pointer"
+                          >
+                            Claim
+                          </button>
+                        )
                       )}
                     </div>
                   </div>
@@ -1627,13 +1646,22 @@ function UmpireConsole({
 
               const isLive = courtMatch?.status === "live";
               const isScheduled = courtMatch?.status === "scheduled";
-              const isAssignedToMe = courtMatch?.officiatedBy === currentUmpire;
+              const operatingOfficial = courtMatch?.officiatedBy || (st?.assignedUmpire && (st.status === "live" || st.status === "warmup") ? st.assignedUmpire : null);
+              const isAssignedToMe = Boolean(courtMatch?.officiatedBy === currentUmpire || (!courtMatch?.officiatedBy && st?.assignedUmpire === currentUmpire));
+              const isOperatedByOther = Boolean(
+                courtMatch &&
+                courtMatch.status !== "final" &&
+                operatingOfficial &&
+                operatingOfficial !== currentUmpire
+              );
 
               return (
                 <div
                   key={court}
                   className={`p-0 overflow-hidden flex flex-col justify-between border-2 transition-all font-sans ${
-                    isLive
+                    isOperatedByOther
+                      ? "border-brick/50 bg-charcoal text-sand"
+                      : isLive
                       ? "border-pickle/80 shadow-lg shadow-pickle/15 bg-charcoal text-sand"
                       : courtMatch
                       ? "border-border hover:border-pickle/50 bg-charcoal text-sand"
@@ -1653,13 +1681,19 @@ function UmpireConsole({
                     >
                       {court}
                     </span>
-                    {isLive && (
+                    {isOperatedByOther && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-bold uppercase tracking-wider bg-brick/20 border border-brick/50 text-brick">
+                        <Lock size={11} />
+                        In Use
+                      </span>
+                    )}
+                    {!isOperatedByOther && isLive && (
                       <span className="inline-flex items-center gap-1.5 px-2 py-0.5 text-xs font-bold uppercase tracking-wider bg-pickle/20 border border-pickle/50 text-pickle">
                         <span className="h-1.5 w-1.5 rounded-full bg-pickle animate-pulse" />
                         Live: {courtMatch.score.teamAScore} - {courtMatch.score.teamBScore}
                       </span>
                     )}
-                    {isScheduled && (
+                    {!isOperatedByOther && isScheduled && (
                       <span className="inline-flex items-center px-2 py-0.5 text-xs font-bold uppercase tracking-wider bg-sand/15 border border-border text-sand">
                         Ready
                       </span>
@@ -1721,11 +1755,11 @@ function UmpireConsole({
                         {/* Official Info */}
                         <div className="text-xs uppercase tracking-wider text-sand/80 flex items-center justify-between pt-1">
                           <span className="text-sand/70 font-semibold">Official:</span>
-                          <span className={`font-bold truncate max-w-[140px] font-sans ${courtMatch.officiatedBy ? "text-pickle" : "text-sand/60"}`}>
-                            {courtMatch.officiatedBy
+                          <span className={`font-bold truncate max-w-[140px] font-sans ${isOperatedByOther ? "text-brick" : (courtMatch.officiatedBy || st?.assignedUmpire) ? "text-pickle" : "text-sand/60"}`}>
+                            {operatingOfficial
                               ? isAssignedToMe
-                                ? `${courtMatch.officiatedBy} (You)`
-                                : courtMatch.officiatedBy
+                                ? `${operatingOfficial} (You)`
+                                : operatingOfficial
                               : "Unassigned"}
                           </span>
                         </div>
@@ -1744,33 +1778,70 @@ function UmpireConsole({
                     {/* Action button */}
                     <div className="pt-2">
                       {courtMatch ? (
-                        <div className="space-y-2">
-                          <button
-                            type="button"
-                            onClick={() => onSelectMatch(courtMatch.id)}
-                            className="w-full py-2.5 px-3 bg-pickle text-sand font-bold text-xs uppercase tracking-widest hover:opacity-90 active:scale-[0.99] transition-all text-center cursor-pointer shadow-md font-sans"
-                          >
-                            {isLive ? `Continue Scoring ${court}` : `Supervise & Score ${court}`}
-                          </button>
-                          {!isMatchTossDone(courtMatch) && (
+                        isOperatedByOther ? (
+                          <div className="space-y-1.5">
+                            <div className="w-full py-2.5 px-3 border border-brick/40 bg-brick/10 text-brick font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-1.5 select-none text-center font-sans">
+                              <Lock size={13} />
+                              <span>In Use: {operatingOfficial}</span>
+                            </div>
+                            <p className="text-[0.65rem] text-center text-sand/60 font-medium">
+                              Official actively scoring. Access restricted.
+                            </p>
+                          </div>
+                        ) : (
+                          <div className="space-y-2">
                             <button
                               type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                if (typeof localStorage !== "undefined") {
-                                  try {
-                                    localStorage.removeItem(`dv_toss_done_${courtMatch.id}`);
-                                  } catch {}
+                              onClick={() => {
+                                if (!courtMatch.officiatedBy) {
+                                  onUpdate(courtMatch.id, (m) => ({
+                                    ...m,
+                                    officiatedBy: currentUmpire,
+                                  }));
+                                  dbUpdateCourtStation(court, {
+                                    currentMatchId: courtMatch.id,
+                                    assignedUmpire: currentUmpire,
+                                  }).catch(() => {});
+                                  claimCourtStation(court, currentUmpire);
                                 }
-                                onUpdate(courtMatch.id, resetMatch);
                                 onSelectMatch(courtMatch.id);
                               }}
-                              className="w-full py-1.5 px-2 bg-charcoal border border-pickle/40 text-sand hover:bg-pickle hover:text-sand text-xs font-bold uppercase tracking-wider transition-colors cursor-pointer text-center font-sans"
+                              className="w-full py-2.5 px-3 bg-pickle text-sand font-bold text-xs uppercase tracking-widest hover:opacity-90 active:scale-[0.99] transition-all text-center cursor-pointer shadow-md font-sans"
                             >
-                              Coin Toss (Reset)
+                              {isLive ? `Continue Scoring ${court}` : `Supervise & Score ${court}`}
                             </button>
-                          )}
-                        </div>
+                            {!isMatchTossDone(courtMatch) && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (typeof localStorage !== "undefined") {
+                                    try {
+                                      localStorage.removeItem(`dv_toss_done_${courtMatch.id}`);
+                                    } catch {}
+                                  }
+                                  if (!courtMatch.officiatedBy) {
+                                    onUpdate(courtMatch.id, (m) => ({
+                                      ...resetMatch(m),
+                                      officiatedBy: currentUmpire,
+                                    }));
+                                    dbUpdateCourtStation(court, {
+                                      currentMatchId: courtMatch.id,
+                                      assignedUmpire: currentUmpire,
+                                    }).catch(() => {});
+                                    claimCourtStation(court, currentUmpire);
+                                  } else {
+                                    onUpdate(courtMatch.id, resetMatch);
+                                  }
+                                  onSelectMatch(courtMatch.id);
+                                }}
+                                className="w-full py-1.5 px-2 bg-charcoal border border-pickle/40 text-sand hover:bg-pickle hover:text-sand text-xs font-bold uppercase tracking-wider transition-colors cursor-pointer text-center font-sans"
+                              >
+                                Coin Toss (Reset)
+                              </button>
+                            )}
+                          </div>
+                        )
                       ) : (
                         <div className="w-full py-2.5 px-3 border-2 border-border text-foreground/60 font-bold text-xs uppercase tracking-wider text-center select-none bg-muted/30">
                           Standby: No Dispatched Match
@@ -1810,6 +1881,94 @@ function UmpireConsole({
     );
   }
 
+
+  const matchOperatingOfficial =
+    match.officiatedBy ||
+    (match.court && currentStations[match.court as FacilityCourt]?.assignedUmpire);
+  const isOperatedByOther = Boolean(
+    match.status !== "final" &&
+    matchOperatingOfficial &&
+    matchOperatingOfficial !== currentUmpire
+  );
+
+  // Auto-assign umpire identity upon entering unassigned match
+  useEffect(() => {
+    if (match && !match.officiatedBy && match.status !== "final" && !isOperatedByOther) {
+      onUpdate(match.id, (m) => ({
+        ...m,
+        officiatedBy: currentUmpire,
+      }));
+      if (match.court && (FACILITY_COURTS as readonly string[]).includes(match.court as FacilityCourt)) {
+        dbUpdateCourtStation(match.court as FacilityCourt, {
+          currentMatchId: match.id,
+          assignedUmpire: currentUmpire,
+        }).catch(() => {});
+        claimCourtStation(match.court as FacilityCourt, currentUmpire);
+      }
+    }
+  }, [match?.id, match?.officiatedBy, match?.status, isOperatedByOther, currentUmpire]);
+
+  if (isOperatedByOther) {
+    return (
+      <div className="max-w-xl mx-auto py-8 px-4 font-sans">
+        <div className="border-2 border-brick/60 bg-charcoal p-6 sm:p-8 space-y-6 shadow-2xl">
+          <div className="flex items-center gap-3 border-b border-border/80 pb-4">
+            <div className="h-12 w-12 rounded-full bg-brick/20 border border-brick/40 flex items-center justify-center flex-shrink-0 text-brick">
+              <Lock size={22} />
+            </div>
+            <div>
+              <span className="text-[0.65rem] uppercase tracking-[0.28em] font-bold text-brick block">
+                Access Restricted
+              </span>
+              <h2 className="font-display text-2xl text-sand">
+                Game In Progress
+              </h2>
+            </div>
+          </div>
+
+          <div className="space-y-4">
+            <p className="text-sm text-sand/90 leading-relaxed">
+              This match is currently being operated by official{" "}
+              <strong className="text-pickle font-bold font-sans">{matchOperatingOfficial}</strong>.
+              Other umpires cannot access or score this game while it is actively in progress.
+            </p>
+
+            <div className="bg-card/70 border border-border p-4 space-y-2 text-xs">
+              <div className="flex items-center justify-between text-sand/60 uppercase tracking-wider text-[0.65rem]">
+                <span>{match.court || "Active Court"}</span>
+                <span>{match.stage || "Tournament Match"}</span>
+              </div>
+              <div className="font-bold text-sand text-sm">
+                {match.teamAName} <span className="text-sand/50 font-normal">vs</span> {match.teamBName}
+              </div>
+              <div className="flex items-center justify-between pt-2 border-t border-border/50 text-[0.7rem]">
+                <span className="text-sand/70">Current Score:</span>
+                <span className="font-mono font-bold text-sand">
+                  {match.score.teamAScore} - {match.score.teamBScore}
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-[0.7rem]">
+                <span className="text-sand/70">Operating Official:</span>
+                <span className="font-bold text-brick">
+                  {matchOperatingOfficial}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div className="pt-2">
+            <button
+              type="button"
+              onClick={() => onSelectMatch("")}
+              className="w-full py-3 px-4 bg-pickle text-sand font-bold text-xs uppercase tracking-widest hover:opacity-90 active:scale-[0.99] transition-all cursor-pointer text-center font-sans"
+            >
+              &larr; Return to Court Selection
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   const isLiveOrScheduled = match.status !== "final";
   const needsToss = match.status !== "final" && !tossDone && !isMatchTossDone(match);
@@ -1966,9 +2125,10 @@ function UmpireConsole({
     });
     // Complete match in dispatch queue
     completeQueueMatch(match.id);
-    // Vacate court station in database
+    // Vacate court station in database and release umpire assignment
     if (match.court && match.court !== "Queue") {
       vacateCourt(match.court as FacilityCourt);
+      releaseCourtStation(match.court as FacilityCourt);
     }
     setShowEndConfirm(false);
   };
@@ -2068,28 +2228,6 @@ function UmpireConsole({
         </div>
       )}
 
-      {/* Floating Side Button for Court / Side Setup */}
-      <button
-        type="button"
-        onClick={() => setShowCourtSideModal(true)}
-        title="Change Court or Player Sides"
-        aria-label="Change Court or Player Sides"
-        className="fixed right-0 top-[40%] -translate-y-1/2 z-40 bg-charcoal/95 border-l-2 border-y-2 border-pickle text-sand px-2 py-3.5 rounded-l-lg shadow-2xl backdrop-blur-md hover:bg-black transition-all cursor-pointer group flex flex-col items-center gap-1.5 active:scale-95"
-      >
-        <svg
-          className="w-4 h-4 text-pickle group-hover:scale-110 transition-transform"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth={2.2}
-        >
-          <path strokeLinecap="round" strokeLinejoin="round" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
-        </svg>
-        <span className="text-[0.58rem] font-mono font-bold tracking-widest uppercase [writing-mode:vertical-lr] text-sand group-hover:text-pickle select-none">
-          Court &bull; Side
-        </span>
-      </button>
-
       {/* Navigation & Match Info Header */}
       <div className="flex items-center justify-between gap-2">
         <button
@@ -2134,22 +2272,6 @@ function UmpireConsole({
         </div>
       </div>
 
-      {/* Reassignment banner if another official was designated */}
-      {match.officiatedBy && match.officiatedBy !== currentUmpire && (
-        <div className="border border-brick/40 bg-brick/10 px-4 py-2.5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 text-xs">
-          <span className="text-brick font-medium">
-            Assigned official: <strong>{match.officiatedBy}</strong>
-          </span>
-          <button
-            onClick={() =>
-              onUpdate(match.id, (m) => ({ ...m, officiatedBy: currentUmpire }))
-            }
-            className="px-3 py-1 text-[0.65rem] font-bold uppercase tracking-widest bg-brick text-sand hover:bg-brick-deep transition-colors cursor-pointer w-fit"
-          >
-            Claim Officiating
-          </button>
-        </div>
-      )}
 
       {/* Pre-match Toss Banner */}
       {needsToss && !showToss && (
@@ -3023,9 +3145,10 @@ function QuickMatchModal({
     return matches.filter((m) => {
       if (m.status === "final") return false;
       if (selectedTournament && m.tournamentSlug && m.tournamentSlug !== selectedTournament) return false;
+      if (m.officiatedBy && m.officiatedBy !== currentUmpire) return false;
       return Boolean(m.teamAName && m.teamBName);
     });
-  }, [matches, selectedTournament]);
+  }, [matches, selectedTournament, currentUmpire]);
 
   // Handler when a drawn bracket match is selected from the dropdown
   const handleSelectBracketMatch = (matchId: string) => {

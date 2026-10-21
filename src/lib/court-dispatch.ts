@@ -2,6 +2,11 @@ import {
   getMatches,
   saveMatches,
   type LiveMatch,
+  createPairMatchId,
+  findMatchForPair,
+  createInitialScore,
+  migrateMatchesToDeterministicIds,
+  isMatchMatchingStation,
 } from "./match-store";
 import {
   dbUpdateCourtStation,
@@ -149,7 +154,10 @@ export function getCourtStations(): Record<FacilityCourt, CourtStation> {
   }
 }
 
-export function saveCourtStations(stations: Record<FacilityCourt, CourtStation>, syncToCloud = true): void {
+export function saveCourtStations(
+  stations: Record<FacilityCourt, CourtStation>,
+  syncToCloud: boolean | FacilityCourt = false,
+): void {
   try {
     localStorage.setItem(STATIONS_KEY, JSON.stringify(stations));
     window.dispatchEvent(new Event("storage"));
@@ -157,7 +165,7 @@ export function saveCourtStations(stations: Record<FacilityCourt, CourtStation>,
   } catch {
     // ignore
   }
-  if (syncToCloud) {
+  if (syncToCloud === true) {
     for (const court of FACILITY_COURTS) {
       const st = stations[court];
       if (st) {
@@ -171,16 +179,31 @@ export function saveCourtStations(stations: Record<FacilityCourt, CourtStation>,
         }).catch(() => { });
       }
     }
+  } else if (typeof syncToCloud === "string" && FACILITY_COURTS.includes(syncToCloud as FacilityCourt)) {
+    const court = syncToCloud as FacilityCourt;
+    const st = stations[court];
+    if (st) {
+      dbUpdateCourtStation(court, {
+        status: st.status,
+        currentMatchId: st.currentMatchId,
+        onDeckMatchId: st.onDeckMatchId,
+        assignedUmpire: st.assignedUmpire,
+        dispatchedAt: st.dispatchedAt,
+        maintenanceNote: st.maintenanceNote,
+      }).catch(() => { });
+    }
   }
 }
 
 /**
  * Reconciles Court Stations with the Matches store:
  * 1. If a station is marked 'live' or 'warmup', verifies that currentMatchId exists and is an active, non-final match.
- *    If missing or already final, clears the station back to 'available'.
+ *    If missing from memory, self-heals and preserves the court match.
  * 2. If a non-final match has court = 'Court X', verifies that Court X station is actually assigned to it.
- *    If Court X station is available or occupied by another match, moves the match's court back to 'Queue'.
+ *    If Court X station is occupied by a different matchup, moves the match's court back to 'Queue'.
  */
+let _isReconcilingCourtStations = false;
+
 export function reconcileCourtStations(
   stationsInput?: Record<FacilityCourt, CourtStation>,
   matchesInput?: LiveMatch[],
@@ -193,36 +216,87 @@ export function reconcileCourtStations(
   const matches = [...(matchesInput ?? getMatches())];
   let modified = false;
 
+  if (_isReconcilingCourtStations) {
+    return { stations, matches, modified: false };
+  }
+  _isReconcilingCourtStations = true;
+  try {
+
   for (const c of FACILITY_COURTS) {
     const st = stations[c];
     if (!st) continue;
 
     if (st.status === "live" || st.status === "warmup") {
       let activeMatch = st.currentMatchId ? matches.find((m) => m.id === st.currentMatchId) : null;
-      if (!activeMatch || activeMatch.status === "final") {
-        // Fallback: see if there is another match explicitly assigned to this court
-        const fallback = matches.find((m) => m.court === c && (m.status === "live" || m.status === "scheduled"));
-        if (fallback) {
+      if (!activeMatch) {
+        activeMatch = matches.find((m) => m.status !== "final" && isMatchMatchingStation(m, st.currentMatchId, c)) || null;
+      }
+
+      // Self-heal: If station has currentMatchId but matches list is missing it, restore the match
+      if (!activeMatch && st.currentMatchId) {
+        let teamA = "Team A";
+        let teamB = "Team B";
+        if (st.currentMatchId.includes("-vs-")) {
+          const vsIdx = st.currentMatchId.indexOf("-vs-");
+          const p0 = st.currentMatchId.substring(0, vsIdx);
+          const p1 = st.currentMatchId.substring(vsIdx + 4);
+          const rawA = p0.includes("--") ? p0.split("--").pop()! : p0.split("-").slice(-2).join(" ");
+          const rawB = p1.replace(/--.*/, "");
+          teamA = rawA.replace(/-/g, " ").trim();
+          teamB = rawB.replace(/-/g, " ").trim();
+          if (teamA) teamA = teamA.charAt(0).toUpperCase() + teamA.slice(1);
+          if (teamB) teamB = teamB.charAt(0).toUpperCase() + teamB.slice(1);
+        }
+
+        const restoredMatch: LiveMatch = {
+          id: st.currentMatchId,
+          court: c,
+          teamAName: teamA,
+          teamAPlayers: [],
+          teamBName: teamB,
+          teamBPlayers: [],
+          status: st.status === "live" ? "live" : "scheduled",
+          score: createInitialScore(),
+          winnerTeam: undefined,
+          startedAt: st.dispatchedAt ?? Date.now(),
+          endedAt: undefined,
+          officiatedBy: st.assignedUmpire ?? undefined,
+        };
+        matches.push(restoredMatch);
+        activeMatch = restoredMatch;
+        modified = true;
+      }
+
+      if (activeMatch && activeMatch.status !== "final") {
+        if (st.currentMatchId !== activeMatch.id || (activeMatch.status === "live" && st.status !== "live")) {
           stations[c] = {
             ...st,
-            currentMatchId: fallback.id,
-            status: fallback.status === "live" ? "live" : "warmup",
-            dispatchedAt: fallback.startedAt ?? st.dispatchedAt ?? Date.now(),
-          };
-          modified = true;
-        } else {
-          // No active match exists for this court station: reset to available
-          stations[c] = {
-            ...st,
-            status: "available",
-            currentMatchId: null,
-            dispatchedAt: null,
+            currentMatchId: activeMatch.id,
+            status: activeMatch.status === "live" ? "live" : st.status,
+            dispatchedAt: activeMatch.startedAt ?? st.dispatchedAt ?? Date.now(),
           };
           modified = true;
         }
+        if (activeMatch.court !== c) {
+          const idx = matches.findIndex((m) => m.id === activeMatch!.id);
+          if (idx !== -1) {
+            matches[idx] = { ...activeMatch, court: c };
+            modified = true;
+          }
+        }
+      } else if (activeMatch && activeMatch.status === "final") {
+        // Concluded match on court
+        stations[c] = {
+          ...st,
+          status: "available",
+          currentMatchId: null,
+          dispatchedAt: null,
+        };
+        modified = true;
       }
+      // Note: If no active match could be found or restored, do NOT wipe an active station!
+      // This protects courts against timer-based state loss and hallucination.
     } else if (st.status === "available") {
-      // If station was marked available locally, but there IS an active match on this court from the database:
       const liveOnCourt = matches.find(
         (m) => m.court === c && (m.status === "live" || m.status === "scheduled")
       );
@@ -252,33 +326,62 @@ export function reconcileCourtStations(
 
     if (m.court && FACILITY_COURTS.includes(m.court as FacilityCourt)) {
       const st = stations[m.court as FacilityCourt];
-      const isStationAssigned = st && st.currentMatchId === m.id && st.status !== "available";
-      // Only move to Queue if the court station is actively occupied by a DIFFERENT match
-      if (!isStationAssigned && st && st.currentMatchId && st.currentMatchId !== m.id) {
-        matches[i] = {
-          ...m,
-          court: "Queue",
-          status: "scheduled",
-          startedAt: undefined,
-        };
-        modified = true;
+      const isStationAssigned = st && (st.currentMatchId === m.id || isMatchMatchingStation(m, st.currentMatchId, m.court)) && st.status !== "available";
+
+      // Only move to Queue if the court station is actively occupied by a DIFFERENT matchup
+      if (!isStationAssigned && st && st.currentMatchId && st.status !== "available") {
+        if (isMatchMatchingStation(m, st.currentMatchId, m.court)) {
+          // This match matches the station! Re-align its id with station
+          matches[i] = { ...m, id: st.currentMatchId };
+          modified = true;
+        } else {
+          matches[i] = {
+            ...m,
+            court: "Queue",
+            status: "scheduled",
+            startedAt: undefined,
+          };
+          modified = true;
+        }
       }
     }
   }
 
   if (modified && typeof window !== "undefined") {
     try {
-      localStorage.setItem(STATIONS_KEY, JSON.stringify(stations));
-      localStorage.setItem("dv_matches", JSON.stringify(matches));
-      window.dispatchEvent(new Event("dv_court_stations_updated"));
-      window.dispatchEvent(new Event("dv_matches_updated"));
-      window.dispatchEvent(new Event("dv_live_matches_updated"));
+      const stationsStr = JSON.stringify(stations);
+      const matchesStr = JSON.stringify(matches);
+      const prevStations = localStorage.getItem(STATIONS_KEY);
+      const prevMatches = localStorage.getItem("dv_live_matches");
+
+      let stationsChanged = false;
+      let matchesChanged = false;
+
+      if (prevStations !== stationsStr) {
+        localStorage.setItem(STATIONS_KEY, stationsStr);
+        stationsChanged = true;
+      }
+      if (prevMatches !== matchesStr) {
+        localStorage.setItem("dv_live_matches", matchesStr);
+        matchesChanged = true;
+      }
+
+      if (stationsChanged) {
+        window.dispatchEvent(new Event("dv_court_stations_updated"));
+      }
+      if (matchesChanged) {
+        window.dispatchEvent(new Event("dv_matches_updated"));
+        window.dispatchEvent(new Event("dv_live_matches_updated"));
+      }
     } catch {
       // ignore
     }
   }
 
   return { stations, matches, modified };
+  } finally {
+    _isReconcilingCourtStations = false;
+  }
 }
 
 /* ─────────────────────────────────────────────
@@ -444,38 +547,165 @@ export function dispatchMatchToCourt(
     return;
   }
 
-  const matches = getMatches();
+  // Always compute canonical deterministic pair ID
+  const canonicalId = createPairMatchId(
+    match.tournamentSlug || "",
+    match.categoryId || "",
+    match.stage || "",
+    match.teamAName,
+    match.teamBName,
+  );
+  const effectiveId = match.id.startsWith("match-") ? match.id : canonicalId;
+
+  // Make sure matches are migrated to deterministic IDs
+  const rawMatches = getMatches();
+  const matches = migrateMatchesToDeterministicIds(rawMatches);
   const now = Date.now();
 
-  // Find or create match in live store
+  const isTargetMatch = (m: LiveMatch): boolean => {
+    // 1. Strict pair match
+    const ma = m.teamAName?.trim().toLowerCase();
+    const mb = m.teamBName?.trim().toLowerCase();
+    const ta = match.teamAName.trim().toLowerCase();
+    const tb = match.teamBName.trim().toLowerCase();
+    if ((ma === ta && mb === tb) || (ma === tb && mb === ta)) {
+      return true;
+    }
+    // 2. ID match only if match doesn't have opposing teams
+    if (m.id === effectiveId || m.id === match.id) {
+      if (!m.teamAName || !m.teamBName) return true;
+      if ((ma === ta && mb === tb) || (ma === tb && mb === ta)) return true;
+      // If teams are completely different, it's a legacy index collision!
+      return false;
+    }
+    return false;
+  };
+
+  // 1. Update Court Station FIRST in memory, localStorage, and Supabase so enforceFourCourtCapacity immediately sees it
+  const stations = getCourtStations();
+  const courtsToSync: FacilityCourt[] = [court];
+
+  // If this match or matchup was already assigned to another court station, vacate that other station
+  for (const otherCourt of FACILITY_COURTS) {
+    if (otherCourt !== court) {
+      const otherSt = stations[otherCourt];
+      if (otherSt && otherSt.currentMatchId) {
+        const isAssignedHere =
+          otherSt.currentMatchId === canonicalId ||
+          otherSt.currentMatchId === match.id ||
+          otherSt.currentMatchId === effectiveId ||
+          isMatchMatchingStation(
+            {
+              id: canonicalId,
+              teamAName: match.teamAName,
+              teamAPlayers: match.teamAPlayers ?? [],
+              teamBName: match.teamBName,
+              teamBPlayers: match.teamBPlayers ?? [],
+              court: otherCourt,
+              status: "live",
+              score: createInitialScore(),
+              winnerTeam: undefined,
+              startedAt: undefined,
+              endedAt: undefined,
+              officiatedBy: undefined,
+            },
+            otherSt.currentMatchId,
+            otherCourt,
+          );
+        if (isAssignedHere) {
+          stations[otherCourt] = {
+            ...otherSt,
+            status: "available",
+            currentMatchId: null,
+            dispatchedAt: null,
+          };
+          courtsToSync.push(otherCourt);
+        }
+      }
+    }
+  }
+
+  stations[court] = {
+    ...stations[court],
+    status: startImmediately ? "live" : "warmup",
+    currentMatchId: canonicalId,
+    assignedUmpire: umpire ?? stations[court].assignedUmpire,
+    dispatchedAt: now,
+    maintenanceNote: null,
+  };
+  saveCourtStations(stations, false);
+
+  for (const c of courtsToSync) {
+    const st = stations[c];
+    if (st) {
+      dbUpdateCourtStation(c, {
+        status: st.status,
+        currentMatchId: st.currentMatchId,
+        onDeckMatchId: st.onDeckMatchId,
+        assignedUmpire: st.assignedUmpire,
+        dispatchedAt: st.dispatchedAt,
+        maintenanceNote: st.maintenanceNote,
+      }).catch(() => {});
+    }
+  }
+
   let matchFound = false;
+  let vacatedMatch: LiveMatch | undefined;
   const updatedMatches = matches.map((m) => {
-    if (m.id === match.id) {
+    if (isTargetMatch(m)) {
       matchFound = true;
       return {
         ...m,
+        id: canonicalId,
         tournamentSlug: match.tournamentSlug ?? m.tournamentSlug,
         categoryId: match.categoryId ?? m.categoryId,
         stage: match.stage ?? m.stage,
         court,
+        teamAName: match.teamAName,
+        teamAPlayers: match.teamAPlayers?.length ? match.teamAPlayers : m.teamAPlayers,
+        teamAClub: match.teamAClub ?? m.teamAClub,
+        teamBName: match.teamBName,
+        teamBPlayers: match.teamBPlayers?.length ? match.teamBPlayers : m.teamBPlayers,
+        teamBClub: match.teamBClub ?? m.teamBClub,
         status: startImmediately ? ("live" as const) : ("scheduled" as const),
         startedAt: startImmediately ? (m.startedAt ?? now) : m.startedAt,
         officiatedBy: umpire ?? m.officiatedBy,
       };
     }
-    // Route any other non-final match previously assigned to this court back to Queue
-    if (m.court === court && m.status !== "final") {
+
+    // If an old legacy match has colliding ID (e.g. 1v2) with different teams, re-key it to avoid overwriting or collision
+    if ((m.id === match.id || m.id === canonicalId) && !isTargetMatch(m)) {
+      const staleCanonical = createPairMatchId(
+        m.tournamentSlug || "",
+        m.categoryId || "",
+        m.stage || "",
+        m.teamAName,
+        m.teamBName,
+      );
       return {
         ...m,
-        court: "Queue",
+        id: staleCanonical,
+        court: m.court === court ? "Queue" : m.court,
+        status: m.court === court ? ("scheduled" as const) : m.status,
       };
+    }
+
+    // Replace the active court match immediately: return any previous unfinished game to the queue and load selected matchup
+    if (m.court === court && m.status !== "final" && !isTargetMatch(m)) {
+      vacatedMatch = {
+        ...m,
+        court: "Queue",
+        status: "scheduled" as const,
+        startedAt: undefined,
+      };
+      return vacatedMatch;
     }
     return m;
   });
 
   if (!matchFound) {
     updatedMatches.push({
-      id: match.id,
+      id: canonicalId,
       tournamentSlug: match.tournamentSlug,
       categoryId: match.categoryId,
       stage: match.stage || "Pool Play",
@@ -487,13 +717,7 @@ export function dispatchMatchToCourt(
       teamBPlayers: match.teamBPlayers ?? [],
       teamBClub: match.teamBClub,
       status: startImmediately ? "live" : "scheduled",
-      score: {
-        teamAScore: 0,
-        teamBScore: 0,
-        servingTeam: "A",
-        serverNumber: 2,
-        rallies: [],
-      },
+      score: createInitialScore(),
       winnerTeam: undefined,
       startedAt: startImmediately ? now : undefined,
       endedAt: undefined,
@@ -501,34 +725,45 @@ export function dispatchMatchToCourt(
     });
   }
 
-  saveMatches(updatedMatches);
+  // 2. Save matches locally without mass cloud sync
+  saveMatches(updatedMatches, false);
 
-  // Directly save the dispatched match to Supabase for immediate cross-device sync
-  const dispatchedRecord = updatedMatches.find((m) => m.id === match.id);
+  // 3. Directly save ONLY the dispatched match (and vacated match if any) to Supabase
+  const dispatchedRecord = updatedMatches.find((m) => m.id === canonicalId);
   if (dispatchedRecord) {
     dbSaveMatch(dispatchedRecord, match.tournamentSlug).catch((err: unknown) =>
       console.warn("[Supabase] Direct match dispatch save failed:", err)
     );
   }
-
-  // Update Court Station
-  const stations = getCourtStations();
-  stations[court] = {
-    ...stations[court],
-    status: startImmediately ? "live" : "warmup",
-    currentMatchId: match.id,
-    assignedUmpire: umpire ?? stations[court].assignedUmpire,
-    dispatchedAt: now,
-    maintenanceNote: null,
-  };
-  saveCourtStations(stations);
+  if (vacatedMatch) {
+    dbSaveMatch(vacatedMatch, match.tournamentSlug).catch(() => {});
+  }
 
   // Update status of this match in dispatch queue
   const queue = getDispatchQueue();
   const updatedQueue = queue.map((q) => {
-    if (q.matchId === match.id) {
+    // Revert any previous match on this court back to queued
+    if (q.assignedCourt === court && q.matchId !== canonicalId && q.matchId !== match.id && q.status !== "completed") {
       return {
         ...q,
+        status: "queued" as const,
+        assignedCourt: null,
+      };
+    }
+
+    const ma = q.teamAName?.trim().toLowerCase();
+    const mb = q.teamBName?.trim().toLowerCase();
+    const ta = match.teamAName.trim().toLowerCase();
+    const tb = match.teamBName.trim().toLowerCase();
+    const isTargetQueue =
+      q.matchId === canonicalId ||
+      q.matchId === match.id ||
+      ((ma === ta && mb === tb) || (ma === tb && mb === ta));
+
+    if (isTargetQueue) {
+      return {
+        ...q,
+        matchId: canonicalId,
         status: startImmediately ? ("live" as const) : ("dispatched" as const),
         assignedCourt: court,
       };
@@ -677,25 +912,36 @@ export function vacateCourt(court: FacilityCourt): void {
     dispatchedAt: null,
     maintenanceNote: null,
   };
-  saveCourtStations(stations);
+  saveCourtStations(stations, false);
+  dbUpdateCourtStation(court, {
+    status: "available",
+    currentMatchId: null,
+    dispatchedAt: null,
+    maintenanceNote: null,
+  }).catch(() => {});
 
   // Unassign any active or scheduled match on this court in matches store
   const allMatches = getMatches();
   let matchesModified = false;
+  let vacatedMatch: LiveMatch | undefined;
   const updatedMatches = allMatches.map((m) => {
     if ((m.court === court || (currentMatchId && m.id === currentMatchId)) && m.status !== "final") {
       matchesModified = true;
-      return {
+      vacatedMatch = {
         ...m,
         court: "Queue",
         status: "scheduled" as const,
         startedAt: undefined,
       };
+      return vacatedMatch;
     }
     return m;
   });
   if (matchesModified) {
-    saveMatches(updatedMatches);
+    saveMatches(updatedMatches, false);
+    if (vacatedMatch) {
+      dbSaveMatch(vacatedMatch).catch(() => {});
+    }
   }
 
   // Clear coin toss flag if present
@@ -805,12 +1051,51 @@ export async function hydrateCourtStationsFromCloud(): Promise<Record<FacilityCo
     const cloudStations = await dbGetCourtStations();
     if (cloudStations && Object.keys(cloudStations).length > 0) {
       const local = getCourtStations();
+      const now = Date.now();
       for (const court of FACILITY_COURTS) {
         if (cloudStations[court]) {
-          local[court] = {
-            ...local[court],
-            ...cloudStations[court],
-          };
+          const loc = local[court];
+          const cloud = cloudStations[court];
+
+          const isLocalActive =
+            Boolean(loc &&
+            (loc.status === "live" || loc.status === "warmup") &&
+            loc.currentMatchId);
+
+          const isCloudIdleOrNull =
+            !cloud ||
+            cloud.status === "available" ||
+            cloud.status === "idle" ||
+            !cloud.currentMatchId;
+
+          // If local station is actively live or in warm-up, and cloud is idle / has no match:
+          // Local is the source of truth! Do NOT wipe out local with stale cloud idle.
+          // Heal Supabase by pushing local active state to the database.
+          if (isLocalActive && isCloudIdleOrNull && loc) {
+            dbUpdateCourtStation(court, {
+              status: loc.status,
+              currentMatchId: loc.currentMatchId,
+              onDeckMatchId: loc.onDeckMatchId,
+              assignedUmpire: loc.assignedUmpire,
+              dispatchedAt: loc.dispatchedAt,
+              maintenanceNote: loc.maintenanceNote,
+            }).catch(() => {});
+            continue;
+          }
+
+          // If cloud has an active match, check if cloud is newer or different
+          const isRecentLocalDispatch =
+            isLocalActive &&
+            loc?.dispatchedAt &&
+            (!cloud.dispatchedAt || loc.dispatchedAt >= cloud.dispatchedAt);
+
+          if (!isRecentLocalDispatch || !isLocalActive) {
+            local[court] = {
+              ...local[court],
+              ...cloud,
+              activeBracket: loc?.activeBracket || cloud.activeBracket || "all",
+            };
+          }
         }
       }
       saveCourtStations(local, false);
@@ -1142,13 +1427,53 @@ export function isSamePerson(
   return true;
 }
 
+/* ─────────────────────────────────────────────
+   Short-lived read caches for hot-path conflict checks.
+   checkRestPeriodConflict / checkSimultaneousPlayConflict are invoked
+   several times per queue item on every render; without caching each call
+   re-parses every match, station, queue item and drawn group from storage,
+   which locks up the main thread on the Dispatch screen.
+───────────────────────────────────────────── */
+
+const READ_CACHE_TTL_MS = 1000;
+let _matchesSnapshot: { at: number; data: LiveMatch[] } | null = null;
+const _participantsCache = new Map<string, { at: number; data: ActivePlayEngagement[] }>();
+
+function invalidateReadCaches(): void {
+  _matchesSnapshot = null;
+  _participantsCache.clear();
+}
+
+if (typeof window !== "undefined") {
+  for (const evt of [
+    "storage",
+    "dv_matches_updated",
+    "dv_live_matches_updated",
+    "dv_court_stations_updated",
+    "dv_dispatch_queue_updated",
+    "dv_drawn_groups_updated",
+  ]) {
+    window.addEventListener(evt, invalidateReadCaches);
+  }
+}
+
+function getMatchesSnapshot(): LiveMatch[] {
+  const now = Date.now();
+  if (_matchesSnapshot && now - _matchesSnapshot.at < READ_CACHE_TTL_MS) {
+    return _matchesSnapshot.data;
+  }
+  const data = getMatches();
+  _matchesSnapshot = { at: Date.now(), data };
+  return data;
+}
+
 export function checkRestPeriodConflict(
   teamName: string,
   players?: string[],
   thresholdMinutes = 20,
   club?: string,
 ): RestWarning | null {
-  const matches = getMatches();
+  const matches = getMatchesSnapshot();
   const now = Date.now();
   const cleanTeam = teamName.trim().toLowerCase();
   const cleanPlayers = (players ?? []).map((p) => p.trim()).filter(Boolean);
@@ -1228,8 +1553,19 @@ export type ActivePlayEngagement = {
 };
 
 export function getAllActiveParticipants(tournamentSlug?: string): ActivePlayEngagement[] {
+  const key = tournamentSlug ?? "";
+  const cached = _participantsCache.get(key);
+  if (cached && Date.now() - cached.at < READ_CACHE_TTL_MS) {
+    return cached.data;
+  }
+  const data = computeAllActiveParticipants();
+  _participantsCache.set(key, { at: Date.now(), data });
+  return data;
+}
+
+function computeAllActiveParticipants(): ActivePlayEngagement[] {
   const stations = getCourtStations();
-  const matches = getMatches();
+  const matches = getMatchesSnapshot();
   const queue = getDispatchQueue();
   const results: ActivePlayEngagement[] = [];
   const processedCourtMatchIds = new Set<string>();
@@ -1302,7 +1638,11 @@ export function getAllActiveParticipants(tournamentSlug?: string): ActivePlayEng
               for (let t1 = 0; t1 < teams.length; t1++) {
                 for (let t2 = t1 + 1; t2 < teams.length; t2++) {
                   const subId = `${g.letter}-${t1 + 1}v${t2 + 1}`;
-                  if (matchId.includes(subId)) {
+                  const normA = (teams[t1].name || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
+                  const normB = (teams[t2].name || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
+                  const pair1 = `${normA}-vs-${normB}`;
+                  const pair2 = `${normB}-vs-${normA}`;
+                  if (matchId.includes(subId) || matchId.includes(pair1) || matchId.includes(pair2)) {
                     return {
                       teamAName: teams[t1].name,
                       teamAPlayers: teams[t1].players ?? [],

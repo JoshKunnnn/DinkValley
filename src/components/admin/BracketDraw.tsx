@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import type { Team, Tournament, Category } from "@/data/tournaments";
-import { syncDrawnBracketsToLiveMatches, purgeMatchesForCategory } from "@/lib/match-store";
+import { syncDrawnBracketsToLiveMatches, purgeMatchesForCategory, createPairMatchId } from "@/lib/match-store";
 import { bulkSetTeamsInCategory, deleteAllTeamsInCategory, getTournaments } from "@/lib/tournament-store";
 import { generateMockTeams, generate32Teams } from "@/lib/team-generator";
 import { addMatchesToQueue, purgeQueueForCategory, getDispatchQueue } from "@/lib/court-dispatch";
@@ -113,7 +113,7 @@ export function saveDrawnGroups(
         for (let j = i + 1; j < teams.length; j++) {
           const teamA = teams[i]!;
           const teamB = teams[j]!;
-          const matchId = `live-${tournamentSlug}-${categoryId}-${group.letter}-${i + 1}v${j + 1}`;
+          const matchId = createPairMatchId(tournamentSlug, categoryId, `Bracket ${group.letter}`, teamA.name, teamB.name);
           const aName = teamA.name.trim().toLowerCase();
           const bName = teamB.name.trim().toLowerCase();
 
@@ -163,7 +163,6 @@ export function getDrawnGroups(tournamentSlug: string, categoryId: string): Brac
     if (raw) {
       const parsed = JSON.parse(raw) as BracketGroup[];
       if (Array.isArray(parsed) && parsed.length > 0) {
-        dbSaveDrawnGroups(tournamentSlug, categoryId, parsed).catch(() => {});
         return parsed;
       }
     }
