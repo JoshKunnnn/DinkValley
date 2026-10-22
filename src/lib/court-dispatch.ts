@@ -15,6 +15,12 @@ import {
   dbDeleteDispatchQueue,
   getCachedDispatchQueue,
   dbSaveMatch,
+  dbDeleteMatch,
+  dbGetMatches,
+  getStationLocalWriteAt,
+  markStationLocalWrite,
+  getOfflineScoreJournal,
+  broadcastDispatchAlert,
 } from "./supabase-service";
 import { isMatchInSameBracket } from "./bracket-utils";
 
@@ -159,9 +165,13 @@ export function saveCourtStations(
   syncToCloud: boolean | FacilityCourt = false,
 ): void {
   try {
-    localStorage.setItem(STATIONS_KEY, JSON.stringify(stations));
-    window.dispatchEvent(new Event("storage"));
-    window.dispatchEvent(new Event("dv_court_stations_updated"));
+    const serialized = JSON.stringify(stations);
+    // Only write and broadcast when something actually changed; unconditional events
+    // here used to cascade into reload -> reconcile -> save loops on every 3s poll.
+    if (localStorage.getItem(STATIONS_KEY) !== serialized) {
+      localStorage.setItem(STATIONS_KEY, serialized);
+      window.dispatchEvent(new Event("dv_court_stations_updated"));
+    }
   } catch {
     // ignore
   }
@@ -232,16 +242,8 @@ export function reconcileCourtStations(
         activeMatch = matches.find((m) => m.status !== "final" && isMatchMatchingStation(m, st.currentMatchId, c)) || null;
       }
 
-      // If station has currentMatchId but matches list is missing it or it concluded, cleanly reset station
-      if (!activeMatch && st.currentMatchId) {
-        stations[c] = {
-          ...st,
-          status: "available",
-          currentMatchId: null,
-          dispatchedAt: null,
-        };
-        modified = true;
-      }
+      // If the assigned match is not in the local store yet (cloud match row still in flight),
+      // KEEP the station. Wiping it here is what made dispatched matches vanish on the umpire side.
 
       if (activeMatch && activeMatch.status !== "final") {
         if (st.currentMatchId !== activeMatch.id || (activeMatch.status === "live" && st.status !== "live")) {
@@ -261,7 +263,8 @@ export function reconcileCourtStations(
           }
         }
       } else if (activeMatch && activeMatch.status === "final") {
-        // Concluded match on court
+        // Concluded match still holding the court: free it locally AND in the cloud so
+        // hydration does not flip it back on the next poll.
         stations[c] = {
           ...st,
           status: "available",
@@ -269,22 +272,18 @@ export function reconcileCourtStations(
           dispatchedAt: null,
         };
         modified = true;
+        dbUpdateCourtStation(c, {
+          status: "available",
+          currentMatchId: null,
+          dispatchedAt: null,
+        }).catch(() => {});
       }
       // Note: If no active match could be found or restored, do NOT wipe an active station!
       // This protects courts against timer-based state loss and hallucination.
     } else if (st.status === "available") {
-      const liveOnCourt = matches.find(
-        (m) => m.court === c && (m.status === "live" || m.status === "scheduled")
-      );
-      if (liveOnCourt) {
-        stations[c] = {
-          ...st,
-          currentMatchId: liveOnCourt.id,
-          status: liveOnCourt.status === "live" ? "live" : "warmup",
-          dispatchedAt: liveOnCourt.startedAt ?? Date.now(),
-        };
-        modified = true;
-      } else if (st.currentMatchId) {
+      // Never promote a match onto an idle court just because its `court` field says so.
+      // Stale match rows were the main source of hallucinated court assignments.
+      if (st.currentMatchId) {
         stations[c] = {
           ...st,
           currentMatchId: null,
@@ -295,33 +294,10 @@ export function reconcileCourtStations(
     }
   }
 
-  // Reconcile matches against court stations
-  for (let i = 0; i < matches.length; i++) {
-    const m = matches[i];
-    if (!m || m.status === "final") continue;
-
-    if (m.court && FACILITY_COURTS.includes(m.court as FacilityCourt)) {
-      const st = stations[m.court as FacilityCourt];
-      const isStationAssigned = st && (st.currentMatchId === m.id || isMatchMatchingStation(m, st.currentMatchId, m.court)) && st.status !== "available";
-
-      // Only move to Queue if the court station is actively occupied by a DIFFERENT matchup
-      if (!isStationAssigned && st && st.currentMatchId && st.status !== "available") {
-        if (isMatchMatchingStation(m, st.currentMatchId, m.court)) {
-          // This match matches the station! Re-align its id with station
-          matches[i] = { ...m, id: st.currentMatchId };
-          modified = true;
-        } else {
-          matches[i] = {
-            ...m,
-            court: "Queue",
-            status: "scheduled",
-            startedAt: undefined,
-          };
-          modified = true;
-        }
-      }
-    }
-  }
+  // Note: matches are intentionally NOT re-routed here. Display layers resolve the court's
+  // match strictly through station.currentMatchId, and enforceFourCourtCapacity already
+  // de-duplicates court claims. Rewriting match courts locally fought with the cloud merge
+  // and caused a court flip-flop (and a localStorage write + event) on every poll.
 
   if (modified && typeof window !== "undefined") {
     try {
@@ -610,23 +586,27 @@ export function dispatchMatchToCourt(
     maintenanceNote: null,
   };
   saveCourtStations(stations, false);
+  // The cloud push waits for the match row (below); protect the local assignment meanwhile
+  for (const c of courtsToSync) markStationLocalWrite(c);
 
-  for (const c of courtsToSync) {
-    const st = stations[c];
-    if (st) {
-      dbUpdateCourtStation(c, {
-        status: st.status,
-        currentMatchId: st.currentMatchId,
-        onDeckMatchId: st.onDeckMatchId,
-        assignedUmpire: st.assignedUmpire,
-        dispatchedAt: st.dispatchedAt,
-        maintenanceNote: st.maintenanceNote,
-      }).catch(() => {});
+  const pushStationsToCloud = () => {
+    for (const c of courtsToSync) {
+      const st = stations[c];
+      if (st) {
+        dbUpdateCourtStation(c, {
+          status: st.status,
+          currentMatchId: st.currentMatchId,
+          onDeckMatchId: st.onDeckMatchId,
+          assignedUmpire: st.assignedUmpire,
+          dispatchedAt: st.dispatchedAt,
+          maintenanceNote: st.maintenanceNote,
+        }).catch(() => {});
+      }
     }
-  }
+  };
 
   let matchFound = false;
-  let vacatedMatch: LiveMatch | undefined;
+  const vacatedMatches: LiveMatch[] = [];
   const updatedMatches = matches.map((m) => {
     if (isTargetMatch(m)) {
       matchFound = true;
@@ -658,23 +638,28 @@ export function dispatchMatchToCourt(
         m.teamAName,
         m.teamBName,
       );
-      return {
+      const staleVacated = {
         ...m,
         id: staleCanonical,
         court: m.court === court ? "Queue" : m.court,
         status: m.court === court ? ("scheduled" as const) : m.status,
       };
+      if (m.court === court) {
+        vacatedMatches.push(staleVacated);
+      }
+      return staleVacated;
     }
 
-    // Replace the active court match immediately: return any previous unfinished game to the queue and load selected matchup
+    // Replace the active court match immediately: return all previous unfinished games to the queue
     if (m.court === court && m.status !== "final" && !isTargetMatch(m)) {
-      vacatedMatch = {
+      const vacated = {
         ...m,
         court: "Queue",
         status: "scheduled" as const,
         startedAt: undefined,
       };
-      return vacatedMatch;
+      vacatedMatches.push(vacated);
+      return vacated;
     }
     return m;
   });
@@ -704,15 +689,42 @@ export function dispatchMatchToCourt(
   // 2. Save matches locally without mass cloud sync
   saveMatches(updatedMatches, false);
 
-  // 3. Directly save ONLY the dispatched match (and vacated match if any) to Supabase
+  // 3. Save the dispatched match row to Supabase FIRST, then broadcast the station.
+  // Umpire devices react to the station event; if the station arrives before the match row,
+  // they have nothing to render (or fall back to a stale match). Ordering removes that race.
   const dispatchedRecord = updatedMatches.find((m) => m.id === canonicalId);
+  const matchWrites: Promise<unknown>[] = [];
   if (dispatchedRecord) {
-    dbSaveMatch(dispatchedRecord, match.tournamentSlug).catch((err: unknown) =>
-      console.warn("[Supabase] Direct match dispatch save failed:", err)
+    matchWrites.push(
+      dbSaveMatch(dispatchedRecord, match.tournamentSlug).catch((err: unknown) =>
+        console.warn("[Supabase] Direct match dispatch save failed:", err)
+      )
     );
   }
-  if (vacatedMatch) {
-    dbSaveMatch(vacatedMatch, match.tournamentSlug).catch(() => {});
+  for (const vm of vacatedMatches) {
+    matchWrites.push(
+      dbSaveMatch(vm, match.tournamentSlug).catch((err: unknown) =>
+        console.warn("[Supabase] Vacated match save failed:", err)
+      )
+    );
+  }
+  // Synchronize stations to cloud immediately alongside match record save
+  pushStationsToCloud();
+  if (matchWrites.length > 0) {
+    Promise.all(matchWrites)
+      .then(() => {
+        pushStationsToCloud();
+        broadcastDispatchAlert({
+          court,
+          matchId: canonicalId,
+          teamAName: match.teamAName,
+          teamBName: match.teamBName,
+          stage: match.stage,
+          umpire: umpire ?? stations[court].assignedUmpire ?? undefined,
+          match: dispatchedRecord,
+        });
+      })
+      .catch(() => {});
   }
 
   // Update status of this match in dispatch queue
@@ -749,7 +761,7 @@ export function dispatchMatchToCourt(
 
   saveDispatchQueue(updatedQueue);
 
-  // Emit Desk Announcement
+  // Emit Desk Announcement & Broadcast Realtime Alert to All Connected Devices
   const announcement: DeskAnnouncement = {
     id: `ann-${now}`,
     court,
@@ -760,6 +772,16 @@ export function dispatchMatchToCourt(
   };
   setLatestAnnouncement(announcement);
   playDeskChime();
+
+  broadcastDispatchAlert({
+    court,
+    matchId: canonicalId,
+    teamAName: match.teamAName,
+    teamBName: match.teamBName,
+    stage: match.stage,
+    umpire: umpire ?? stations[court].assignedUmpire ?? undefined,
+    match: dispatchedRecord,
+  });
 }
 
 /**
@@ -833,13 +855,32 @@ export function autoDispatchNext(court: FacilityCourt, tournamentSlug?: string, 
   const activeBracket = station?.activeBracket || "all";
 
   const queue = getDispatchQueue();
-  const pending = queue
+  let pending = queue
     .filter((q) => q.status === "queued" || q.status === "on_deck")
     .filter((q) => !tournamentSlug || !q.tournamentSlug || q.tournamentSlug === tournamentSlug)
     .filter((q) => isStageMatchingBracket(q.stage, activeBracket))
     .filter((q) => !checkSimultaneousPlayConflict(q.teamAName, q.teamAPlayers, q.tournamentSlug || tournamentSlug, q.teamAClub) && !checkSimultaneousPlayConflict(q.teamBName, q.teamBPlayers, q.tournamentSlug || tournamentSlug, q.teamBClub))
     .filter((q) => isMatchInSameBracket(q.tournamentSlug || tournamentSlug || "", q.categoryId || "", q.stage, q.teamAName, q.teamBName))
     .sort((a, b) => a.priority - b.priority);
+
+  // If court has a dedicated bracket filter, but all matches for that bracket are finished/exhausted,
+  // allow auto-dispatch to fall back to remaining unplayed matches across any bracket
+  if (pending.length === 0 && activeBracket !== "all") {
+    const hasRemainingInDedicatedBracket = queue.some(
+      (q) =>
+        (q.status === "queued" || q.status === "on_deck") &&
+        (!tournamentSlug || !q.tournamentSlug || q.tournamentSlug === tournamentSlug) &&
+        isStageMatchingBracket(q.stage, activeBracket),
+    );
+    if (!hasRemainingInDedicatedBracket) {
+      pending = queue
+        .filter((q) => q.status === "queued" || q.status === "on_deck")
+        .filter((q) => !tournamentSlug || !q.tournamentSlug || q.tournamentSlug === tournamentSlug)
+        .filter((q) => !checkSimultaneousPlayConflict(q.teamAName, q.teamAPlayers, q.tournamentSlug || tournamentSlug, q.teamAClub) && !checkSimultaneousPlayConflict(q.teamBName, q.teamBPlayers, q.tournamentSlug || tournamentSlug, q.teamBClub))
+        .filter((q) => isMatchInSameBracket(q.tournamentSlug || tournamentSlug || "", q.categoryId || "", q.stage, q.teamAName, q.teamBName))
+        .sort((a, b) => a.priority - b.priority);
+    }
+  }
 
   if (pending.length === 0) return null;
 
@@ -870,7 +911,7 @@ export function setCourtLive(court: FacilityCourt, matchId?: string): void {
     status: "live",
     currentMatchId: matchId ?? stations[court].currentMatchId,
   };
-  saveCourtStations(stations);
+  saveCourtStations(stations, court);
 }
 
 /**
@@ -899,24 +940,25 @@ export function vacateCourt(court: FacilityCourt): void {
   // Unassign any active or scheduled match on this court in matches store
   const allMatches = getMatches();
   let matchesModified = false;
-  let vacatedMatch: LiveMatch | undefined;
+  const vacatedMatches: LiveMatch[] = [];
   const updatedMatches = allMatches.map((m) => {
     if ((m.court === court || (currentMatchId && m.id === currentMatchId)) && m.status !== "final") {
       matchesModified = true;
-      vacatedMatch = {
+      const v = {
         ...m,
         court: "Queue",
         status: "scheduled" as const,
         startedAt: undefined,
       };
-      return vacatedMatch;
+      vacatedMatches.push(v);
+      return v;
     }
     return m;
   });
   if (matchesModified) {
     saveMatches(updatedMatches, false);
-    if (vacatedMatch) {
-      dbSaveMatch(vacatedMatch).catch(() => {});
+    for (const vm of vacatedMatches) {
+      dbSaveMatch(vm).catch(() => {});
     }
   }
 
@@ -962,7 +1004,7 @@ export function setCourtMaintenance(court: FacilityCourt, inMaintenance: boolean
     maintenanceNote: inMaintenance ? (note ?? "Court maintenance in progress") : null,
     currentMatchId: inMaintenance ? null : stations[court].currentMatchId,
   };
-  saveCourtStations(stations);
+  saveCourtStations(stations, court);
 }
 
 /**
@@ -974,7 +1016,7 @@ export function setCourtOnDeck(court: FacilityCourt, matchId: string | null): vo
     ...stations[court],
     onDeckMatchId: matchId,
   };
-  saveCourtStations(stations);
+  saveCourtStations(stations, court);
 
   const queue = getDispatchQueue();
   let modified = false;
@@ -1004,7 +1046,7 @@ export function claimCourtStation(court: FacilityCourt, umpire: string): void {
     ...stations[court],
     assignedUmpire: umpire,
   };
-  saveCourtStations(stations);
+  saveCourtStations(stations, court);
 }
 
 /**
@@ -1016,7 +1058,7 @@ export function releaseCourtStation(court: FacilityCourt): void {
     ...stations[court],
     assignedUmpire: null,
   };
-  saveCourtStations(stations);
+  saveCourtStations(stations, court);
 }
 
 /**
@@ -1029,76 +1071,29 @@ export async function hydrateCourtStationsFromCloud(): Promise<Record<FacilityCo
       const local = getCourtStations();
       const now = Date.now();
       for (const court of FACILITY_COURTS) {
-        if (cloudStations[court]) {
-          const loc = local[court];
-          const cloud = cloudStations[court];
+        const cloud = cloudStations[court];
+        if (!cloud) continue;
+        const loc = local[court];
 
-          const isLocalActive =
-            Boolean(loc &&
-            (loc.status === "live" || loc.status === "warmup") &&
-            loc.currentMatchId);
-
-          const isCloudIdleOrNull =
-            !cloud ||
-            cloud.status === "available" ||
-            cloud.status === "idle" ||
-            !cloud.currentMatchId;
-
-          // Check if local's assigned match is concluded or missing
-          const allLocalMatches = getMatches();
-          const activeMatchInStore = isLocalActive ? allLocalMatches.find((m) => m.id === loc?.currentMatchId) : null;
-          const isLocalFinishedOrMissing = isLocalActive && (!activeMatchInStore || activeMatchInStore.status === "final");
-
-          if (isLocalFinishedOrMissing) {
-            local[court] = {
-              ...local[court],
-              status: "available",
-              currentMatchId: null,
-              dispatchedAt: null,
-              assignedUmpire: null,
-            };
-            continue;
-          }
-
-          // If local station is active and cloud is idle / available:
-          // If local dispatch occurred more than 4 seconds ago, adopt cloud idle state (e.g. vacated by umpire)
-          if (isLocalActive && isCloudIdleOrNull && loc) {
-            const timeSinceLocalDispatch = loc.dispatchedAt ? now - loc.dispatchedAt : Infinity;
-            if (timeSinceLocalDispatch > 4000) {
-              local[court] = {
-                ...local[court],
-                status: "available",
-                currentMatchId: null,
-                dispatchedAt: null,
-                assignedUmpire: null,
-              };
-              continue;
-            }
-            dbUpdateCourtStation(court, {
-              status: loc.status,
-              currentMatchId: loc.currentMatchId,
-              onDeckMatchId: loc.onDeckMatchId,
-              assignedUmpire: loc.assignedUmpire,
-              dispatchedAt: loc.dispatchedAt,
-              maintenanceNote: loc.maintenanceNote,
-            }).catch(() => {});
-            continue;
-          }
-
-          // If cloud has an active match, check if cloud is newer or different
-          const isRecentLocalDispatch =
-            isLocalActive &&
-            loc?.dispatchedAt &&
-            (!cloud.dispatchedAt || loc.dispatchedAt >= cloud.dispatchedAt);
-
-          if (!isRecentLocalDispatch || !isLocalActive) {
-            local[court] = {
-              ...local[court],
-              ...cloud,
-              activeBracket: loc?.activeBracket || cloud.activeBracket || "all",
-            };
-          }
+        // The cloud row is the single source of truth for station assignment.
+        // The only exception: THIS device wrote the station in the last few seconds and
+        // the write has not echoed back yet. In that window keep local so the court does
+        // not blink. We never re-push local state from here: doing so let any device with
+        // a stale copy resurrect vacated courts (the old 4-second rule).
+        const sinceLocalWrite = now - getStationLocalWriteAt(court);
+        const cloudMatchesLocal =
+          (cloud.currentMatchId ?? null) === (loc?.currentMatchId ?? null) &&
+          cloud.status === loc?.status;
+        if (sinceLocalWrite < 6000 && !cloudMatchesLocal) {
+          continue;
         }
+
+        local[court] = {
+          ...local[court],
+          ...cloud,
+          // activeBracket is a desk-only preference that is not stored in the cloud row
+          activeBracket: loc?.activeBracket || cloud.activeBracket || "all",
+        };
       }
       saveCourtStations(local, false);
       return local;
@@ -1954,6 +1949,41 @@ export function reorderCategorySequence(
  * 3. Matches designated as on-deck on a facility court station
  * 4. Matches marked live on a facility court
  */
+/**
+ * Resolves the match actively occupying a facility court station.
+ * - Prevents hallucinating stale scheduled matches when a court is available or in maintenance.
+ * - Resolves assigned matches by direct ID, canonical ID, or team name matching.
+ * - Falls back to live match explicitly on the court if station is marked live/warmup.
+ */
+export function findMatchForCourtStation(
+  court: FacilityCourt,
+  station: CourtStation | undefined,
+  matches: LiveMatch[],
+): LiveMatch | null {
+  if (!station) return null;
+
+  // 1. If station has an assigned match ID, find by exact ID or fuzzy matching
+  if (station.currentMatchId) {
+    const direct = matches.find((m) => m.id === station.currentMatchId && m.status !== "final");
+    if (direct) return direct;
+
+    const matching = matches.find(
+      (m) => m.status !== "final" && isMatchMatchingStation(m, station.currentMatchId, court),
+    );
+    if (matching) return matching;
+  }
+
+  // 2. If station is explicitly active (live or warmup), check for an active match assigned to this court
+  if (station.status === "live" || station.status === "warmup") {
+    const active = matches.find((m) => m.court === court && (m.status === "live" || m.status === "scheduled"));
+    if (active) return active;
+  }
+
+  // 3. If station is available, maintenance, or idle, it has NO active match.
+  // Never pull a random scheduled match just because its court property matches.
+  return null;
+}
+
 export function isConfirmedDispatchedMatch(
   m: LiveMatch,
   stations?: Record<FacilityCourt, CourtStation> | null,
@@ -1963,18 +1993,23 @@ export function isConfirmedDispatchedMatch(
   const currentStations = stations ?? getCourtStations();
   for (const c of FACILITY_COURTS) {
     const st = currentStations[c];
-    if (st?.currentMatchId === m.id) return true;
+    if (st?.currentMatchId === m.id || (st?.currentMatchId && isMatchMatchingStation(m, st.currentMatchId, c))) return true;
     if (st?.onDeckMatchId === m.id) return true;
   }
 
   if (
-    m.status === "live" &&
     m.court &&
     m.court !== "Queue" &&
-    (FACILITY_COURTS as readonly string[]).includes(m.court as FacilityCourt) &&
-    currentStations[m.court as FacilityCourt]?.currentMatchId === m.id
+    (FACILITY_COURTS as readonly string[]).includes(m.court as FacilityCourt)
   ) {
-    return true;
+    const st = currentStations[m.court as FacilityCourt];
+    // Reject only if station is explicitly occupied by a different active matchup
+    if (st?.currentMatchId && st.currentMatchId !== m.id && !isMatchMatchingStation(m, st.currentMatchId, m.court)) {
+      return false;
+    }
+    if (m.status === "live" || m.status === "scheduled") {
+      return true;
+    }
   }
 
   return false;
@@ -1985,10 +2020,20 @@ export function isConfirmedDispatchedMatch(
  * Clears orphaned station match IDs, purges phantom matches, and pulls fresh state from Supabase.
  */
 export async function healAndSyncDispatchStations(): Promise<Record<FacilityCourt, CourtStation>> {
-  const currentMatches = getMatches();
+  // Pull fresh stations and matches from the cloud first, so a court is only cleared when
+  // its match is genuinely missing or finished everywhere (not just absent from this browser).
+  await hydrateCourtStationsFromCloud();
+  let cloudMatches: LiveMatch[] = [];
+  try {
+    cloudMatches = await dbGetMatches();
+  } catch {
+    cloudMatches = [];
+  }
+  const currentMatches = [...getMatches(), ...cloudMatches];
+  const finalIds = new Set(currentMatches.filter((m) => m.status === "final").map((m) => m.id));
   const validLiveIds = new Set(
     currentMatches
-      .filter((m) => m.status === "live" || m.status === "scheduled")
+      .filter((m) => (m.status === "live" || m.status === "scheduled") && !finalIds.has(m.id))
       .map((m) => m.id)
   );
 
@@ -2021,6 +2066,429 @@ export async function healAndSyncDispatchStations(): Promise<Record<FacilityCour
 
   const synced = await hydrateCourtStationsFromCloud();
   return synced;
+}
+
+export type DispatchAnomalyType =
+  | "orphan_station"
+  | "ghost_court_claim"
+  | "status_mismatch"
+  | "multiple_court_claims"
+  | "simultaneous_conflict"
+  | "umpire_mismatch"
+  | "cloud_station_divergence";
+
+export interface DispatchAuditAnomaly {
+  id: string;
+  court?: FacilityCourt | string | undefined;
+  type: DispatchAnomalyType;
+  severity: "error" | "warning" | "info";
+  title: string;
+  description: string;
+  fixable: boolean;
+  matchId?: string | undefined;
+  details?: Record<string, any> | undefined;
+}
+
+export interface DispatchAuditResult {
+  timestamp: number;
+  healthy: boolean;
+  score: number;
+  anomalies: DispatchAuditAnomaly[];
+  summary: {
+    totalCourts: number;
+    activeCourts: number;
+    availableCourts: number;
+    maintenanceCourts: number;
+    totalMatchesInMemory: number;
+    liveMatchesCount: number;
+    queueCount: number;
+  };
+}
+
+/**
+ * Performs a comprehensive multi-point diagnostic audit across all 4 court stations,
+ * in-memory matches, cloud status, and the dispatch queue to pinpoint bugs and hallucinations.
+ */
+export function auditDispatchSystem(
+  stations: Record<FacilityCourt, CourtStation>,
+  matches: LiveMatch[],
+  queue: QueueItem[],
+  cloudStations?: Record<FacilityCourt, CourtStation> | null,
+): DispatchAuditResult {
+  const anomalies: DispatchAuditAnomaly[] = [];
+  const now = Date.now();
+
+  let activeCourts = 0;
+  let availableCourts = 0;
+  let maintenanceCourts = 0;
+
+  for (const court of FACILITY_COURTS) {
+    const st = stations[court];
+    if (!st) continue;
+
+    if (st.status === "live" || st.status === "warmup") activeCourts++;
+    else if (st.status === "available") availableCourts++;
+    else if (st.status === "maintenance") maintenanceCourts++;
+
+    // 1. Station has currentMatchId, verify match exists and is not final
+    if (st.currentMatchId) {
+      const match = matches.find((m) => m.id === st.currentMatchId);
+      const fuzzyMatch = !match ? matches.find((m) => isMatchMatchingStation(m, st.currentMatchId, court)) : null;
+      const effectiveMatch = match || fuzzyMatch;
+
+      if (!effectiveMatch) {
+        anomalies.push({
+          id: `orphan-${court}-${st.currentMatchId}`,
+          court,
+          type: "orphan_station",
+          severity: "error",
+          title: `Orphaned Match on ${court}`,
+          description: `Station ${court} is assigned to match ID "${st.currentMatchId}", but no such match exists in memory.`,
+          fixable: true,
+          matchId: st.currentMatchId,
+        });
+      } else if (effectiveMatch.status === "final") {
+        anomalies.push({
+          id: `concluded-holding-${court}-${effectiveMatch.id}`,
+          court,
+          type: "orphan_station",
+          severity: "warning",
+          title: `Finished Match Occupying ${court}`,
+          description: `${court} is holding match "${effectiveMatch.teamAName} vs ${effectiveMatch.teamBName}" which concluded as final.`,
+          fixable: true,
+          matchId: effectiveMatch.id,
+        });
+      } else {
+        // Check status mismatch
+        if (st.status === "live" && effectiveMatch.status !== "live") {
+          anomalies.push({
+            id: `status-mismatch-${court}-${effectiveMatch.id}`,
+            court,
+            type: "status_mismatch",
+            severity: "info",
+            title: `Station/Match Status Mismatch on ${court}`,
+            description: `Station is marked "live", but match status is "${effectiveMatch.status}".`,
+            fixable: true,
+            matchId: effectiveMatch.id,
+          });
+        }
+
+        // Check umpire mismatch
+        if (st.assignedUmpire && effectiveMatch.officiatedBy && st.assignedUmpire !== effectiveMatch.officiatedBy) {
+          anomalies.push({
+            id: `umpire-mismatch-${court}`,
+            court,
+            type: "umpire_mismatch",
+            severity: "info",
+            title: `Official Mismatch on ${court}`,
+            description: `Station claimed by "${st.assignedUmpire}", but match row indicates "${effectiveMatch.officiatedBy}".`,
+            fixable: true,
+            matchId: effectiveMatch.id,
+          });
+        }
+      }
+    }
+
+    // 2. Check for multiple matches claiming this court
+    const matchesClaimingCourt = matches.filter(
+      (m) => m.court === court && (m.status === "live" || m.status === "scheduled"),
+    );
+    if (matchesClaimingCourt.length > 1) {
+      anomalies.push({
+        id: `multi-claim-${court}`,
+        court,
+        type: "multiple_court_claims",
+        severity: "error",
+        title: `Multiple Matches Claiming ${court}`,
+        description: `${matchesClaimingCourt.length} matches in store have court="${court}" simultaneously (${matchesClaimingCourt.map((m) => m.id).join(", ")}).`,
+        fixable: true,
+      });
+    }
+
+    // 3. Ghost court claim: A match has court === court, but station is available or occupied by different match
+    for (const m of matchesClaimingCourt) {
+      if (
+        st.status === "available" ||
+        st.status === "maintenance" ||
+        (st.currentMatchId && st.currentMatchId !== m.id && !isMatchMatchingStation(m, st.currentMatchId, court))
+      ) {
+        anomalies.push({
+          id: `ghost-claim-${m.id}-${court}`,
+          court,
+          type: "ghost_court_claim",
+          severity: "warning",
+          title: `Ghost Match Claim on ${court}`,
+          description: `Match "${m.teamAName} vs ${m.teamBName}" (${m.id}) still claims ${court}, but station is ${st.status}.`,
+          fixable: true,
+          matchId: m.id,
+        });
+      }
+    }
+
+    // 4. Cloud station divergence (if cloudStations was supplied)
+    if (cloudStations && cloudStations[court]) {
+      const cst = cloudStations[court];
+      const statusDiff = cst.status !== st.status;
+      const matchDiff = (cst.currentMatchId ?? null) !== (st.currentMatchId ?? null);
+      if (statusDiff || matchDiff) {
+        anomalies.push({
+          id: `divergence-${court}`,
+          court,
+          type: "cloud_station_divergence",
+          severity: "warning",
+          title: `Cloud/Local Divergence on ${court}`,
+          description: `Local (${st.status}, match: ${st.currentMatchId || "none"}) diverges from Cloud (${cst.status}, match: ${cst.currentMatchId || "none"}).`,
+          fixable: true,
+          details: { local: st, cloud: cst },
+        });
+      }
+    }
+  }
+
+  // 5. Simultaneous play conflicts in Queue
+  for (const q of queue) {
+    if (q.status === "queued" || q.status === "on_deck") {
+      const liveA = checkSimultaneousPlayConflict(q.teamAName, q.teamAPlayers, q.tournamentSlug, q.teamAClub);
+      const liveB = checkSimultaneousPlayConflict(q.teamBName, q.teamBPlayers, q.tournamentSlug, q.teamBClub);
+      if (liveA || liveB) {
+        const conflict = liveA || liveB;
+        anomalies.push({
+          id: `conflict-${q.matchId}`,
+          court: conflict?.court,
+          type: "simultaneous_conflict",
+          severity: "warning",
+          title: `Simultaneous Play Conflict in Queue`,
+          description: `Queued match "${q.teamAName} vs ${q.teamBName}" cannot start because ${conflict?.teamName} is actively playing on ${conflict?.court}.`,
+          fixable: false,
+          matchId: q.matchId,
+        });
+      }
+    }
+  }
+
+  const errorCount = anomalies.filter((a) => a.severity === "error").length;
+  const warningCount = anomalies.filter((a) => a.severity === "warning").length;
+  const score = Math.max(0, 100 - errorCount * 25 - warningCount * 10);
+
+  return {
+    timestamp: now,
+    healthy: errorCount === 0 && warningCount === 0,
+    score,
+    anomalies,
+    summary: {
+      totalCourts: FACILITY_COURTS.length,
+      activeCourts,
+      availableCourts,
+      maintenanceCourts,
+      totalMatchesInMemory: matches.length,
+      liveMatchesCount: matches.filter((m) => m.status === "live").length,
+      queueCount: queue.length,
+    },
+  };
+}
+
+/**
+ * Automatically repairs and resolves detected hallucinations and orphaned assignments:
+ * - Releases finished or non-existent matches holding court stations.
+ * - Reverts phantom matches with stale court claims back to "Queue".
+ * - Synchronizes with Supabase cloud.
+ */
+export function autoHealDispatchAnomalies(
+  stations: Record<FacilityCourt, CourtStation>,
+  matches: LiveMatch[],
+): {
+  repairedStations: Record<FacilityCourt, CourtStation>;
+  repairedMatches: LiveMatch[];
+  repairedCount: number;
+} {
+  const nextStations = { ...stations };
+  let nextMatches = [...matches];
+  let repairedCount = 0;
+
+  for (const c of FACILITY_COURTS) {
+    const st = nextStations[c];
+    if (!st) continue;
+
+    // 1. If station has currentMatchId pointing to a final match or non-existent match
+    if (st.currentMatchId) {
+      const m = nextMatches.find((x) => x.id === st.currentMatchId || isMatchMatchingStation(x, st.currentMatchId, c));
+      if (!m || m.status === "final") {
+        nextStations[c] = {
+          ...st,
+          status: "available",
+          currentMatchId: null,
+          dispatchedAt: null,
+          maintenanceNote: null,
+        };
+        dbUpdateCourtStation(c, {
+          status: "available",
+          currentMatchId: null,
+          dispatchedAt: null,
+          maintenanceNote: null,
+        }).catch(() => {});
+        repairedCount++;
+      }
+    }
+
+    // 2. Clear ghost match claims where a match has court === c, but station is available or has different match
+    const activeMatchOnCourt = nextStations[c]?.currentMatchId;
+    nextMatches = nextMatches.map((m) => {
+      if (m.court === c && m.status !== "final") {
+        const isLegit =
+          activeMatchOnCourt &&
+          (m.id === activeMatchOnCourt || isMatchMatchingStation(m, activeMatchOnCourt, c));
+        if (!isLegit) {
+          repairedCount++;
+          return {
+            ...m,
+            court: "Queue",
+            status: m.status === "live" ? ("scheduled" as const) : m.status,
+            startedAt: undefined,
+          };
+        }
+      }
+      return m;
+    });
+  }
+
+  // 3. Deduplicate multiple match records for the same team pair:
+  // If multiple records exist for the same matchup (e.g. historical un-migrated zombie rows),
+  // retain the authoritative record (final, live, or higher scores) and drop the zombie duplicate.
+  const pairMap = new Map<string, LiveMatch>();
+  const deduplicatedMatches: LiveMatch[] = [];
+
+  for (const m of nextMatches) {
+    if (!m.teamAName || !m.teamBName) {
+      deduplicatedMatches.push(m);
+      continue;
+    }
+    const pair = [m.teamAName.trim().toLowerCase(), m.teamBName.trim().toLowerCase()].sort().join("::");
+    const bracket = (m.stage || "").match(/(?:bracket|pool)\s*([a-z])/i)?.[1]?.toLowerCase() || "pool";
+    const key = `${m.tournamentSlug || "event"}::${m.categoryId || "division"}::${bracket}::${pair}`;
+
+    if (!pairMap.has(key)) {
+      pairMap.set(key, m);
+      deduplicatedMatches.push(m);
+    } else {
+      const existing = pairMap.get(key)!;
+      const existingScore = (existing.score?.teamAScore ?? 0) + (existing.score?.teamBScore ?? 0);
+      const newScore = (m.score?.teamAScore ?? 0) + (m.score?.teamBScore ?? 0);
+
+      const mWins =
+        (m.status === "final" && existing.status !== "final") ||
+        (m.status === "live" && existing.status === "scheduled") ||
+        (newScore > existingScore) ||
+        (m.court && m.court !== "Queue" && (!existing.court || existing.court === "Queue"));
+
+      if (mWins) {
+        const idx = deduplicatedMatches.indexOf(existing);
+        if (idx !== -1) {
+          deduplicatedMatches[idx] = m;
+        }
+        pairMap.set(key, m);
+        if (existing.status === "scheduled") {
+          dbDeleteMatch(existing.id).catch(() => {});
+        }
+      } else {
+        if (m.status === "scheduled") {
+          dbDeleteMatch(m.id).catch(() => {});
+        }
+      }
+      repairedCount++;
+    }
+  }
+
+  nextMatches = deduplicatedMatches;
+
+  if (repairedCount > 0) {
+    saveCourtStations(nextStations, false);
+    saveMatches(nextMatches, false);
+  }
+
+  return {
+    repairedStations: nextStations,
+    repairedMatches: nextMatches,
+    repairedCount,
+  };
+}
+
+/**
+ * Hard Contingency Reset: Clears all local browser drift and restores
+ * authoritative state directly from the Supabase cloud master database.
+ */
+export async function forceCloudMasterReset(tournamentSlug?: string): Promise<{
+  success: boolean;
+  courtStations: Record<FacilityCourt, CourtStation>;
+  matchesCount: number;
+}> {
+  try {
+    if (typeof localStorage !== "undefined") {
+      localStorage.removeItem("dv_offline_score_journal");
+      localStorage.removeItem(STATIONS_KEY);
+      localStorage.removeItem("dv_live_matches");
+      localStorage.removeItem(QUEUE_KEY);
+    }
+
+    const [cloudStations, cloudMatches] = await Promise.all([
+      dbGetCourtStations(),
+      dbGetMatches(tournamentSlug),
+    ]);
+
+    if (cloudStations && Object.keys(cloudStations).length > 0) {
+      saveCourtStations(cloudStations as Record<FacilityCourt, CourtStation>, false);
+    }
+    if (cloudMatches && Array.isArray(cloudMatches)) {
+      saveMatches(cloudMatches, false);
+    }
+
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new Event("storage"));
+      window.dispatchEvent(new Event("dv_court_stations_updated"));
+      window.dispatchEvent(new Event("dv_matches_updated"));
+      window.dispatchEvent(new Event("dv_live_matches_updated"));
+      window.dispatchEvent(new Event("dv_dispatch_queue_updated"));
+    }
+
+    return {
+      success: true,
+      courtStations: getCourtStations(),
+      matchesCount: (cloudMatches || []).length,
+    };
+  } catch (err) {
+    console.error("[Contingency] Force Cloud Master Reset failed:", err);
+    return {
+      success: false,
+      courtStations: getCourtStations(),
+      matchesCount: 0,
+    };
+  }
+}
+
+/**
+ * Downloads a complete, human-readable JSON snapshot of all live courts,
+ * dispatch queue, active matches, and offline journals for disaster recovery.
+ */
+export function exportLiveSnapshot(tournamentSlug?: string): void {
+  if (typeof document === "undefined") return;
+
+  const snapshot = {
+    exportedAt: new Date().toISOString(),
+    tournamentSlug: tournamentSlug || "all",
+    courtStations: getCourtStations(),
+    dispatchQueue: getDispatchQueue(),
+    matches: getMatches(),
+    offlineJournal: getOfflineScoreJournal(),
+  };
+
+  const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `dinkvalley-snapshot-${tournamentSlug || "event"}-${Date.now()}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 

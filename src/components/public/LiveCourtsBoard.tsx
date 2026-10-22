@@ -8,7 +8,10 @@ import {
   type QueueItem,
   getCourtStations,
   getDispatchQueue,
+  hydrateCourtStationsFromCloud,
+  findMatchForCourtStation,
 } from "@/lib/court-dispatch";
+import { dbSubscribeToLive } from "@/lib/supabase-service";
 import { MiniCourtVisualizer } from "@/components/public/MiniCourtVisualizer";
 
 interface LiveCourtsBoardProps {
@@ -24,13 +27,22 @@ export function LiveCourtsBoard({
   currentCategoryId,
   onTeamClick,
 }: LiveCourtsBoardProps) {
-  const { matches } = useMatchStore();
+  const { matches } = useMatchStore(tournamentSlug || undefined);
+  const [stations, setStations] = useState<Record<FacilityCourt, CourtStation>>(() => getCourtStations());
   const [revision, setRevision] = useState(0);
   const [expandedCourt, setExpandedCourt] = useState<FacilityCourt | null>(null);
 
   // Synchronize with dispatch desk and live court station updates
   useEffect(() => {
+    let mounted = true;
+
+    // Initial hydration of court stations from Supabase
+    hydrateCourtStationsFromCloud().then((cloud) => {
+      if (mounted) setStations(cloud);
+    });
+
     const handleUpdate = () => {
+      setStations(getCourtStations());
       setRevision((prev) => prev + 1);
     };
 
@@ -39,19 +51,25 @@ export function LiveCourtsBoard({
     window.addEventListener("dv_dispatch_queue_updated", handleUpdate);
     window.addEventListener("storage", handleUpdate);
 
+    // Listen to shared Realtime channel for court station changes
+    const unsubRealtime = dbSubscribeToLive(
+      () => {},
+      () => {
+        hydrateCourtStationsFromCloud().then((cloud) => {
+          if (mounted) setStations(cloud);
+        });
+      }
+    );
+
     return () => {
+      mounted = false;
+      unsubRealtime();
       window.removeEventListener("dv_live_matches_updated", handleUpdate);
       window.removeEventListener("dv_court_stations_updated", handleUpdate);
       window.removeEventListener("dv_dispatch_queue_updated", handleUpdate);
       window.removeEventListener("storage", handleUpdate);
     };
   }, []);
-
-  const stations: Record<FacilityCourt, CourtStation> = useMemo(
-    () => getCourtStations(),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [matches, revision],
-  );
 
   const queue: QueueItem[] = useMemo(
     () => getDispatchQueue(),
@@ -126,23 +144,10 @@ export function LiveCourtsBoard({
         {FACILITY_COURTS.map((courtName, courtIdx) => {
           const station = stations[courtName];
 
-          // 1. Find live match on this court
-          const liveMatch = tournamentMatches.find(
-            (m) =>
-              (m.court === courtName || (station && m.id === station.currentMatchId)) &&
-              m.status === "live",
-          );
-
-          // 2. Find scheduled/assigned match on this court if not live
-          const scheduledMatch = !liveMatch
-            ? tournamentMatches.find(
-                (m) =>
-                  (m.court === courtName || (station && m.id === station.currentMatchId)) &&
-                  m.status === "scheduled",
-              )
-            : null;
-
-          const activeMatch = liveMatch ?? scheduledMatch;
+          // 1. Resolve active match occupying this court station
+          const activeMatch = findMatchForCourtStation(courtName, station, tournamentMatches);
+          const liveMatch = activeMatch?.status === "live" ? activeMatch : null;
+          const scheduledMatch = activeMatch?.status === "scheduled" ? activeMatch : null;
 
           // 3. Find on-deck match
           const onDeckMatch = station?.onDeckMatchId

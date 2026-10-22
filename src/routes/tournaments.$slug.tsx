@@ -17,13 +17,15 @@ import {
 import {
   FACILITY_COURTS,
   type FacilityCourt,
+  type CourtStation,
   getCourtStations,
   getDispatchQueue,
   isConfirmedDispatchedMatch,
+  hydrateCourtStationsFromCloud,
 } from "@/lib/court-dispatch";
 import { getDrawnGroups, type BracketGroup } from "@/components/admin/BracketDraw";
 import { getMainDrawMatches, type KnockoutMatch } from "@/components/admin/DrawsManager";
-import { dbGetTournaments, dbGetDrawnGroups, getCachedDrawnGroups } from "@/lib/supabase-service";
+import { dbGetTournaments, dbGetDrawnGroups, getCachedDrawnGroups, dbSubscribeToLive } from "@/lib/supabase-service";
 import { MiniCourtVisualizer } from "@/components/public/MiniCourtVisualizer";
 import { FindMatchesModal } from "@/components/public/FindMatchesModal";
 import { PublicRegistrationModal } from "@/components/public/PublicRegistrationModal";
@@ -100,7 +102,27 @@ function TournamentPage() {
   const { tournaments } = useTournamentStore();
   const t = tournaments.find((x) => x.slug === loaderTournament.slug) ?? loaderTournament;
   const [activeId, setActiveId] = useState(() => t.categories?.[0]?.id ?? "");
-  const { matches } = useMatchStore();
+  const { matches } = useMatchStore(t?.slug || undefined);
+  const [stations, setStations] = useState<Record<FacilityCourt, CourtStation>>(() => getCourtStations());
+
+  useEffect(() => {
+    let mounted = true;
+    hydrateCourtStationsFromCloud().then((cloud) => {
+      if (mounted) setStations(cloud);
+    });
+    const unsub = dbSubscribeToLive(
+      () => {},
+      () => {
+        hydrateCourtStationsFromCloud().then((cloud) => {
+          if (mounted) setStations(cloud);
+        });
+      }
+    );
+    return () => {
+      mounted = false;
+      unsub();
+    };
+  }, []);
 
   // Keep active category synced if t.categories loads or changes
   useEffect(() => {
@@ -114,7 +136,7 @@ function TournamentPage() {
   const rawCategory = t.categories?.find((c) => c.id === activeId) ?? t.categories?.[0];
 
   // Check how many confirmed/dispatched matches exist across the tournament
-  const confirmedMatches = useMemo(() => matches.filter((m) => isConfirmedDispatchedMatch(m)), [matches]);
+  const confirmedMatches = useMemo(() => matches.filter((m) => isConfirmedDispatchedMatch(m, stations)), [matches, stations]);
   const liveMatches = useMemo(() => confirmedMatches.filter((m) => m.status === "live"), [confirmedMatches]);
   const finalMatches = useMemo(() => confirmedMatches.filter((m) => m.status === "final"), [confirmedMatches]);
   const scheduledMatches = useMemo(() => confirmedMatches.filter((m) => m.status === "scheduled"), [confirmedMatches]);

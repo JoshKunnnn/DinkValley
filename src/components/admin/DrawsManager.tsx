@@ -155,21 +155,37 @@ export function syncKnockoutToLiveMatches(
 
   for (const km of knockoutMatches) {
     if (!km.teamA || !km.teamB) continue;
-    const matchId = `live-ko-${tournamentSlug}-${categoryId}-${km.id}`;
+    const teamA = km.teamA;
+    const teamB = km.teamB;
+    const stage = `${km.round} - ${km.label}`;
+    const legacyId = `live-ko-${tournamentSlug}-${categoryId}-${km.id}`;
+    const canonicalId = createPairMatchId(tournamentSlug, categoryId, stage, teamA.name, teamB.name);
     const cleanCourt = sanitizeCourtName(km.court);
-    const existing = current.find((m) => m.id === matchId);
+
+    // Look for existing match by canonicalId, legacyId, or team matchup
+    const existing = current.find((m) =>
+      m.id === canonicalId ||
+      m.id === legacyId ||
+      (m.teamAName?.trim().toLowerCase() === teamA.name.trim().toLowerCase() &&
+        m.teamBName?.trim().toLowerCase() === teamB.name.trim().toLowerCase()) ||
+      (m.teamAName?.trim().toLowerCase() === teamB.name.trim().toLowerCase() &&
+        m.teamBName?.trim().toLowerCase() === teamA.name.trim().toLowerCase())
+    );
+
+    const effectiveId = existing?.id || canonicalId;
 
     if (existing) {
       newMatches.push({
         ...existing,
+        id: effectiveId,
         court: sanitizeCourtName(existing.court),
         tournamentSlug: tournamentSlug || existing.tournamentSlug,
         categoryId: categoryId || existing.categoryId,
-        stage: existing.stage || `${km.round} - ${km.label}`,
+        stage: existing.stage || stage,
       });
     } else {
       newMatches.push({
-        id: matchId,
+        id: effectiveId,
         court: cleanCourt,
         teamAName: km.teamA.name,
         teamAPlayers: km.teamA.players,
@@ -189,7 +205,7 @@ export function syncKnockoutToLiveMatches(
         officiatedBy: undefined,
         tournamentSlug,
         categoryId,
-        stage: `${km.round} - ${km.label}`,
+        stage,
       });
     }
   }

@@ -54,10 +54,12 @@ import {
   isStageMatchingBracket,
   hydrateCourtStationsFromCloud,
   healAndSyncDispatchStations,
+  findMatchForCourtStation,
 } from "@/lib/court-dispatch";
 import { getDrawnGroups } from "@/components/admin/BracketDraw";
 import { getMainDrawMatches } from "@/components/admin/DrawsManager";
 import { dbUpdateCourtStation, dbSubscribeToLive } from "@/lib/supabase-service";
+import { DispatchDebugStation, type DebugTab } from "@/components/admin/DispatchDebugStation";
 
 /** Returns prev when next is structurally identical, so React skips re-renders and memo recomputation. */
 function keepIfEqual<T>(prev: T, next: T): T {
@@ -145,7 +147,9 @@ function computeCategoryUnassignedMatches(
         const effectiveMatchId = existingLive ? existingLive.id : canonicalId;
 
         if (existingLive?.status === "final") return;
-        if (queuedIds.has(effectiveMatchId) || activeCourtMatchIds.has(effectiveMatchId)) return;
+        const isQueued = queuedIds.has(effectiveMatchId) || queuedIds.has(canonicalId);
+        const isOnCourt = activeCourtMatchIds.has(effectiveMatchId) || activeCourtMatchIds.has(canonicalId);
+        if (isQueued || isOnCourt) return;
 
         list.push({
           id: effectiveMatchId,
@@ -169,15 +173,27 @@ function computeCategoryUnassignedMatches(
       ) {
         continue;
       }
-      const matchId = `live-ko-${tournamentSlug}-${cat.id}-${km.id}`;
-      const existingLive = matches.find((m) => m.id === matchId);
+      const stage = `${km.round} - ${km.label}`;
+      const legacyId = `live-ko-${tournamentSlug}-${cat.id}-${km.id}`;
+      const canonicalId = createPairMatchId(tournamentSlug, cat.id, stage, km.teamA.name, km.teamB.name);
+      const existingLive = matches.find((m) => m.id === canonicalId || m.id === legacyId);
+      const effectiveId = existingLive?.id || canonicalId;
 
       if (existingLive?.status === "final" || km.winner) continue;
-      if (queuedIds.has(matchId) || activeCourtMatchIds.has(matchId)) continue;
+      if (
+        queuedIds.has(effectiveId) ||
+        queuedIds.has(legacyId) ||
+        queuedIds.has(canonicalId) ||
+        activeCourtMatchIds.has(effectiveId) ||
+        activeCourtMatchIds.has(legacyId) ||
+        activeCourtMatchIds.has(canonicalId)
+      ) {
+        continue;
+      }
 
       list.push({
-        id: matchId,
-        stage: `${km.round} - ${km.label}`,
+        id: effectiveId,
+        stage,
         teamAName: km.teamA.name,
         teamAPlayers: km.teamA.players ?? [],
         teamBName: km.teamB.name,
@@ -208,7 +224,9 @@ export function CourtDispatch({
   categoryId,
   setCategoryId,
 }: CourtDispatchProps) {
-  const { matches, refresh: refreshMatches, update: updateMatchStore } = useMatchStore();
+  const { matches, refresh: refreshMatches, refreshFromCloud, update: updateMatchStore } = useMatchStore(
+    tournamentSlug || undefined,
+  );
   const [stations, setStations] = useState<Record<FacilityCourt, CourtStation>>(() => getCourtStations());
   const [queue, setQueue] = useState<QueueItem[]>(() => getDispatchQueue());
   const [announcement, setAnnouncement] = useState<DeskAnnouncement | null>(() => getLatestAnnouncement());
@@ -249,6 +267,8 @@ export function CourtDispatch({
 
   // Contingency re-sync loading state
   const [isHealingStations, setIsHealingStations] = useState(false);
+  const [isDebugStationOpen, setIsDebugStationOpen] = useState(false);
+  const [debugStationTab, setDebugStationTab] = useState<DebugTab>("score_sync");
 
   // Sync modal category when categoryId changes
   useEffect(() => {
@@ -371,7 +391,8 @@ export function CourtDispatch({
     const unsubRealtime = dbSubscribeToLive(
       () => {
         // Matches or tournament state changed in cloud database
-        refreshMatches();
+        if (refreshFromCloud) refreshFromCloud();
+        else refreshMatches();
         hydrateCourtStationsFromCloud().then((cloudStations) => {
           if (mounted) {
             setStations((prev) => keepIfEqual(prev, cloudStations));
@@ -383,7 +404,8 @@ export function CourtDispatch({
         hydrateCourtStationsFromCloud().then((cloudStations) => {
           if (mounted) {
             setStations((prev) => keepIfEqual(prev, cloudStations));
-            refreshMatches();
+            if (refreshFromCloud) refreshFromCloud();
+            else refreshMatches();
           }
         });
       }
@@ -396,7 +418,8 @@ export function CourtDispatch({
           setStations((prev) => keepIfEqual(prev, cloudStations));
         }
       });
-      refreshMatches();
+      if (refreshFromCloud) refreshFromCloud();
+      else refreshMatches();
     }, 3000);
 
     return () => {
@@ -404,7 +427,7 @@ export function CourtDispatch({
       unsubRealtime();
       clearInterval(pollInterval);
     };
-  }, [refreshMatches]);
+  }, [refreshMatches, refreshFromCloud]);
 
   // Detect newly concluded matches (e.g. from Umpire) to notify organizer that next matchups can be added
   const prevMatchesRef = useRef<LiveMatch[]>(matches);
@@ -543,29 +566,7 @@ export function CourtDispatch({
     };
 
     for (const court of FACILITY_COURTS) {
-      const station = stations[court];
-      if (station?.currentMatchId) {
-        const found = matches.find((m) => m.id === station.currentMatchId && m.status !== "final");
-        if (found) {
-          map[court] = found;
-          continue;
-        }
-        // Robust fallback: match by station ID, team names, or court assignment
-        const matching = matches.find(
-          (m) => m.status !== "final" && isMatchMatchingStation(m, station.currentMatchId, court)
-        );
-        if (matching) {
-          map[court] = matching;
-          continue;
-        }
-      }
-      // Fallback: look for match assigned to this court with live or scheduled status
-      const active = matches.find((m) => m.court === court && (m.status === "live" || m.status === "scheduled"));
-      if (active) {
-        map[court] = active;
-        continue;
-      }
-      map[court] = null;
+      map[court] = findMatchForCourtStation(court, stations[court], matches);
     }
 
     return map;
@@ -635,8 +636,8 @@ export function CourtDispatch({
   const activeStats = categoryStatsMap.get(activeWaveId);
   const isActiveWaveComplete = Boolean(
     activeStats &&
-      activeStats.totalMatches > 0 &&
-      activeStats.completedCount === activeStats.totalMatches,
+    activeStats.totalMatches > 0 &&
+    activeStats.completedCount === activeStats.totalMatches,
   );
 
   // Metrics
@@ -767,7 +768,7 @@ export function CourtDispatch({
             } else {
               const courtEntry = Object.entries(stations).find(
                 ([c, st]) =>
-                  st.currentMatchId === effectiveMatchId &&
+                  (st.currentMatchId === effectiveMatchId || st.currentMatchId === matchId || (existing && st.currentMatchId === existing.id)) &&
                   (st.status === "live" || st.status === "warmup"),
               );
               if (courtEntry) {
@@ -784,7 +785,7 @@ export function CourtDispatch({
               } else {
                 const qIdx = queue.findIndex(
                   (q) =>
-                    (q.matchId === effectiveMatchId || q.matchId === matchId) &&
+                    (q.matchId === effectiveMatchId || q.matchId === matchId || (existing && q.matchId === existing.id)) &&
                     (q.status === "queued" || q.status === "on_deck"),
                 );
                 if (qIdx !== -1) {
@@ -796,7 +797,7 @@ export function CourtDispatch({
 
             groupMatches.push({
               id: effectiveMatchId,
-              stage: existing?.stage || stage,
+              stage,
               bracketLetter: group.letter,
               teamAName: teamA.name,
               teamAPlayers: teamA.players,
@@ -829,8 +830,11 @@ export function CourtDispatch({
       const koMatches: typeof groupsList[number]["matches"] = [];
       for (const km of playoffMatches) {
         if (!km.teamA || !km.teamB) continue;
-        const matchId = `live-ko-${tournamentSlug}-${activeCat.id}-${km.id}`;
-        const existing = matches.find((m) => m.id === matchId);
+        const stage = `${km.round} - ${km.label}`;
+        const legacyId = `live-ko-${tournamentSlug}-${activeCat.id}-${km.id}`;
+        const canonicalId = createPairMatchId(tournamentSlug, activeCat.id, stage, km.teamA.name, km.teamB.name);
+        const existing = matches.find((m) => m.id === canonicalId || m.id === legacyId);
+        const effectiveId = existing?.id || canonicalId;
 
         let matchStatus: "unassigned" | "queued" | "live" | "final" = "unassigned";
         let assignedCourt: string | undefined = undefined;
@@ -841,7 +845,10 @@ export function CourtDispatch({
         } else {
           const courtEntry = Object.entries(stations).find(
             ([c, st]) =>
-              st.currentMatchId === (existing?.id || matchId) &&
+              (st.currentMatchId === effectiveId ||
+                st.currentMatchId === legacyId ||
+                st.currentMatchId === canonicalId ||
+                (existing && isMatchMatchingStation(existing, st.currentMatchId, c))) &&
               (st.status === "live" || st.status === "warmup"),
           );
           if (courtEntry) {
@@ -858,7 +865,10 @@ export function CourtDispatch({
           } else {
             const qIdx = queue.findIndex(
               (q) =>
-                (q.matchId === matchId || q.matchId === existing?.id) &&
+                (q.matchId === effectiveId ||
+                  q.matchId === canonicalId ||
+                  q.matchId === legacyId ||
+                  q.matchId === existing?.id) &&
                 (q.status === "queued" || q.status === "on_deck"),
             );
             if (qIdx !== -1) {
@@ -869,8 +879,8 @@ export function CourtDispatch({
         }
 
         koMatches.push({
-          id: existing?.id || matchId,
-          stage: `${km.round} - ${km.label}`,
+          id: effectiveId,
+          stage,
           bracketLetter: "Playoffs",
           teamAName: km.teamA.name,
           teamAPlayers: km.teamA.players ?? [],
@@ -913,33 +923,60 @@ export function CourtDispatch({
   ]);
 
   // Keep selected bracket letter aligned with available groups in modal
+  const prevCourtModalRef = useRef<FacilityCourt | null>(null);
+
   useEffect(() => {
     if (selectedCourtForDispatch && bracketModalData.groups.length > 0) {
-      const exists = bracketModalData.groups.some((g) => g.letter === bracketModalSelectedLetter);
-      if (!exists) {
-        const firstWithUnplayed = bracketModalData.groups.find((g) => g.unplayedCount > 0);
-        setBracketModalSelectedLetter(firstWithUnplayed ? firstWithUnplayed.letter : (bracketModalData.groups[0]?.letter ?? "A"));
+      const isInitialOpen = prevCourtModalRef.current !== selectedCourtForDispatch;
+      prevCourtModalRef.current = selectedCourtForDispatch;
+
+      if (isInitialOpen) {
+        const assignedBracket = stations[selectedCourtForDispatch]?.activeBracket;
+        let targetLetter: string | null = null;
+        if (assignedBracket && assignedBracket !== "all") {
+          if (assignedBracket.toLowerCase() === "playoffs") {
+            targetLetter = "Playoffs";
+          } else {
+            const letterMatch = assignedBracket.match(/(?:bracket|pool)?\s*([a-z])/i);
+            if (letterMatch) {
+              targetLetter = letterMatch[1]!.toUpperCase();
+            }
+          }
+        }
+
+        const targetGroup = targetLetter
+          ? bracketModalData.groups.find((g) => g.letter === targetLetter)
+          : null;
+
+        if (targetGroup && targetGroup.unplayedCount > 0) {
+          setBracketModalSelectedLetter(targetLetter!);
+        } else {
+          const firstWithUnplayed = bracketModalData.groups.find((g) => g.unplayedCount > 0);
+          if (firstWithUnplayed) {
+            setBracketModalSelectedLetter(firstWithUnplayed.letter);
+          } else if (targetLetter) {
+            setBracketModalSelectedLetter(targetLetter);
+          } else {
+            setBracketModalSelectedLetter(bracketModalData.groups[0]?.letter ?? "A");
+          }
+        }
+      } else {
+        const exists = bracketModalData.groups.some((g) => g.letter === bracketModalSelectedLetter);
+        if (!exists) {
+          const firstWithUnplayed = bracketModalData.groups.find((g) => g.unplayedCount > 0);
+          setBracketModalSelectedLetter(firstWithUnplayed ? firstWithUnplayed.letter : (bracketModalData.groups[0]?.letter ?? "A"));
+        }
       }
+    } else if (!selectedCourtForDispatch) {
+      prevCourtModalRef.current = null;
     }
-  }, [selectedCourtForDispatch, bracketModalData.groups, bracketModalSelectedLetter]);
+  }, [selectedCourtForDispatch, bracketModalData.groups, stations, bracketModalSelectedLetter]);
 
   const handleOpenBracketModal = (court: FacilityCourt) => {
+    prevCourtModalRef.current = null;
     setSelectedCourtForDispatch(court);
     setBracketModalCategory(categoryId);
     setBracketModalShowCompleted(false);
-
-    // If court has an assigned bracket, pre-select that bracket tab in the modal
-    const assignedBracket = stations[court]?.activeBracket;
-    if (assignedBracket && assignedBracket !== "all") {
-      if (assignedBracket.toLowerCase() === "playoffs") {
-        setBracketModalSelectedLetter("Playoffs");
-      } else {
-        const letterMatch = assignedBracket.match(/(?:bracket|pool)?\s*([a-z])/i);
-        if (letterMatch) {
-          setBracketModalSelectedLetter(letterMatch[1]!.toUpperCase());
-        }
-      }
-    }
   };
 
   const handleSelectBracketMatchForCourt = (
@@ -1215,6 +1252,8 @@ export function CourtDispatch({
     umpire?: string,
   ) => {
     if (match.stage && !isMatchInSameBracket(match.tournamentSlug || tournamentSlug, match.categoryId || categoryId, match.stage, match.teamAName, match.teamBName)) {
+      setCopyNotice(`Cannot dispatch: ${match.teamAName} and ${match.teamBName} do not belong to ${match.stage}`);
+      setTimeout(() => setCopyNotice(null), 4000);
       return;
     }
     const liveA = checkSimultaneousPlayConflict(match.teamAName, match.teamAPlayers, match.tournamentSlug || tournamentSlug);
@@ -1291,7 +1330,7 @@ export function CourtDispatch({
       status: "live",
       currentMatchId: matchId,
     };
-    saveCourtStations(nextStations);
+    saveCourtStations(nextStations, court);
 
     const currentQueue = getDispatchQueue();
     const updatedQueue = currentQueue.map((q) =>
@@ -1315,7 +1354,7 @@ export function CourtDispatch({
       currentMatchId: null,
       dispatchedAt: null,
     };
-    saveCourtStations(nextStations);
+    saveCourtStations(nextStations, court);
     if (targetMatch) {
       setConcludedAlert({
         court,
@@ -1367,11 +1406,11 @@ export function CourtDispatch({
       status: "warmup",
       currentMatchId: m.id,
     };
-    saveCourtStations(nextStations);
+    saveCourtStations(nextStations, court);
     dbUpdateCourtStation(court, {
       status: "warmup",
       currentMatchId: m.id,
-    }).catch(() => {});
+    }).catch(() => { });
     reloadData();
     setResetConfirmMatch(null);
   };
@@ -1653,6 +1692,18 @@ export function CourtDispatch({
           </button>
 
           <button
+            onClick={() => {
+              setDebugStationTab("score_sync");
+              setIsDebugStationOpen(true);
+            }}
+            title="Open real-time score sync telemetry, latency RTT ping, and cloud synchrony matrix"
+            className="px-3.5 py-1.5 text-xs font-bold uppercase tracking-wider bg-charcoal text-sand/90 border border-pickle/40 hover:border-pickle hover:text-pickle transition-colors cursor-pointer flex items-center gap-1.5"
+          >
+            <span className="w-2 h-2 rounded-full bg-pickle animate-pulse" />
+            <span>Score Sync &amp; Debug</span>
+          </button>
+
+          <button
             onClick={handleAutoDispatchAllAvailable}
             disabled={metrics.availableCount === 0 || metrics.pendingQueueCount === 0}
             className="px-3.5 py-1.5 text-xs font-bold uppercase tracking-wider bg-pickle text-sand border border-pickle hover:bg-pickle/90 disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer"
@@ -1854,11 +1905,10 @@ export function CourtDispatch({
                     handleOpenBracketModal(courtName);
                   }
                 }}
-                className={`surface-card p-0 overflow-hidden border flex flex-col justify-between transition-all ${
-                  station.status === "available" && !activeMatch
+                className={`surface-card p-0 overflow-hidden border flex flex-col justify-between transition-all ${station.status === "available" && !activeMatch
                     ? "cursor-pointer hover:border-pickle/80 hover:shadow-md"
                     : ""
-                } ${isCourtLive
+                  } ${isCourtLive
                     ? "border-pickle/80 shadow-md shadow-pickle/5 bg-card"
                     : isCourtWarmup
                       ? "border-amber-500/80 bg-card"
@@ -2099,6 +2149,17 @@ export function CourtDispatch({
                           >
                             Assign from Bracket
                           </button>
+                          <button
+                            onClick={() => {
+                              setDebugStationTab("score_sync");
+                              setIsDebugStationOpen(true);
+                            }}
+                            title={`Inspect score sync telemetry and latency for ${courtName}`}
+                            className="px-2.5 py-1.5 text-xs font-bold uppercase tracking-wider bg-charcoal text-pickle border border-pickle/40 hover:bg-pickle/20 transition-colors cursor-pointer flex items-center gap-1"
+                          >
+                            <span className="w-1.5 h-1.5 rounded-full bg-pickle animate-pulse" />
+                            <span>Sync Debug</span>
+                          </button>
                         </div>
 
                         <button
@@ -2201,10 +2262,24 @@ export function CourtDispatch({
                             </button>
                           </div>
                         ) : (
-                          <div className="p-2.5 bg-card/40 border border-border/60 rounded text-center text-xs text-muted-foreground">
-                            {courtActiveBracket !== "all"
-                              ? `No pending matches in queue for ${courtActiveBracket}.`
-                              : "No pending matches in queue."}
+                          <div className="p-2.5 bg-card/40 border border-border/60 rounded text-center text-xs text-muted-foreground space-y-1.5">
+                            <div>
+                              {courtActiveBracket !== "all"
+                                ? `No pending matches in queue for ${courtActiveBracket}.`
+                                : "No pending matches in queue."}
+                            </div>
+                            {courtActiveBracket !== "all" && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleSetCourtActiveBracket(courtName, "all");
+                                }}
+                                className="text-[0.65rem] font-bold text-pickle hover:underline uppercase tracking-wider block mx-auto cursor-pointer"
+                              >
+                                Switch Court to All Brackets &rarr;
+                              </button>
+                            )}
                           </div>
                         )}
                       </div>
@@ -2314,23 +2389,21 @@ export function CourtDispatch({
               return (
                 <div
                   key={catId}
-                  className={`surface-card p-4 border transition-all flex flex-col justify-between gap-3.5 ${
-                    isActive
+                  className={`surface-card p-4 border transition-all flex flex-col justify-between gap-3.5 ${isActive
                       ? "border-pickle bg-pickle/10 shadow-sm ring-1 ring-pickle/40"
                       : isCompleted
-                      ? "border-border/50 bg-charcoal/25 opacity-85"
-                      : "border-border bg-card hover:border-border/80"
-                  }`}
+                        ? "border-border/50 bg-charcoal/25 opacity-85"
+                        : "border-border bg-card hover:border-border/80"
+                    }`}
                 >
                   {/* Card Header: Wave Number, Level, Reorder Buttons */}
                   <div className="flex items-start justify-between gap-2">
                     <div className="flex items-center gap-1.5 flex-wrap">
                       <span
-                        className={`px-2 py-0.5 text-[0.65rem] font-display uppercase tracking-wider border ${
-                          isActive
+                        className={`px-2 py-0.5 text-[0.65rem] font-display uppercase tracking-wider border ${isActive
                             ? "bg-pickle text-sand border-pickle font-bold"
                             : "bg-charcoal text-sand/80 border-border"
-                        }`}
+                          }`}
                       >
                         Wave {idx + 1}
                       </span>
@@ -2368,13 +2441,12 @@ export function CourtDispatch({
                     <div className="mt-1 flex items-center justify-between text-[0.7rem] text-muted-foreground">
                       <span>{cat.teams?.length || 0} Registered Teams</span>
                       <span
-                        className={`font-bold uppercase tracking-wider ${
-                          isActive
+                        className={`font-bold uppercase tracking-wider ${isActive
                             ? "text-pickle"
                             : isCompleted
-                            ? "text-sand/70"
-                            : "text-muted-foreground"
-                        }`}
+                              ? "text-sand/70"
+                              : "text-muted-foreground"
+                          }`}
                       >
                         {isActive ? "Active Wave" : isCompleted ? "Completed" : "Waiting"}
                       </span>
@@ -2390,13 +2462,12 @@ export function CourtDispatch({
                       </div>
                       <div className="w-full h-1.5 bg-charcoal overflow-hidden border border-border/50">
                         <div
-                          className={`h-full transition-all duration-300 ${
-                            isActive
+                          className={`h-full transition-all duration-300 ${isActive
                               ? "bg-pickle"
                               : isCompleted
-                              ? "bg-sand/40"
-                              : "bg-pickle/50"
-                          }`}
+                                ? "bg-sand/40"
+                                : "bg-pickle/50"
+                            }`}
                           style={{ width: `${stats?.progressPercent ?? 0}%` }}
                         />
                       </div>
@@ -2489,13 +2560,13 @@ export function CourtDispatch({
                   {
                     key: "queue",
                     label: `Active Queue (${queueDivisionFilter === "current"
-                        ? queue.filter(
-                          (q) =>
-                            (q.status === "queued" || q.status === "on_deck") &&
-                            (!q.categoryId || q.categoryId === categoryId) &&
-                            (!q.tournamentSlug || q.tournamentSlug === tournamentSlug),
-                        ).length
-                        : queue.filter((q) => q.status === "queued" || q.status === "on_deck").length
+                      ? queue.filter(
+                        (q) =>
+                          (q.status === "queued" || q.status === "on_deck") &&
+                          (!q.categoryId || q.categoryId === categoryId) &&
+                          (!q.tournamentSlug || q.tournamentSlug === tournamentSlug),
+                      ).length
+                      : queue.filter((q) => q.status === "queued" || q.status === "on_deck").length
                       })`,
                   },
                   { key: "unassigned", label: `Unassigned (${unassignedMatches.length})` },
@@ -2506,8 +2577,8 @@ export function CourtDispatch({
                     key={t.key}
                     onClick={() => setActiveQueueTab(t.key as typeof activeQueueTab)}
                     className={`px-2.5 py-1.5 text-[0.65rem] font-bold uppercase tracking-wider border transition-colors cursor-pointer ${activeQueueTab === t.key
-                        ? "border-pickle bg-pickle text-sand"
-                        : "border-border bg-card text-foreground hover:border-pickle"
+                      ? "border-pickle bg-pickle text-sand"
+                      : "border-border bg-card text-foreground hover:border-pickle"
                       }`}
                   >
                     {t.label}
@@ -2522,8 +2593,8 @@ export function CourtDispatch({
                     onClick={() => setQueueDivisionFilter("current")}
                     title={`Show matches for ${category.label}`}
                     className={`px-2 py-1.5 text-[0.6rem] font-bold uppercase tracking-wider transition-colors cursor-pointer ${queueDivisionFilter === "current"
-                        ? "bg-pickle text-sand"
-                        : "bg-charcoal text-sand/60 hover:text-sand"
+                      ? "bg-pickle text-sand"
+                      : "bg-charcoal text-sand/60 hover:text-sand"
                       }`}
                   >
                     {category.label}
@@ -2532,8 +2603,8 @@ export function CourtDispatch({
                     onClick={() => setQueueDivisionFilter("all")}
                     title="Show matches across all divisions"
                     className={`px-2 py-1.5 text-[0.6rem] font-bold uppercase tracking-wider transition-colors cursor-pointer ${queueDivisionFilter === "all"
-                        ? "bg-pickle text-sand"
-                        : "bg-charcoal text-sand/60 hover:text-sand"
+                      ? "bg-pickle text-sand"
+                      : "bg-charcoal text-sand/60 hover:text-sand"
                       }`}
                   >
                     All Divisions
@@ -2600,11 +2671,10 @@ export function CourtDispatch({
               </span>
               <button
                 onClick={() => setQueueDivisionFilter("all")}
-                className={`px-2.5 py-1 text-[0.65rem] font-bold uppercase tracking-wider border transition-colors cursor-pointer shrink-0 ${
-                  queueDivisionFilter === "all"
+                className={`px-2.5 py-1 text-[0.65rem] font-bold uppercase tracking-wider border transition-colors cursor-pointer shrink-0 ${queueDivisionFilter === "all"
                     ? "bg-pickle text-sand border-pickle font-bold"
                     : "bg-charcoal text-sand/70 border-border hover:border-sand"
-                }`}
+                  }`}
               >
                 All Categories ({queue.filter((q) => q.status === "queued" || q.status === "on_deck").length})
               </button>
@@ -2625,11 +2695,10 @@ export function CourtDispatch({
                       setActiveWaveIdState(c.id);
                       setQueueDivisionFilter("current");
                     }}
-                    className={`px-2.5 py-1 text-[0.65rem] font-bold uppercase tracking-wider border transition-colors cursor-pointer shrink-0 ${
-                      isSelected
+                    className={`px-2.5 py-1 text-[0.65rem] font-bold uppercase tracking-wider border transition-colors cursor-pointer shrink-0 ${isSelected
                         ? "bg-pickle text-sand border-pickle font-bold"
                         : "bg-charcoal text-sand/70 border-border hover:border-sand"
-                    }`}
+                      }`}
                   >
                     {c.label} ({catQueueCount})
                   </button>
@@ -2787,12 +2856,12 @@ export function CourtDispatch({
                                 liveConflict
                                   ? `Cannot dispatch: ${liveConflict.isPlayerConflict ? `${liveConflict.playerName} (${liveConflict.teamName})` : liveConflict.teamName} is ${liveConflict.status === "on_deck" ? "on-deck" : "live"} on ${liveConflict.court}`
                                   : isOccupied
-                                  ? `${c} is occupied`
-                                  : `Dispatch to ${c}`
+                                    ? `${c} is occupied`
+                                    : `Dispatch to ${c}`
                               }
                               className={`px-2 py-0.5 text-[0.6rem] font-bold border transition-colors ${isDisabled
-                                  ? "border-border/40 text-muted-foreground/40 cursor-not-allowed"
-                                  : "border-pickle/60 text-pickle hover:bg-pickle hover:text-sand cursor-pointer"
+                                ? "border-border/40 text-muted-foreground/40 cursor-not-allowed"
+                                : "border-pickle/60 text-pickle hover:bg-pickle hover:text-sand cursor-pointer"
                                 }`}
                             >
                               {c.replace("Court ", "C")}
@@ -2914,12 +2983,12 @@ export function CourtDispatch({
                                 liveConflict
                                   ? `Cannot dispatch: ${liveConflict.isPlayerConflict ? `${liveConflict.playerName} (${liveConflict.teamName})` : liveConflict.teamName} is ${liveConflict.status === "on_deck" ? "on-deck" : "live"} on ${liveConflict.court}`
                                   : isCourtOccupied
-                                  ? `${c} is currently occupied`
-                                  : `Dispatch immediately to ${c}`
+                                    ? `${c} is currently occupied`
+                                    : `Dispatch immediately to ${c}`
                               }
                               className={`px-2.5 py-1 text-[0.65rem] font-bold uppercase tracking-wider border transition-colors ${isBtnDisabled
-                                  ? "border-border/40 text-muted-foreground/40 cursor-not-allowed"
-                                  : "border-pickle/60 text-pickle hover:bg-pickle hover:text-sand cursor-pointer"
+                                ? "border-border/40 text-muted-foreground/40 cursor-not-allowed"
+                                : "border-pickle/60 text-pickle hover:bg-pickle hover:text-sand cursor-pointer"
                                 }`}
                             >
                               &rarr; {c}
@@ -3305,11 +3374,10 @@ export function CourtDispatch({
                     <button
                       key={c.id}
                       onClick={() => setBracketModalCategory(c.id)}
-                      className={`px-2.5 py-1 text-xs font-semibold tracking-wide border-2 transition-colors shrink-0 cursor-pointer ${
-                        isCurrent
+                      className={`px-2.5 py-1 text-xs font-semibold tracking-wide border-2 transition-colors shrink-0 cursor-pointer ${isCurrent
                           ? "bg-brick text-sand border-brick font-bold"
                           : "bg-card text-foreground border-border hover:border-pickle hover:text-pickle"
-                      }`}
+                        }`}
                     >
                       {c.label}
                     </button>
@@ -3332,21 +3400,19 @@ export function CourtDispatch({
                     <button
                       key={group.letter}
                       onClick={() => setBracketModalSelectedLetter(group.letter)}
-                      className={`p-1.5 sm:px-3 sm:py-1.5 text-[0.65rem] sm:text-xs font-display tracking-wider uppercase border transition-all flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 cursor-pointer ${
-                        isActive
+                      className={`p-1.5 sm:px-3 sm:py-1.5 text-[0.65rem] sm:text-xs font-display tracking-wider uppercase border transition-all flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 cursor-pointer ${isActive
                           ? "bg-pickle text-sand border-pickle shadow-sm font-bold"
                           : "bg-charcoal text-sand/80 border-border hover:border-sand/60"
-                      }`}
+                        }`}
                     >
                       <span>{group.label}</span>
                       <span
-                        className={`px-1.5 py-0.2 text-[0.6rem] font-mono font-bold rounded-sm ${
-                          isActive
+                        className={`px-1.5 py-0.2 text-[0.6rem] font-mono font-bold rounded-sm ${isActive
                             ? "bg-sand text-charcoal"
                             : hasUnplayed
-                            ? "bg-pickle/20 text-pickle"
-                            : "bg-emerald-500/20 text-emerald-400"
-                        }`}
+                              ? "bg-pickle/20 text-pickle"
+                              : "bg-emerald-500/20 text-emerald-400"
+                          }`}
                       >
                         {hasUnplayed ? `${group.unplayedCount} left` : "Done"}
                       </span>
@@ -3400,13 +3466,36 @@ export function CourtDispatch({
 
                     {/* Unplayed Games List */}
                     {unplayed.length === 0 ? (
-                      <div className="p-6 text-center border-2 border-border bg-card rounded-xl shadow-xs space-y-2">
-                        <span className="text-xs uppercase tracking-widest text-pickle font-bold block">
-                          Bracket Completed
-                        </span>
-                        <p className="text-xs sm:text-sm text-foreground font-semibold">
-                          All pool play matches for {currentGroup.label} have concluded.
-                        </p>
+                      <div className="p-6 text-center border-2 border-border bg-card rounded-xl shadow-xs space-y-3">
+                        <div>
+                          <span className="text-xs uppercase tracking-widest text-pickle font-bold block">
+                            Bracket Completed
+                          </span>
+                          <p className="text-xs sm:text-sm text-foreground font-semibold mt-1">
+                            All pool play matches for {currentGroup.label} have concluded.
+                          </p>
+                        </div>
+                        {bracketModalData.groups.some((g) => g.unplayedCount > 0) && (
+                          <div className="pt-2 border-t border-border/60">
+                            <span className="text-[0.7rem] text-muted-foreground block mb-2 font-medium">
+                              Other brackets still have unplayed matches:
+                            </span>
+                            <div className="flex flex-wrap items-center justify-center gap-2">
+                              {bracketModalData.groups
+                                .filter((g) => g.unplayedCount > 0)
+                                .map((g) => (
+                                  <button
+                                    key={g.letter}
+                                    type="button"
+                                    onClick={() => setBracketModalSelectedLetter(g.letter)}
+                                    className="px-3 py-1.5 text-xs font-bold uppercase tracking-wider bg-pickle text-sand hover:bg-pickle/90 transition-colors cursor-pointer shadow-sm"
+                                  >
+                                    View {g.label} ({g.unplayedCount} left) &rarr;
+                                  </button>
+                                ))}
+                            </div>
+                          </div>
+                        )}
                       </div>
                     ) : (
                       <div className="space-y-2.5">
@@ -3432,13 +3521,12 @@ export function CourtDispatch({
                           return (
                             <div
                               key={match.id}
-                              className={`p-3.5 border transition-all flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 ${
-                                isMatchAlreadyOnThisCourt
+                              className={`p-3.5 border transition-all flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 ${isMatchAlreadyOnThisCourt
                                   ? "border-pickle/60 bg-pickle/5"
                                   : isActionDisabled
-                                  ? "border-border/40 bg-card/40 opacity-75"
-                                  : "border-border bg-card hover:border-pickle/60"
-                              }`}
+                                    ? "border-border/40 bg-card/40 opacity-75"
+                                    : "border-border bg-card hover:border-pickle/60"
+                                }`}
                             >
                               <div className="min-w-0 space-y-1.5 flex-1">
                                 <div className="flex items-center gap-2 flex-wrap">
@@ -3514,26 +3602,25 @@ export function CourtDispatch({
                                     isMatchAlreadyOnThisCourt
                                       ? "Currently live on this court"
                                       : isMatchAlreadyOnOtherCourt
-                                      ? `Currently live on ${match.assignedCourt}`
-                                      : activeConflict
-                                      ? `Cannot dispatch: ${activeConflict.teamName} is ${activeConflict.status === "on_deck" ? "on-deck" : "live"} on ${activeConflict.court}`
-                                      : `Dispatch match to ${selectedCourtForDispatch}`
+                                        ? `Currently live on ${match.assignedCourt}`
+                                        : activeConflict
+                                          ? `Cannot dispatch: ${activeConflict.teamName} is ${activeConflict.status === "on_deck" ? "on-deck" : "live"} on ${activeConflict.court}`
+                                          : `Dispatch match to ${selectedCourtForDispatch}`
                                   }
-                                  className={`w-full sm:w-auto px-4 py-2.5 text-xs font-bold uppercase tracking-wider border transition-all ${
-                                    isActionDisabled
+                                  className={`w-full sm:w-auto px-4 py-2.5 text-xs font-bold uppercase tracking-wider border transition-all ${isActionDisabled
                                       ? "border-2 border-border text-muted-foreground bg-card cursor-not-allowed opacity-60"
                                       : "bg-pickle text-sand border-pickle hover:bg-pickle/90 cursor-pointer shadow-sm"
-                                  }`}
+                                    }`}
                                 >
                                   {isMatchAlreadyOnThisCourt
                                     ? "Active On Court"
                                     : isMatchAlreadyOnOtherCourt
-                                    ? `Live on ${match.assignedCourt}`
-                                    : activeConflict
-                                    ? activeConflict.status === "on_deck"
-                                      ? `On-Deck on ${activeConflict.court}`
-                                      : `In Play on ${activeConflict.court}`
-                                    : `Dispatch to ${selectedCourtForDispatch} ->`}
+                                      ? `Live on ${match.assignedCourt}`
+                                      : activeConflict
+                                        ? activeConflict.status === "on_deck"
+                                          ? `On-Deck on ${activeConflict.court}`
+                                          : `In Play on ${activeConflict.court}`
+                                        : `Dispatch to ${selectedCourtForDispatch} ->`}
                                 </button>
                               </div>
                             </div>
@@ -3631,6 +3718,18 @@ export function CourtDispatch({
           </div>
         </div>
       )}
+
+      {/* Dispatch Debug Station Inspector */}
+      <DispatchDebugStation
+        isOpen={isDebugStationOpen}
+        onClose={() => setIsDebugStationOpen(false)}
+        tournamentSlug={tournamentSlug}
+        initialTab={debugStationTab}
+        onStateRepaired={() => {
+          reloadData();
+          refreshMatches();
+        }}
+      />
     </div>
   );
 }

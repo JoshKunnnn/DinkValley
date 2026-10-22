@@ -7,6 +7,7 @@ import {
   dbDeleteMatchesForCategory,
   dbClearAllMatches,
   dbSubscribeToLive,
+  flushOfflineScoreJournal,
 } from "./supabase-service";
 import { isMatchInSameBracket } from "./bracket-utils";
 
@@ -345,6 +346,45 @@ export function deleteMatch(matchId: string): LiveMatch[] {
 }
 
 /**
+ * Sanitizes court assignments against current local court station records.
+ * If a station is marked available, in maintenance, or assigned to a different match,
+ * the match is gracefully reverted to 'Queue' to prevent phantom court squatting.
+ */
+function sanitizeCourtAssignment(
+  court: string | undefined,
+  matchOrId: string | LiveMatch | { id: string; teamAName?: string; teamBName?: string; court?: string },
+  matchStatus?: string,
+): string {
+  if (!court || court === "Queue") return "Queue";
+  if (typeof localStorage === "undefined") return court;
+  try {
+    const rawStations = localStorage.getItem("dv_court_stations");
+    if (!rawStations) return court;
+    const stations = JSON.parse(rawStations);
+    const st = stations[court];
+    if (!st) return court;
+    if (st.status === "maintenance") {
+      return "Queue";
+    }
+    const matchObj = typeof matchOrId === "string" ? { id: matchOrId, court } : matchOrId;
+    if (st.currentMatchId && st.status !== "available" && st.status !== "idle") {
+      if (
+        st.currentMatchId === matchObj.id ||
+        isMatchMatchingStation(matchObj as LiveMatch, st.currentMatchId, court)
+      ) {
+        return court;
+      }
+      return "Queue";
+    }
+    // If station is currently marked 'available' or 'idle' in local storage, do not prematurely
+    // strip an incoming active/scheduled match that is in-flight from cloud dispatch.
+    return court;
+  } catch {
+    return court;
+  }
+}
+
+/**
  * Safely merges cloud matches with local matches.
  * Protects local live match status and in-progress scoring from being overwritten by stale cloud state.
  */
@@ -362,25 +402,30 @@ function mergeMatchesSafely(cloudMatches: LiveMatch[], localMatches: LiveMatch[]
 
   const matchedLocalIds = new Set<string>();
 
-  const mergedCloud = cloudMatches.map((cm) => {
+  const mergedCloud: LiveMatch[] = cloudMatches.map((cm): LiveMatch => {
     let lm = localMapById.get(cm.id);
     if (!lm && cm.teamAName && cm.teamBName) {
       const pairKey = [cm.teamAName.trim().toLowerCase(), cm.teamBName.trim().toLowerCase()].sort().join("::");
       lm = localMapByPair.get(pairKey);
     }
 
-    if (!lm) return cm;
+    if (!lm) {
+      const sanitizedCourt = sanitizeCourtAssignment(cm.court, cm, cm.status);
+      return sanitizedCourt === cm.court ? cm : { ...cm, court: sanitizedCourt };
+    }
 
     matchedLocalIds.add(lm.id);
 
     // 0. If local match was recently reset, do not overwrite with stale cloud score
-    if (lm.resetAt && (!cm.resetAt || lm.resetAt > cm.resetAt)) {
+    const localReset = lm.resetAt ?? 0;
+    const cloudReset = cm.resetAt ?? 0;
+    if (localReset > cloudReset) {
       return {
         ...cm,
         id: lm.id,
         score: lm.score,
         status: lm.status,
-        court: lm.court,
+        court: sanitizeCourtAssignment(lm.court, lm, lm.status),
         tossDone: lm.tossDone,
         tossWinner: lm.tossWinner,
         teamABase1Player: lm.teamABase1Player,
@@ -391,50 +436,93 @@ function mergeMatchesSafely(cloudMatches: LiveMatch[], localMatches: LiveMatch[]
         endedAt: lm.endedAt,
       };
     }
-
-    // 1. If local match is active on a facility court (live or warm-up/scheduled), protect local court assignment and teams
-    const isLocalOnCourt = lm.court && lm.court !== "Queue";
-    if (isLocalOnCourt || lm.status === "live") {
+    if (cloudReset > localReset) {
       return {
         ...cm,
         id: lm.id,
-        court: lm.court,
-        status: lm.status,
+        court: sanitizeCourtAssignment(cm.court, cm, cm.status),
+      };
+    }
+
+    // 1. Concluded / Final matches: Final state from cloud always wins
+    if (cm.status === "final") {
+      const preferredCourt = lm.court && lm.court !== "Queue" ? lm.court : cm.court;
+      return {
+        ...cm,
+        id: lm.id,
+        court: sanitizeCourtAssignment(preferredCourt, lm, "final"),
         teamAName: lm.teamAName || cm.teamAName,
         teamBName: lm.teamBName || cm.teamBName,
         teamAPlayers: lm.teamAPlayers?.length ? lm.teamAPlayers : cm.teamAPlayers,
         teamBPlayers: lm.teamBPlayers?.length ? lm.teamBPlayers : cm.teamBPlayers,
-        teamAClub: lm.teamAClub ?? cm.teamAClub,
-        teamBClub: lm.teamBClub ?? cm.teamBClub,
-        score: lm.score,
-        tossDone: lm.tossDone ?? cm.tossDone,
-        tossWinner: lm.tossWinner ?? cm.tossWinner,
-        teamABase1Player: lm.teamABase1Player ?? cm.teamABase1Player,
-        teamBBase1Player: lm.teamBBase1Player ?? cm.teamBBase1Player,
-        startedAt: lm.startedAt ?? cm.startedAt,
       };
     }
-
-    // 2. If local match has higher score/rallies than cloud, preserve local score
-    const localScoreTotal = (lm.score?.teamAScore ?? 0) + (lm.score?.teamBScore ?? 0);
-    const cloudScoreTotal = (cm.score?.teamAScore ?? 0) + (cm.score?.teamBScore ?? 0);
-    if (localScoreTotal > cloudScoreTotal) {
+    if (lm.status === "final") {
       return {
         ...cm,
         id: lm.id,
+        status: "final",
         score: lm.score,
-        status: lm.status,
-        court: lm.court,
-        tossDone: lm.tossDone ?? cm.tossDone,
-        tossWinner: lm.tossWinner ?? cm.tossWinner,
-        teamABase1Player: lm.teamABase1Player ?? cm.teamABase1Player,
-        teamBBase1Player: lm.teamBBase1Player ?? cm.teamBBase1Player,
+        winnerTeam: lm.winnerTeam,
+        endedAt: lm.endedAt,
+        court: sanitizeCourtAssignment(lm.court, lm, "final"),
       };
     }
+
+    // 2. Score & Rally Conflict Resolution:
+    // Determine which score is ahead/fresher
+    const localScoreTotal = (lm.score?.teamAScore ?? 0) + (lm.score?.teamBScore ?? 0);
+    const cloudScoreTotal = (cm.score?.teamAScore ?? 0) + (cm.score?.teamBScore ?? 0);
+    const localRallies = lm.score?.rallies?.length ?? 0;
+    const cloudRallies = cm.score?.rallies?.length ?? 0;
+
+    let chosenScore = cm.score;
+    let chosenStatus: MatchStatus = cm.status;
+
+    if (localScoreTotal > cloudScoreTotal) {
+      // Local has higher score (e.g. Umpire scoring on this device in-flight before cloud echo)
+      chosenScore = lm.score;
+      if (lm.status === "live") chosenStatus = "live";
+    } else if (cloudScoreTotal > localScoreTotal) {
+      // Cloud has higher score (e.g. Umpire scored on another device, now received by Admin)
+      chosenScore = cm.score;
+      if (cm.status === "live" || (cloudScoreTotal > 0 && chosenStatus === "scheduled")) {
+        chosenStatus = "live";
+      }
+    } else {
+      // Scores are equal. Compare rally counts or details
+      if (localRallies > cloudRallies) {
+        chosenScore = lm.score;
+      } else {
+        chosenScore = cm.score;
+      }
+      if (cm.status === "live" || lm.status === "live") {
+        chosenStatus = "live";
+      }
+    }
+
+    // Court assignment: keep active facility court assignment, validated against current station status
+    const rawCourt = (lm.court && lm.court !== "Queue" ? lm.court : cm.court) || "Queue";
+    const chosenCourt = sanitizeCourtAssignment(rawCourt, lm, chosenStatus);
 
     return {
       ...cm,
       id: lm.id,
+      court: chosenCourt,
+      status: chosenStatus,
+      score: chosenScore,
+      teamAName: lm.teamAName || cm.teamAName,
+      teamBName: lm.teamBName || cm.teamBName,
+      teamAPlayers: lm.teamAPlayers?.length ? lm.teamAPlayers : cm.teamAPlayers,
+      teamBPlayers: lm.teamBPlayers?.length ? lm.teamBPlayers : cm.teamBPlayers,
+      teamAClub: lm.teamAClub ?? cm.teamAClub,
+      teamBClub: lm.teamBClub ?? cm.teamBClub,
+      tossDone: lm.tossDone ?? cm.tossDone,
+      tossWinner: lm.tossWinner ?? cm.tossWinner,
+      teamABase1Player: lm.teamABase1Player ?? cm.teamABase1Player,
+      teamBBase1Player: lm.teamBBase1Player ?? cm.teamBBase1Player,
+      officiatedBy: cm.officiatedBy || lm.officiatedBy,
+      startedAt: cm.startedAt || lm.startedAt,
     };
   });
 
@@ -442,12 +530,48 @@ function mergeMatchesSafely(cloudMatches: LiveMatch[], localMatches: LiveMatch[]
   for (const lm of localMatches) {
     if (!matchedLocalIds.has(lm.id)) {
       if ((lm.court && lm.court !== "Queue") || lm.status === "live" || lm.status === "scheduled") {
-        mergedCloud.push(lm);
+        const sanitizedCourt = sanitizeCourtAssignment(lm.court, lm, lm.status);
+        mergedCloud.push({
+          ...lm,
+          court: sanitizedCourt,
+        });
       }
     }
   }
 
-  return mergedCloud;
+  // 4. Strict Deduplication by Matchup Pair:
+  // Ensure that no tournament division has duplicate records for the exact same team matchup in the same bracket stage.
+  // If duplicates exist, authoritative records (final, live, or higher scores) win and replace ghost scheduled entries.
+  const deduplicated = new Map<string, LiveMatch>();
+  for (const m of mergedCloud) {
+    if (!m.teamAName || !m.teamBName) {
+      deduplicated.set(m.id, m);
+      continue;
+    }
+    const pair = [m.teamAName.trim().toLowerCase(), m.teamBName.trim().toLowerCase()].sort().join("::");
+    const bracket = (m.stage || "").match(/(?:bracket|pool)\s*([a-z])/i)?.[1]?.toLowerCase() || "pool";
+    const pairKey = `${m.tournamentSlug || "event"}::${m.categoryId || "division"}::${bracket}::${pair}`;
+
+    if (!deduplicated.has(pairKey)) {
+      deduplicated.set(pairKey, m);
+    } else {
+      const existing = deduplicated.get(pairKey)!;
+      const existingScore = (existing.score?.teamAScore ?? 0) + (existing.score?.teamBScore ?? 0);
+      const newScore = (m.score?.teamAScore ?? 0) + (m.score?.teamBScore ?? 0);
+
+      const mWins =
+        (m.status === "final" && existing.status !== "final") ||
+        (m.status === "live" && existing.status === "scheduled") ||
+        (newScore > existingScore) ||
+        (m.court && m.court !== "Queue" && (!existing.court || existing.court === "Queue"));
+
+      if (mWins) {
+        deduplicated.set(pairKey, m);
+      }
+    }
+  }
+
+  return Array.from(deduplicated.values());
 }
 
 /* ─────────────────────────────────────────────
@@ -466,13 +590,62 @@ export function useMatchStore(tournamentSlug?: string) {
 
   const effectiveSlug = tournamentSlug === "all" ? undefined : tournamentSlug;
 
+  const refreshFromCloud = useCallback(async () => {
+    try {
+      const cloudMatches = await dbGetMatches(effectiveSlug);
+      const local = getMatches();
+      const merged = mergeMatchesSafely(cloudMatches, local);
+      saveMatches(merged, false);
+      setAllMatches((prev) => (JSON.stringify(prev) === JSON.stringify(merged) ? prev : merged));
+      setIsCloudSynced(true);
+      return merged;
+    } catch {
+      return getMatches();
+    }
+  }, [effectiveSlug]);
+
   const matches = useMemo(() => {
     if (!effectiveSlug) return allMatches;
-    return allMatches.filter(
-      (m) =>
+    const activeStationMatchIds = new Set<string>();
+    const stationEntries: Array<{ court: string; matchId: string }> = [];
+    if (typeof localStorage !== "undefined") {
+      try {
+        const raw = localStorage.getItem("dv_court_stations");
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          for (const c of FACILITY_COURT_NAMES) {
+            const st = parsed[c];
+            if (st?.currentMatchId) {
+              activeStationMatchIds.add(st.currentMatchId);
+              stationEntries.push({ court: c, matchId: st.currentMatchId });
+            }
+            if (st?.onDeckMatchId) {
+              activeStationMatchIds.add(st.onDeckMatchId);
+              stationEntries.push({ court: c, matchId: st.onDeckMatchId });
+            }
+          }
+        }
+      } catch {}
+    }
+
+    return allMatches.filter((m) => {
+      // Retain any match actively occupying or assigned to a facility court station
+      if (
+        activeStationMatchIds.has(m.id) ||
+        (m.court && m.court !== "Queue" && (FACILITY_COURT_NAMES as readonly string[]).includes(m.court as any))
+      ) {
+        return true;
+      }
+      for (const entry of stationEntries) {
+        if (isMatchMatchingStation(m, entry.matchId, entry.court)) {
+          return true;
+        }
+      }
+      return (
         m.tournamentSlug === effectiveSlug ||
         (!m.tournamentSlug && m.id.includes(effectiveSlug))
-    );
+      );
+    });
   }, [allMatches, effectiveSlug]);
 
   useEffect(() => {
@@ -510,7 +683,7 @@ export function useMatchStore(tournamentSlug?: string) {
                 setIsCloudSynced(true);
               }
             })
-            .catch(() => {});
+            .catch(() => { });
         },
         () => {
           // Court changes trigger match refresh
@@ -523,14 +696,31 @@ export function useMatchStore(tournamentSlug?: string) {
                 setAllMatches((prev) => (JSON.stringify(prev) === JSON.stringify(merged) ? prev : merged));
               }
             })
-            .catch(() => {});
+            .catch(() => { });
         }
       );
     } catch (err) {
       console.warn("[MatchStore] Realtime subscription error:", err);
     }
 
-    // 3. Cross-tab storage listeners
+    // 3. Fallback periodic 3s cloud poll to ensure mobile browsers and waking tabs stay synced
+    const pollInterval = setInterval(() => {
+      if (mounted) {
+        dbGetMatches(effectiveSlug)
+          .then((cloudMatches) => {
+            if (mounted) {
+              const local = getMatches();
+              const merged = mergeMatchesSafely(cloudMatches, local);
+              saveMatches(merged, false);
+              setAllMatches((prev) => (JSON.stringify(prev) === JSON.stringify(merged) ? prev : merged));
+              setIsCloudSynced(true);
+            }
+          })
+          .catch(() => { });
+      }
+    }, 3000);
+
+    // 4. Cross-tab storage listeners
     const handleStorage = (e: StorageEvent) => {
       if (e.key === STORAGE_KEY) {
         refresh();
@@ -540,20 +730,38 @@ export function useMatchStore(tournamentSlug?: string) {
       refresh();
     };
 
+    // 5. Visibility & Reconnection Recovery:
+    // When a mobile device wakes or a backgrounded browser tab resumes, immediately poll cloud and flush queued offline scores
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") {
+        refreshFromCloud();
+        flushOfflineScoreJournal().catch(() => { });
+      }
+    };
+    const handleOnline = () => {
+      refreshFromCloud();
+      flushOfflineScoreJournal().catch(() => { });
+    };
+
     window.addEventListener("storage", handleStorage);
     window.addEventListener("dv_matches_updated", handleCustom);
+    document.addEventListener("visibilitychange", handleVisibility);
+    window.addEventListener("online", handleOnline);
 
     return () => {
       mounted = false;
       if (unsubRealtime) {
         try {
           unsubRealtime();
-        } catch {}
+        } catch { }
       }
+      clearInterval(pollInterval);
       window.removeEventListener("storage", handleStorage);
       window.removeEventListener("dv_matches_updated", handleCustom);
+      document.removeEventListener("visibilitychange", handleVisibility);
+      window.removeEventListener("online", handleOnline);
     };
-  }, [refresh, effectiveSlug]);
+  }, [refresh, refreshFromCloud, effectiveSlug]);
 
   const update = useCallback((matchId: string, updater: (m: LiveMatch) => LiveMatch) => {
     const updated = updateMatch(matchId, updater);
@@ -573,7 +781,7 @@ export function useMatchStore(tournamentSlug?: string) {
     );
   }, []);
 
-  return { matches, allMatches, refresh, update, deleteMatch: removeMatch, resetAll, isCloudSynced };
+  return { matches, allMatches, refresh, refreshFromCloud, update, deleteMatch: removeMatch, resetAll, isCloudSynced };
 }
 
 /* ─────────────────────────────────────────────
@@ -798,7 +1006,15 @@ export function createPairMatchId(
 ): string {
   const normSlug = (tournamentSlug || "tournament").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
   const normCat = (categoryId || "cat").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
-  const normStage = (stageOrBracket || "match").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/-+/g, "-");
+
+  // Standardize stage: if it references a pool/bracket letter (e.g. "Bracket A", "Bracket A (Pool Play)", "Pool A - Round 1"),
+  // normalize to "bracket-[letter]" so IDs never diverge between draws, unassigned lists, queues, and dispatch stations.
+  let cleanStage = (stageOrBracket || "match").trim().toLowerCase();
+  const poolLetterMatch = cleanStage.match(/(?:bracket|pool)\s*([a-z])/i);
+  if (poolLetterMatch) {
+    cleanStage = `bracket-${poolLetterMatch[1]!.toLowerCase()}`;
+  }
+  const normStage = cleanStage.replace(/[^a-z0-9]+/g, "-").replace(/-+/g, "-");
 
   const normA = (teamAName || "teama").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
   const normB = (teamBName || "teamb").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
@@ -849,7 +1065,7 @@ export function findMatchForPair(
   const normA = teamAName.trim().toLowerCase();
   const normB = teamBName.trim().toLowerCase();
 
-  return matches.find((m) => {
+  const candidates = matches.filter((m) => {
     if (tournamentSlug && m.tournamentSlug && m.tournamentSlug !== tournamentSlug) return false;
     if (categoryId && m.categoryId && m.categoryId !== categoryId) return false;
 
@@ -861,8 +1077,10 @@ export function findMatchForPair(
     if (stageOrBracket && m.stage) {
       const cleanTarget = stageOrBracket.trim().toLowerCase();
       const cleanMatchStage = m.stage.trim().toLowerCase();
-      const targetBracket = cleanTarget.match(/(?:bracket|pool)\s*([a-z])/i)?.[1]?.toLowerCase();
-      const matchBracket = cleanMatchStage.match(/(?:bracket|pool)\s*([a-z])/i)?.[1]?.toLowerCase();
+      const targetBracket =
+        cleanTarget.match(/(?:bracket|pool)?\s*([a-z])\b/i)?.[1]?.toLowerCase() ||
+        (cleanTarget.length === 1 && /[a-z]/i.test(cleanTarget) ? cleanTarget.toLowerCase() : undefined);
+      const matchBracket = cleanMatchStage.match(/(?:bracket|pool)\s*([a-z])\b/i)?.[1]?.toLowerCase();
       if (targetBracket && matchBracket && targetBracket !== matchBracket) {
         return false;
       }
@@ -870,6 +1088,40 @@ export function findMatchForPair(
 
     return true;
   });
+
+  if (candidates.length === 0) return undefined;
+  if (candidates.length === 1) return candidates[0];
+
+  // If multiple candidates exist for this team pair, prioritize:
+  // 1. Concluded matches with final score or winner
+  // 2. Live matches currently underway or on court
+  // 3. Matches with higher score/rallies recorded
+  // 4. Most recent startedAt/endedAt
+  return candidates.sort((a, b) => {
+    // 1. Final status wins over non-final
+    if (a.status === "final" && b.status !== "final") return -1;
+    if (b.status === "final" && a.status !== "final") return 1;
+
+    // 2. Live status wins over scheduled
+    if (a.status === "live" && b.status === "scheduled") return -1;
+    if (b.status === "live" && a.status === "scheduled") return 1;
+
+    // 3. Court assigned wins over unassigned/Queue
+    const aOnCourt = a.court && a.court !== "Queue";
+    const bOnCourt = b.court && b.court !== "Queue";
+    if (aOnCourt && !bOnCourt) return -1;
+    if (bOnCourt && !aOnCourt) return 1;
+
+    // 4. Point total
+    const aPts = (a.score?.teamAScore ?? 0) + (a.score?.teamBScore ?? 0);
+    const bPts = (b.score?.teamAScore ?? 0) + (b.score?.teamBScore ?? 0);
+    if (aPts !== bPts) return bPts - aPts;
+
+    // 5. Most recent endedAt or startedAt
+    const aTime = a.endedAt || a.startedAt || 0;
+    const bTime = b.endedAt || b.startedAt || 0;
+    return bTime - aTime;
+  })[0];
 }
 
 /**
@@ -1157,9 +1409,9 @@ export function purgeMatchesForCategory(
   saveMatches(retained, false);
 
   // Clean up from database
-  dbDeleteMatchesForCategory(tournamentSlug, categoryId).catch(() => {});
+  dbDeleteMatchesForCategory(tournamentSlug, categoryId).catch(() => { });
   for (const id of deletedMatchIds) {
-    dbDeleteMatch(id).catch(() => {});
+    dbDeleteMatch(id).catch(() => { });
   }
 }
 
@@ -1190,7 +1442,7 @@ export function purgeMatchesForTeam(tournamentSlug: string, categoryId: string, 
   if (deletedMatchIds.length > 0) {
     saveMatches(retained, false);
     for (const id of deletedMatchIds) {
-      dbDeleteMatch(id).catch(() => {});
+      dbDeleteMatch(id).catch(() => { });
     }
   }
 }
@@ -1216,7 +1468,7 @@ export function purgeMatchesForTournament(tournamentSlug: string): void {
   if (deletedMatchIds.length > 0) {
     saveMatches(retained, false);
     for (const id of deletedMatchIds) {
-      dbDeleteMatch(id).catch(() => {});
+      dbDeleteMatch(id).catch(() => { });
     }
   }
 }
@@ -1252,7 +1504,7 @@ export function purgeMatchesNotInTeams(
   if (deletedMatchIds.length > 0) {
     saveMatches(retained, false);
     for (const id of deletedMatchIds) {
-      dbDeleteMatch(id).catch(() => {});
+      dbDeleteMatch(id).catch(() => { });
     }
   }
 }

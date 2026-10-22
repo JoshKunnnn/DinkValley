@@ -590,63 +590,137 @@ export async function dbDeleteMatchesForCategory(
   }
 }
 
+const _inFlightMatchFetches = new Map<string, Promise<LiveMatch[]>>();
+
 /**
  * Fetch matches from Supabase.
  * If tournamentSlug is provided, filters by tournament; otherwise returns all active matches.
+ * Concurrent requests for the same tournament are coalesced to prevent socket/connection overload.
  */
 export async function dbGetMatches(tournamentSlug?: string): Promise<LiveMatch[]> {
-  try {
-    let query = supabase.from("matches").select("*");
-
-    if (tournamentSlug) {
-      const { data: tourney } = await supabase
-        .from("tournaments")
-        .select("id")
-        .eq("slug", tournamentSlug)
-        .maybeSingle();
-
-      if (tourney?.id) {
-        query = query.or(`tournament_id.eq.${tourney.id},tournament_slug.eq.${tournamentSlug}`);
-      } else {
-        query = query.eq("tournament_slug", tournamentSlug);
-      }
-    }
-
-    const { data: dbMatches, error } = await query.order("created_at", { ascending: true });
-
-    if (error || !dbMatches) return [];
-
-    return dbMatches.map((m) => {
-      const score: LiveScore = {
-        teamAScore: m.team_a_score,
-        teamBScore: m.team_b_score,
-        servingTeam: (m.serving_team as "A" | "B") || "A",
-        serverNumber: (m.server_number as 1 | 2) || 1,
-        rallies: Array.isArray(m.rallies) ? (m.rallies as any) : [],
-      };
-
-      return {
-        id: m.id,
-        court: m.court,
-        teamAName: m.team_a_name,
-        teamAPlayers: m.team_a_players || [],
-        teamBName: m.team_b_name,
-        teamBPlayers: m.team_b_players || [],
-        status: m.status as LiveMatch["status"],
-        score,
-        winnerTeam: m.winner_team || undefined,
-        startedAt: m.started_at ? new Date(m.started_at).getTime() : undefined,
-        endedAt: m.ended_at ? new Date(m.ended_at).getTime() : undefined,
-        officiatedBy: m.officiated_by || undefined,
-        tournamentSlug: m.tournament_slug || tournamentSlug || undefined,
-        categoryId: m.category_id || undefined,
-        stage: m.stage || undefined,
-      };
-    });
-  } catch (err) {
-    console.warn("[Supabase] Failed to fetch matches:", err);
-    return [];
+  const cacheKey = tournamentSlug || "__all__";
+  if (_inFlightMatchFetches.has(cacheKey)) {
+    return _inFlightMatchFetches.get(cacheKey)!;
   }
+
+  const fetchPromise = (async () => {
+    try {
+      let query = supabase.from("matches").select("*");
+
+      if (tournamentSlug) {
+        const { data: tourney } = await supabase
+          .from("tournaments")
+          .select("id")
+          .eq("slug", tournamentSlug)
+          .maybeSingle();
+
+        if (tourney?.id) {
+          query = query.or(
+            `tournament_id.eq.${tourney.id},tournament_slug.eq.${tournamentSlug},court.eq.Court 1,court.eq.Court 2,court.eq.Court 3,court.eq.Court 4`
+          );
+        } else {
+          query = query.or(
+            `tournament_slug.eq.${tournamentSlug},court.eq.Court 1,court.eq.Court 2,court.eq.Court 3,court.eq.Court 4`
+          );
+        }
+      }
+
+      const { data: dbMatches, error } = await query.order("created_at", { ascending: true });
+
+      if (error || !dbMatches) return [];
+
+      const mapped: LiveMatch[] = dbMatches.map((m) => {
+        const score: LiveScore = {
+          teamAScore: m.team_a_score,
+          teamBScore: m.team_b_score,
+          servingTeam: (m.serving_team as "A" | "B") || "A",
+          serverNumber: (m.server_number as 1 | 2) || 1,
+          rallies: Array.isArray(m.rallies) ? (m.rallies as any) : [],
+        };
+
+        return {
+          id: m.id,
+          court: m.court,
+          teamAName: m.team_a_name,
+          teamAPlayers: m.team_a_players || [],
+          teamBName: m.team_b_name,
+          teamBPlayers: m.team_b_players || [],
+          status: m.status as LiveMatch["status"],
+          score,
+          winnerTeam: m.winner_team || undefined,
+          startedAt: m.started_at ? new Date(m.started_at).getTime() : undefined,
+          endedAt: m.ended_at ? new Date(m.ended_at).getTime() : undefined,
+          officiatedBy: m.officiated_by || undefined,
+          tournamentSlug: m.tournament_slug || tournamentSlug || undefined,
+          categoryId: m.category_id || undefined,
+          stage: m.stage || undefined,
+        };
+      });
+
+      // Strict Deduplication:
+      // A tournament bracket stage must have at most 1 authoritative match record per pair.
+      // If historical seeds left ghost 0-0 "scheduled" duplicates, authoritative records (final/live/scored) win,
+      // and duplicate ghost records are dropped and pruned from the database.
+      const byPair = new Map<string, LiveMatch>();
+      const zombieIdsToDelete: string[] = [];
+
+      for (const m of mapped) {
+        if (!m.teamAName || !m.teamBName) {
+          byPair.set(m.id, m);
+          continue;
+        }
+        const pair = [m.teamAName.trim().toLowerCase(), m.teamBName.trim().toLowerCase()].sort().join("::");
+        const bracket = (m.stage || "").match(/(?:bracket|pool)\s*([a-z])/i)?.[1]?.toLowerCase() || "pool";
+        const key = `${m.tournamentSlug || "event"}::${m.categoryId || "division"}::${bracket}::${pair}`;
+
+        if (!byPair.has(key)) {
+          byPair.set(key, m);
+        } else {
+          const prev = byPair.get(key)!;
+          const prevScore = (prev.score?.teamAScore ?? 0) + (prev.score?.teamBScore ?? 0);
+          const currScore = (m.score?.teamAScore ?? 0) + (m.score?.teamBScore ?? 0);
+
+          const currWins =
+            (m.status === "final" && prev.status !== "final") ||
+            (m.status === "live" && prev.status === "scheduled") ||
+            (currScore > prevScore) ||
+            (m.court && m.court !== "Queue" && (!prev.court || prev.court === "Queue"));
+
+          if (currWins) {
+            byPair.set(key, m);
+            if (prev.status === "scheduled" && prevScore === 0) {
+              zombieIdsToDelete.push(prev.id);
+            }
+          } else {
+            if (m.status === "scheduled" && currScore === 0) {
+              zombieIdsToDelete.push(m.id);
+            }
+          }
+        }
+      }
+
+      // Background purge of detected zombie duplicate records from Supabase
+      if (zombieIdsToDelete.length > 0) {
+        (async () => {
+          for (const zid of zombieIdsToDelete) {
+            try {
+              await supabase.from("matches").delete().eq("id", zid);
+            } catch {}
+          }
+        })().catch(() => {});
+      }
+
+      return Array.from(byPair.values());
+    } catch (err) {
+      console.warn("[Supabase] Failed to fetch matches:", err);
+      return [];
+    } finally {
+      _inFlightMatchFetches.delete(cacheKey);
+    }
+  })();
+
+  _inFlightMatchFetches.set(cacheKey, fetchPromise);
+  return fetchPromise;
 }
 
 const _tourneyIdBySlug = new Map<string, string>();
@@ -744,6 +818,64 @@ export async function dbSaveMatchesBatch(
   }
 }
 
+const OFFLINE_JOURNAL_KEY = "dv_offline_score_journal";
+
+export type OfflineScoreEntry = {
+  match: LiveMatch;
+  tournamentSlug?: string | undefined;
+  queuedAt: number;
+};
+
+export function getOfflineScoreJournal(): Record<string, OfflineScoreEntry> {
+  try {
+    const raw = typeof localStorage !== "undefined" ? localStorage.getItem(OFFLINE_JOURNAL_KEY) : null;
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+export function saveOfflineScoreJournal(journal: Record<string, OfflineScoreEntry>): void {
+  try {
+    if (typeof localStorage !== "undefined") {
+      if (Object.keys(journal).length === 0) {
+        localStorage.removeItem(OFFLINE_JOURNAL_KEY);
+      } else {
+        localStorage.setItem(OFFLINE_JOURNAL_KEY, JSON.stringify(journal));
+      }
+    }
+  } catch {}
+}
+
+export async function flushOfflineScoreJournal(): Promise<number> {
+  const journal = getOfflineScoreJournal();
+  const entries = Object.values(journal);
+  if (entries.length === 0) return 0;
+
+  let flushedCount = 0;
+  for (const entry of entries) {
+    try {
+      const ok = await dbSaveMatch(entry.match, entry.tournamentSlug);
+      if (ok) {
+        delete journal[entry.match.id];
+        flushedCount++;
+      }
+    } catch {
+      // still offline, retain entry
+    }
+  }
+  saveOfflineScoreJournal(journal);
+  return flushedCount;
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("online", () => {
+    flushOfflineScoreJournal().catch(() => {});
+  });
+}
+
+const _pendingMatchSaves = new Map<string, { match: LiveMatch; tournamentSlug?: string | undefined }>();
+
 export async function dbSaveMatch(
   match: LiveMatch,
   tournamentSlug?: string
@@ -751,11 +883,13 @@ export async function dbSaveMatch(
   const slug = match.tournamentSlug || tournamentSlug;
   const fp = getMatchFingerprint(match, slug);
 
-  if (_lastSavedMatchHash.get(match.id) === fp) {
+  if (_lastSavedMatchHash.get(match.id) === fp && !_pendingMatchSaves.has(match.id)) {
     return true;
   }
 
+  // If already saving this match, queue the latest version so it executes immediately after
   if (_inFlightMatchSaves.has(match.id)) {
+    _pendingMatchSaves.set(match.id, { match, tournamentSlug });
     return _inFlightMatchSaves.get(match.id)!;
   }
 
@@ -784,16 +918,48 @@ export async function dbSaveMatch(
 
       if (error) {
         console.warn("[Supabase] Error saving match:", error.message);
+        const journal = getOfflineScoreJournal();
+        journal[match.id] = { match, tournamentSlug: slug, queuedAt: Date.now() };
+        saveOfflineScoreJournal(journal);
         return false;
       }
 
+      // Success: clean from offline journal if queued
+      const journal = getOfflineScoreJournal();
+      if (journal[match.id]) {
+        delete journal[match.id];
+        saveOfflineScoreJournal(journal);
+      }
+
       _lastSavedMatchHash.set(match.id, fp);
+      recordScoreSyncEvent({
+        timestamp: Date.now(),
+        court: match.court || null,
+        matchId: match.id,
+        teams: `${match.teamAName} vs ${match.teamBName}`,
+        scoreA: match.score.teamAScore,
+        scoreB: match.score.teamBScore,
+        serverNumber: match.score.serverNumber,
+        servingTeam: match.score.servingTeam,
+        source: "local_save",
+        status: match.status,
+        officiatedBy: match.officiatedBy || null,
+      });
       return true;
     } catch (err) {
       console.warn("[Supabase] Error saving match:", err);
+      const journal = getOfflineScoreJournal();
+      journal[match.id] = { match, tournamentSlug: slug, queuedAt: Date.now() };
+      saveOfflineScoreJournal(journal);
       return false;
     } finally {
       _inFlightMatchSaves.delete(match.id);
+      // If a subsequent update arrived while this save was in flight, dispatch it now
+      if (_pendingMatchSaves.has(match.id)) {
+        const next = _pendingMatchSaves.get(match.id)!;
+        _pendingMatchSaves.delete(match.id);
+        dbSaveMatch(next.match, next.tournamentSlug).catch(() => {});
+      }
     }
   })();
 
@@ -825,47 +991,176 @@ export async function dbClearAllMatches(): Promise<boolean> {
   }
 }
 
+let _inFlightCourtStationsFetch: Promise<Record<string, any>> | null = null;
+
 /**
  * Fetch court station statuses (Courts 1–4).
+ * Coalesces concurrent calls to prevent redundant socket/network load.
  */
 export async function dbGetCourtStations(): Promise<Record<string, any>> {
-  try {
-    const { data, error } = await supabase.from("court_stations").select("*");
-    if (error || !data) return {};
+  if (_inFlightCourtStationsFetch) {
+    return _inFlightCourtStationsFetch;
+  }
 
-    const map: Record<string, any> = {};
-    for (const station of data) {
-      // Map DB status to UI status: 'in-match' -> 'live', 'idle' -> 'available'
-      let uiStatus: "available" | "warmup" | "live" | "maintenance" = "available";
-      if (station.status === "in-match" || station.status === "live") {
-        uiStatus = "live";
-      } else if (station.status === "warmup") {
-        uiStatus = "warmup";
-      } else if (station.status === "maintenance") {
-        uiStatus = "maintenance";
-      } else {
-        uiStatus = "available";
+  _inFlightCourtStationsFetch = (async () => {
+    try {
+      const { data, error } = await supabase.from("court_stations").select("*");
+      if (error || !data) return {};
+
+      const map: Record<string, any> = {};
+      for (const station of data) {
+        // Map DB status to UI status: 'in-match' -> 'live', 'idle' -> 'available'
+        let uiStatus: "available" | "warmup" | "live" | "maintenance" = "available";
+        if (station.status === "in-match" || station.status === "live") {
+          uiStatus = "live";
+        } else if (station.status === "warmup") {
+          uiStatus = "warmup";
+        } else if (station.status === "maintenance") {
+          uiStatus = "maintenance";
+        } else {
+          uiStatus = "available";
+        }
+
+        map[station.court_name] = {
+          court: station.court_name,
+          currentMatchId: station.current_match_id,
+          onDeckMatchId: station.on_deck_match_id,
+          assignedUmpire: station.assigned_umpire,
+          dispatchedAt: station.dispatched_at ? new Date(station.dispatched_at).getTime() : null,
+          maintenanceNote: station.maintenance_note,
+          status: uiStatus,
+        };
       }
-
-      map[station.court_name] = {
-        court: station.court_name,
-        currentMatchId: station.current_match_id,
-        onDeckMatchId: station.on_deck_match_id,
-        assignedUmpire: station.assigned_umpire,
-        dispatchedAt: station.dispatched_at ? new Date(station.dispatched_at).getTime() : null,
-        maintenanceNote: station.maintenance_note,
-        status: uiStatus,
-      };
+      return map;
+    } catch (err) {
+      console.warn("[Supabase] Error fetching court stations:", err);
+      return {};
+    } finally {
+      _inFlightCourtStationsFetch = null;
     }
-    return map;
+  })();
+
+  return _inFlightCourtStationsFetch;
+}
+
+// Tracks when THIS device last wrote each court station, so hydration can protect
+// in-flight local writes without resurrecting stale state from other devices.
+const _stationWriteAt = new Map<string, number>();
+const _stationWriteFingerprint = new Map<string, { fp: string; at: number }>();
+
+export function getStationLocalWriteAt(courtName: string): number {
+  return _stationWriteAt.get(courtName) ?? 0;
+}
+
+/** Marks a station as locally written now (used when the cloud push is intentionally deferred). */
+export function markStationLocalWrite(courtName: string): void {
+  _stationWriteAt.set(courtName, Date.now());
+}
+
+/**
+ * Retrieves raw court stations directly from Supabase without UI status translation.
+ */
+export async function dbGetRawCourtStations(): Promise<any[]> {
+  try {
+    const { data, error } = await supabase.from("court_stations").select("*").order("court_name");
+    if (error || !data) return [];
+    return data;
   } catch (err) {
-    console.warn("[Supabase] Error fetching court stations:", err);
-    return {};
+    console.warn("[Supabase] Error fetching raw court stations:", err);
+    return [];
+  }
+}
+
+export type ScoreSyncEvent = {
+  id: string;
+  timestamp: number;
+  court?: string | null;
+  matchId: string;
+  teams: string;
+  scoreA: number;
+  scoreB: number;
+  serverNumber: number;
+  servingTeam: string;
+  source: "realtime" | "local_save" | "poll" | "offline_flush";
+  status: string;
+  officiatedBy?: string | null;
+  latencyMs?: number;
+};
+
+const _recentScoreSyncEvents: ScoreSyncEvent[] = [];
+const _scoreSyncListeners = new Set<(evt: ScoreSyncEvent) => void>();
+
+export function recordScoreSyncEvent(evt: Omit<ScoreSyncEvent, "id">): void {
+  const full: ScoreSyncEvent = {
+    ...evt,
+    id: `sync-evt-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+  };
+  _recentScoreSyncEvents.unshift(full);
+  if (_recentScoreSyncEvents.length > 50) {
+    _recentScoreSyncEvents.pop();
+  }
+  for (const listener of _scoreSyncListeners) {
+    try {
+      listener(full);
+    } catch {}
+  }
+}
+
+export function getRecentScoreSyncEvents(): ScoreSyncEvent[] {
+  return [..._recentScoreSyncEvents];
+}
+
+export function subscribeScoreSyncEvents(cb: (evt: ScoreSyncEvent) => void): () => void {
+  _scoreSyncListeners.add(cb);
+  return () => {
+    _scoreSyncListeners.delete(cb);
+  };
+}
+
+export async function measureScoreSyncLatency(): Promise<{ latencyMs: number; ok: boolean; error?: string | undefined }> {
+  const start = performance.now();
+  try {
+    const { error } = await supabase.from("tournaments").select("id").limit(1);
+    const end = performance.now();
+    return {
+      latencyMs: Math.max(1, Math.round(end - start)),
+      ok: !error,
+      error: error?.message,
+    };
+  } catch (err: any) {
+    return {
+      latencyMs: -1,
+      ok: false,
+      error: err?.message || "Network error",
+    };
   }
 }
 
 /**
+ * Returns current sync, subscription, and in-flight queue metrics for diagnostics.
+ */
+export function getDispatchSyncTelemetry(): {
+  activeSubscribers: number;
+  sharedChannelConnected: boolean;
+  inFlightMatchSavesCount: number;
+  pendingMatchSavesCount: number;
+  inFlightCourtStationsFetchActive: boolean;
+  offlineJournalCount: number;
+} {
+  return {
+    activeSubscribers: _subscribers.size,
+    sharedChannelConnected: Boolean(_sharedChannel),
+    inFlightMatchSavesCount: _inFlightMatchSaves.size,
+    pendingMatchSavesCount: _pendingMatchSaves.size,
+    inFlightCourtStationsFetchActive: Boolean(_inFlightCourtStationsFetch),
+    offlineJournalCount: Object.keys(getOfflineScoreJournal()).length,
+  };
+}
+
+/**
  * Update court station in Supabase.
+ * Identical repeat writes within 15s are skipped (e.g. umpire re-asserting "live" on every point),
+ * which prevents a realtime broadcast storm to every connected device.
  */
 export async function dbUpdateCourtStation(
   courtName: string,
@@ -878,6 +1173,15 @@ export async function dbUpdateCourtStation(
     maintenanceNote?: string | null;
   }
 ): Promise<void> {
+  const fp = JSON.stringify(updates);
+  const prev = _stationWriteFingerprint.get(courtName);
+  const now = Date.now();
+  if (prev && prev.fp === fp && now - prev.at < 1500) {
+    return;
+  }
+  _stationWriteFingerprint.set(courtName, { fp, at: now });
+  _stationWriteAt.set(courtName, now);
+
   try {
     // Map UI status to DB status to satisfy database constraint CHECK (status IN ('idle', 'in-match', 'warmup', 'maintenance'))
     let dbStatus: string | undefined = undefined;
@@ -891,7 +1195,7 @@ export async function dbUpdateCourtStation(
       }
     }
 
-    await supabase
+    const { error } = await supabase
       .from("court_stations")
       .upsert({
         court_name: courtName,
@@ -905,50 +1209,111 @@ export async function dbUpdateCourtStation(
         ...(updates.maintenanceNote !== undefined ? { maintenance_note: updates.maintenanceNote } : {}),
         updated_at: new Date().toISOString(),
       }, { onConflict: "court_name" });
+
+    if (error) {
+      // Allow an immediate retry on the next call
+      _stationWriteFingerprint.delete(courtName);
+      console.warn("[Supabase] Court station update rejected:", error.message);
+    }
   } catch (err) {
+    _stationWriteFingerprint.delete(courtName);
     console.warn("[Supabase] Failed to update court station:", err);
   }
 }
 
-/**
- * Subscribe to realtime match and court updates.
- *
- * Each call creates a channel with a unique name so React strict-mode
- * re-mounts and HMR don't collide with an already-subscribed channel.
- */
-let _liveChannelCounter = 0;
+type LiveSubscriber = {
+  id: number;
+  onMatchChange: () => void;
+  onCourtChange: () => void;
+};
 
-export function dbSubscribeToLive(
-  onMatchChange: () => void,
-  onCourtChange: () => void
-) {
-  _liveChannelCounter += 1;
-  const channelName = `dink-valley-live-sync-${_liveChannelCounter}-${Date.now()}`;
+let _subscriberSeq = 0;
+const _subscribers = new Map<number, LiveSubscriber>();
+let _sharedChannel: ReturnType<typeof supabase.channel> | null = null;
+let _matchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+let _courtDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
-  let channel: ReturnType<typeof supabase.channel> | null = null;
+function notifyMatchListeners() {
+  if (_matchDebounceTimer) clearTimeout(_matchDebounceTimer);
+  _matchDebounceTimer = setTimeout(() => {
+    _matchDebounceTimer = null;
+    for (const sub of _subscribers.values()) {
+      try {
+        sub.onMatchChange();
+      } catch (e) {
+        console.warn("[Realtime] Error in match listener:", e);
+      }
+    }
+  }, 120);
+}
+
+function notifyCourtListeners() {
+  if (_courtDebounceTimer) clearTimeout(_courtDebounceTimer);
+  _courtDebounceTimer = setTimeout(() => {
+    _courtDebounceTimer = null;
+    for (const sub of _subscribers.values()) {
+      try {
+        sub.onCourtChange();
+      } catch (e) {
+        console.warn("[Realtime] Error in court listener:", e);
+      }
+    }
+  }, 120);
+}
+
+function ensureSharedLiveChannel() {
+  if (_sharedChannel) return;
+  const channelName = "dink-valley-live-pubsub";
 
   try {
-    channel = supabase
+    _sharedChannel = supabase
       .channel(channelName)
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "matches" },
-        () => {
-          onMatchChange();
+        (payload: any) => {
+          if (payload?.new) {
+            const row = payload.new;
+            recordScoreSyncEvent({
+              timestamp: Date.now(),
+              court: row.court || null,
+              matchId: row.id,
+              teams: `${row.team_a_name || "Team A"} vs ${row.team_b_name || "Team B"}`,
+              scoreA: row.team_a_score ?? 0,
+              scoreB: row.team_b_score ?? 0,
+              serverNumber: row.server_number ?? 1,
+              servingTeam: row.serving_team ?? "A",
+              source: "realtime",
+              status: row.status || "live",
+              officiatedBy: row.officiated_by || null,
+            });
+          }
+          notifyMatchListeners();
         }
       )
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "court_stations" },
         () => {
-          onCourtChange();
+          notifyCourtListeners();
         }
       )
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "tournaments" },
         () => {
-          onMatchChange();
+          notifyMatchListeners();
+        }
+      )
+      .on(
+        "broadcast",
+        { event: "dv_match_dispatched" },
+        (payload: any) => {
+          if (payload?.payload && typeof window !== "undefined") {
+            window.dispatchEvent(
+              new CustomEvent("dv_remote_match_dispatched", { detail: payload.payload })
+            );
+          }
         }
       )
       .subscribe((status) => {
@@ -957,16 +1322,58 @@ export function dbSubscribeToLive(
         }
       });
   } catch (err) {
-    console.warn("[Supabase Realtime] Failed to create channel:", err);
+    console.warn("[Supabase Realtime] Failed to create shared channel:", err);
   }
+}
+
+/**
+ * Broadcasts an instantaneous dispatch alert to all connected devices via Supabase Realtime channel.
+ */
+export function broadcastDispatchAlert(detail: {
+  court: string;
+  matchId: string;
+  teamAName: string;
+  teamBName: string;
+  stage?: string | undefined;
+  umpire?: string | undefined;
+  match?: any;
+}): void {
+  ensureSharedLiveChannel();
+  if (_sharedChannel) {
+    _sharedChannel
+      .send({
+        type: "broadcast",
+        event: "dv_match_dispatched",
+        payload: detail,
+      })
+      .catch((err) => {
+        console.warn("[Realtime] Failed to broadcast dispatch event:", err);
+      });
+  }
+}
+
+/**
+ * Subscribe to realtime match and court updates.
+ *
+ * Uses a single shared Supabase channel multiplexed across all components with 120ms
+ * debouncing to prevent socket pool exhaustion and duplicate network storms.
+ */
+export function dbSubscribeToLive(
+  onMatchChange: () => void,
+  onCourtChange: () => void
+): () => void {
+  const id = ++_subscriberSeq;
+  _subscribers.set(id, { id, onMatchChange, onCourtChange });
+
+  ensureSharedLiveChannel();
 
   return () => {
-    if (channel) {
+    _subscribers.delete(id);
+    if (_subscribers.size === 0 && _sharedChannel) {
       try {
-        supabase.removeChannel(channel);
-      } catch {
-        // already removed
-      }
+        supabase.removeChannel(_sharedChannel);
+      } catch {}
+      _sharedChannel = null;
     }
   };
 }

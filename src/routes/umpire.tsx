@@ -5,11 +5,14 @@ import { UmpireMobileNav } from "@/components/admin/UmpireMobileNav";
 
 import {
   useMatchStore,
+  getMatches,
+  saveMatches,
   scorePoint,
   sideOut,
   endGame,
   undoLastRally,
   resetMatch,
+  isMatchMatchingStation,
   type LiveMatch,
 } from "@/lib/match-store";
 import {
@@ -25,9 +28,11 @@ import {
   hydrateCourtStationsFromCloud,
   playDeskChime,
   isConfirmedDispatchedMatch,
+  findMatchForCourtStation,
 } from "@/lib/court-dispatch";
 import { useTournamentStore } from "@/lib/tournament-store";
-import { dbUpdateCourtStation } from "@/lib/supabase-service";
+import { dbUpdateCourtStation, dbSubscribeToLive } from "@/lib/supabase-service";
+import { DispatchDebugStation } from "@/components/admin/DispatchDebugStation";
 
 export const Route = createFileRoute("/umpire")({
   beforeLoad: () => {
@@ -85,25 +90,62 @@ function Umpire() {
   const activeTournamentSlug = tournamentFilter || defaultTournament?.slug || "";
   const activeTournament = tournaments.find((t) => t.slug === activeTournamentSlug) || defaultTournament;
 
-  const { matches, update, isCloudSynced } = useMatchStore(
+  const { matches, update, refresh, refreshFromCloud, isCloudSynced } = useMatchStore(
     activeTournamentSlug || undefined
   );
-
-  // Filter matches strictly to the active event to guarantee no past event matches appear
-  const activeEventMatches = useMemo(() => {
-    if (!activeTournamentSlug) return matches;
-    return matches.filter((m) => {
-      if (m.tournamentSlug) {
-        return m.tournamentSlug === activeTournamentSlug;
-      }
-      return true;
-    });
-  }, [matches, activeTournamentSlug]);
 
   const [activeTab, setActiveTab] = useState<UmpireTab>("console");
   const [selectedMatchId, setSelectedMatchId] = useState<string | null>(null);
   const [umpireName, setUmpireName] = useState("Official");
   const [stations, setStations] = useState<Record<FacilityCourt, CourtStation>>(() => getCourtStations());
+  const [isDebugOpen, setIsDebugOpen] = useState(false);
+  const [dispatchNotice, setDispatchNotice] = useState<{
+    court: string;
+    matchId: string;
+    teamAName: string;
+    teamBName: string;
+    stage?: string | undefined;
+  } | null>(null);
+
+  // Filter matches strictly to the active event, but NEVER drop matches actively occupying a facility court
+  const activeEventMatches = useMemo(() => {
+    const activeCourtMatchIds = new Set<string>();
+    for (const c of FACILITY_COURTS) {
+      const st = stations[c];
+      if (st?.currentMatchId) activeCourtMatchIds.add(st.currentMatchId);
+      if (st?.onDeckMatchId) activeCourtMatchIds.add(st.onDeckMatchId);
+    }
+
+    return matches.filter((m) => {
+      // 1. Retain any match whose ID directly matches an active or on-deck station
+      if (activeCourtMatchIds.has(m.id)) return true;
+
+      // 2. Retain any match that matches an active court station by team names / pair ID
+      for (const c of FACILITY_COURTS) {
+        const st = stations[c];
+        if (st?.currentMatchId && isMatchMatchingStation(m, st.currentMatchId, c)) {
+          return true;
+        }
+      }
+
+      // 3. Retain any match assigned to a facility court (Courts 1–4)
+      if (
+        m.court &&
+        m.court !== "Queue" &&
+        (FACILITY_COURTS as readonly string[]).includes(m.court as FacilityCourt) &&
+        (m.status === "live" || m.status === "scheduled")
+      ) {
+        return true;
+      }
+
+      // 4. Default to tournament slug match
+      if (!activeTournamentSlug) return true;
+      if (m.tournamentSlug) {
+        return m.tournamentSlug === activeTournamentSlug;
+      }
+      return true;
+    });
+  }, [matches, activeTournamentSlug, stations]);
 
   // Load umpire identity
   useEffect(() => {
@@ -115,16 +157,120 @@ function Umpire() {
   // Hydrate court stations from Supabase on mount and keep updated
   useEffect(() => {
     let mounted = true;
+
+    // Initial hydration
     hydrateCourtStationsFromCloud().then((hydrated) => {
       if (mounted) setStations(hydrated);
     });
+    refreshFromCloud();
 
     const reloadStations = () => {
       setStations(getCourtStations());
+      refresh();
+      refreshFromCloud();
+    };
+
+    const handleRemoteDispatch = (e: Event) => {
+      const customEvent = e as CustomEvent<{
+        court: string;
+        matchId: string;
+        teamAName: string;
+        teamBName: string;
+        stage?: string;
+        umpire?: string;
+        match?: LiveMatch;
+      }>;
+      const detail = customEvent.detail;
+      if (!detail) return;
+
+      // 1. Immediately inject the self-contained match payload into local storage for 0ms zero-latency rendering
+      if (detail.match) {
+        try {
+          const localMatches = getMatches();
+          const existingIdx = localMatches.findIndex(
+            (m) => m.id === detail.matchId || isMatchMatchingStation(m, detail.matchId, detail.court)
+          );
+          if (existingIdx !== -1) {
+            localMatches[existingIdx] = {
+              ...localMatches[existingIdx],
+              ...detail.match,
+              court: detail.court,
+              status: detail.match.status || "scheduled",
+            };
+          } else {
+            localMatches.push({
+              ...detail.match,
+              court: detail.court,
+              status: detail.match.status || "scheduled",
+            });
+          }
+          saveMatches(localMatches, false);
+          refresh();
+        } catch {
+          // ignore
+        }
+      }
+
+      // 2. Immediately pull fresh stations from cloud
+      hydrateCourtStationsFromCloud().then((cloud) => {
+        if (mounted) setStations(cloud);
+      });
+      // 3. Confirm with fresh matches from cloud
+      refreshFromCloud();
+      setTimeout(() => {
+        if (mounted) {
+          hydrateCourtStationsFromCloud().then((cloud) => {
+            if (mounted) setStations(cloud);
+          });
+          refreshFromCloud();
+        }
+      }, 1200);
+
+      // Play audio chime and haptic feedback
+      try {
+        playDeskChime();
+      } catch {}
+
+      if (typeof navigator !== "undefined" && navigator.vibrate) {
+        try {
+          navigator.vibrate([150, 75, 150]);
+        } catch {}
+      }
+
+      setDispatchNotice({
+        court: detail.court,
+        matchId: detail.matchId,
+        teamAName: detail.teamAName,
+        teamBName: detail.teamBName,
+        stage: detail.stage,
+      });
+
+      // Auto-dismiss notification after 10 seconds
+      setTimeout(() => {
+        if (mounted) setDispatchNotice((curr) => (curr?.matchId === detail.matchId ? null : curr));
+      }, 10000);
     };
 
     window.addEventListener("storage", reloadStations);
     window.addEventListener("dv_matches_updated", reloadStations);
+    window.addEventListener("dv_court_stations_updated", reloadStations);
+    window.addEventListener("dv_remote_match_dispatched", handleRemoteDispatch);
+
+    const unsubRealtime = dbSubscribeToLive(
+      () => {
+        // Realtime notification when matches table changes in Supabase
+        refresh();
+        refreshFromCloud();
+      },
+      () => {
+        // Realtime notification when court_stations table changes in Supabase
+        hydrateCourtStationsFromCloud().then((cloud) => {
+          if (mounted) setStations(cloud);
+        });
+        refreshFromCloud();
+      }
+    );
+
     const interval = setInterval(() => {
       hydrateCourtStationsFromCloud().then((cloud) => {
         if (mounted) setStations(cloud);
@@ -133,11 +279,14 @@ function Umpire() {
 
     return () => {
       mounted = false;
+      unsubRealtime();
       window.removeEventListener("storage", reloadStations);
       window.removeEventListener("dv_matches_updated", reloadStations);
+      window.removeEventListener("dv_court_stations_updated", reloadStations);
+      window.removeEventListener("dv_remote_match_dispatched", handleRemoteDispatch);
       clearInterval(interval);
     };
-  }, []);
+  }, [umpireName, refresh, refreshFromCloud]);
 
   const handleLogout = () => {
     localStorage.removeItem("mock_umpire_auth");
@@ -150,7 +299,16 @@ function Umpire() {
     setActiveTab("console");
   };
 
-  const selectedMatch = activeEventMatches.find((m) => m.id === selectedMatchId) ?? null;
+  const selectedMatch = useMemo(() => {
+    if (!selectedMatchId) return null;
+    return (
+      activeEventMatches.find((m) => m.id === selectedMatchId) ??
+      matches.find((m) => m.id === selectedMatchId) ??
+      activeEventMatches.find((m) => isMatchMatchingStation(m, selectedMatchId)) ??
+      matches.find((m) => isMatchMatchingStation(m, selectedMatchId)) ??
+      null
+    );
+  }, [selectedMatchId, activeEventMatches, matches]);
 
   const tabs: { key: UmpireTab; label: string }[] = [
     { key: "console", label: "Court Supervision" },
@@ -217,6 +375,15 @@ function Umpire() {
               ) : null}
 
               <button
+                onClick={() => setIsDebugOpen(true)}
+                title="Open score sync telemetry and dispatch debug station"
+                className="px-2.5 py-1.5 text-[0.65rem] font-bold uppercase tracking-widest bg-charcoal border border-pickle/40 text-pickle hover:bg-pickle/20 transition-colors cursor-pointer flex items-center gap-1"
+              >
+                <span className="h-1.5 w-1.5 rounded-full bg-pickle animate-pulse" />
+                <span>Score Sync Debug</span>
+              </button>
+
+              <button
                 onClick={handleLogout}
                 className="px-3 py-1.5 text-[0.65rem] font-bold uppercase tracking-widest bg-brick/20 border border-brick/40 text-brick hover:bg-brick/30 transition-colors cursor-pointer"
               >
@@ -248,6 +415,48 @@ function Umpire() {
         </div>
       </div>
 
+      {/* Realtime Match Dispatch Notification Banner */}
+      {dispatchNotice && (
+        <div className="bg-pickle text-sand border-b-2 border-charcoal px-4 py-2.5 shadow-lg flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <span className="font-mono text-xs px-2 py-0.5 bg-charcoal text-pickle font-bold uppercase tracking-wider shrink-0">
+              {dispatchNotice.court}
+            </span>
+            <div className="min-w-0">
+              <span className="text-xs font-bold text-sand block truncate">
+                Match Dispatched: {dispatchNotice.teamAName} vs {dispatchNotice.teamBName}
+              </span>
+              {dispatchNotice.stage && (
+                <span className="text-[0.65rem] text-sand/80 block uppercase tracking-wider font-semibold">
+                  {dispatchNotice.stage}
+                </span>
+              )}
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0 self-end sm:self-auto">
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedMatchId(dispatchNotice.matchId);
+                setActiveTab("console");
+                setDispatchNotice(null);
+              }}
+              className="px-3 py-1.5 text-xs font-bold uppercase tracking-wider bg-charcoal text-pickle border border-charcoal hover:bg-charcoal/90 transition-colors cursor-pointer"
+            >
+              Open Match
+            </button>
+            <button
+              type="button"
+              onClick={() => setDispatchNotice(null)}
+              className="p-1.5 text-sand hover:text-sand/70 transition-colors cursor-pointer"
+              title="Dismiss notification"
+            >
+              <X size={16} />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Main Content Area */}
       <div className="mx-auto max-w-6xl px-2 sm:px-4 py-2 sm:py-6">
         {activeTab === "console" && (
@@ -261,6 +470,7 @@ function Umpire() {
             onSelectMatch={(id) => setSelectedMatchId(id || null)}
             onBack={() => setSelectedMatchId(null)}
             onViewResults={() => setActiveTab("results")}
+            onOpenDebug={() => setIsDebugOpen(true)}
           />
         )}
         {activeTab === "results" && (
@@ -280,6 +490,17 @@ function Umpire() {
         onTabChange={setActiveTab}
         selectedMatchCourt={selectedMatch?.court ?? null}
         onLogout={handleLogout}
+      />
+
+      {/* Dispatch Telemetry & Debug Station */}
+      <DispatchDebugStation
+        isOpen={isDebugOpen}
+        onClose={() => setIsDebugOpen(false)}
+        tournamentSlug={activeTournamentSlug}
+        initialTab="score_sync"
+        onStateRepaired={() => {
+          setStations(getCourtStations());
+        }}
       />
     </div>
   );
@@ -413,9 +634,7 @@ function TournamentDesk({
             };
 
             // Find match occupying this station
-            const courtMatch =
-              matches.find((m) => m.id === st.currentMatchId) ??
-              matches.find((m) => m.court === court && (m.status === "live" || m.status === "scheduled"));
+            const courtMatch = findMatchForCourtStation(court, st, matches);
 
             const operatingOfficial = courtMatch?.officiatedBy || (st.status === "live" || st.status === "warmup" ? st.assignedUmpire : null);
             const isAssignedToMe = Boolean(courtMatch?.officiatedBy === currentUmpire || (!courtMatch?.officiatedBy && st.assignedUmpire === currentUmpire));
@@ -1415,6 +1634,7 @@ function UmpireConsole({
   onBack,
   onOpenQuickMatch,
   onViewResults,
+  onOpenDebug,
 }: {
   match: LiveMatch | null;
   matches: LiveMatch[];
@@ -1426,6 +1646,7 @@ function UmpireConsole({
   onBack?: () => void;
   onOpenQuickMatch?: () => void;
   onViewResults?: () => void;
+  onOpenDebug?: () => void;
 }) {
   const [showEndConfirm, setShowEndConfirm] = useState(false);
   const [showResetTossConfirm, setShowResetTossConfirm] = useState(false);
@@ -1573,11 +1794,17 @@ function UmpireConsole({
   const isDispatchedMatch = useCallback(
     (m: LiveMatch) => {
       if (m.status === "final") return false;
-      // 1. Actively assigned to a court station
+      // 1. Actively assigned to a court station (exact ID or matchup)
       if (dispatchedStationMatchIds.has(m.id)) return true;
-      // 2. Or is live on an active facility court
+      for (const c of FACILITY_COURTS) {
+        const st = currentStations[c];
+        if (st?.currentMatchId && isMatchMatchingStation(m, st.currentMatchId, c)) {
+          return true;
+        }
+      }
+      // 2. Or is live or scheduled on an active facility court
       if (
-        m.status === "live" &&
+        (m.status === "live" || m.status === "scheduled") &&
         m.court &&
         m.court !== "Queue" &&
         (FACILITY_COURTS as readonly string[]).includes(m.court as FacilityCourt)
@@ -1586,7 +1813,7 @@ function UmpireConsole({
       }
       return false;
     },
-    [dispatchedStationMatchIds],
+    [dispatchedStationMatchIds, currentStations],
   );
 
   const dispatchedMatches = useMemo(
@@ -1665,11 +1892,7 @@ function UmpireConsole({
             {FACILITY_COURTS.map((court) => {
               const st = currentStations[court];
               // Find dispatched match for this court
-              const courtMatch = matches.find((m) => {
-                if (m.status === "final") return false;
-                if (st?.currentMatchId && m.id === st.currentMatchId) return true;
-                return m.court === court;
-              });
+              const courtMatch = findMatchForCourtStation(court, st, matches);
 
               const isLive = courtMatch?.status === "live";
               const isScheduled = courtMatch?.status === "scheduled";
@@ -2258,6 +2481,18 @@ function UmpireConsole({
           )}
 
           <MatchStatusBadge status={match.status} />
+
+          {onOpenDebug && (
+            <button
+              type="button"
+              onClick={onOpenDebug}
+              title="Inspect score sync with tournament desk"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs uppercase tracking-wider font-mono border border-pickle/40 bg-charcoal text-pickle hover:bg-pickle/20 transition-colors cursor-pointer"
+            >
+              <span className="h-1.5 w-1.5 rounded-full bg-pickle animate-pulse" />
+              <span>Desk Sync</span>
+            </button>
+          )}
 
           {/* Official Badge */}
           <div className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 text-xs uppercase tracking-widest border border-border bg-charcoal text-sand">

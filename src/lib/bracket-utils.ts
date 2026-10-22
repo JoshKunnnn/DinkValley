@@ -4,6 +4,7 @@ import { getCachedDrawnGroups } from "./supabase-service";
 const _parsedGroupsCache = new Map<string, { raw: string; parsed: any }>();
 
 function readGroupsFromStorage(key: string): any | null {
+  if (typeof localStorage === "undefined") return null;
   const raw = localStorage.getItem(key);
   if (!raw) {
     _parsedGroupsCache.delete(key);
@@ -24,7 +25,7 @@ function readGroupsFromStorage(key: string): any | null {
  */
 export function isMatchInSameBracket(
   tournamentSlug: string,
-  categoryId: string,
+  categoryId?: string,
   stage?: string,
   teamAName?: string,
   teamBName?: string,
@@ -44,35 +45,29 @@ export function isMatchInSameBracket(
 
   const bracketLetter = match[1]!.toUpperCase();
 
-  // 1. Try to find drawn groups from in-memory cache
-  let groups: any[] | null = null;
+  // Collect all available candidate group lists for this tournament
+  const allCandidateGroups: Array<any[]> = [];
+
   if (tournamentSlug && categoryId) {
-    groups = getCachedDrawnGroups(tournamentSlug, categoryId);
+    const cached = getCachedDrawnGroups(tournamentSlug, categoryId);
+    if (cached && Array.isArray(cached) && cached.length > 0) {
+      allCandidateGroups.push(cached);
+    }
+    const direct = readGroupsFromStorage(`dv_drawn_groups_${tournamentSlug}_${categoryId}`);
+    if (direct && Array.isArray(direct) && direct.length > 0) {
+      allCandidateGroups.push(direct);
+    }
   }
 
-  // 2. Try to find drawn groups from localStorage
-  if (!groups && typeof localStorage !== "undefined") {
+  if (typeof localStorage !== "undefined") {
     try {
-      if (tournamentSlug && categoryId) {
-        const direct = readGroupsFromStorage(`dv_drawn_groups_${tournamentSlug}_${categoryId}`);
-        if (direct) groups = direct;
-      }
-      if (!groups) {
-        // Fallback: search localStorage keys for any drawn groups matching this tournament/category
-        for (let i = 0; i < localStorage.length; i++) {
-          const key = localStorage.key(i);
-          if (key && key.startsWith("dv_drawn_groups_")) {
-            if (tournamentSlug && !key.includes(tournamentSlug)) continue;
-            const parsed = readGroupsFromStorage(key);
-            if (parsed) {
-              if (Array.isArray(parsed) && parsed.length > 0) {
-                const hasLetter = parsed.some((g: any) => g.letter?.toUpperCase() === bracketLetter);
-                if (hasLetter) {
-                  groups = parsed;
-                  break;
-                }
-              }
-            }
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && key.startsWith("dv_drawn_groups_")) {
+          if (tournamentSlug && !key.includes(tournamentSlug)) continue;
+          const parsed = readGroupsFromStorage(key);
+          if (parsed && Array.isArray(parsed) && parsed.length > 0) {
+            allCandidateGroups.push(parsed);
           }
         }
       }
@@ -81,33 +76,59 @@ export function isMatchInSameBracket(
     }
   }
 
-  // If no drawn groups exist at all for this category, we cannot verify bracket membership
-  if (!groups || !Array.isArray(groups) || groups.length === 0) {
-    return true;
+  if (allCandidateGroups.length === 0) {
+    return true; // No draw found, allow match
   }
 
-  const targetGroup = groups.find((g: any) => g.letter?.toUpperCase() === bracketLetter);
-  if (!targetGroup || !Array.isArray(targetGroup.slots)) {
-    return true;
-  }
+  const getSlotTeamName = (slot: any): string => {
+    return (slot?.team?.name || slot?.name || "").trim().toLowerCase();
+  };
 
-  const groupTeamNames = new Set(
-    targetGroup.slots
-      .map((s: any) => (s?.team?.name || s?.name || "")?.trim().toLowerCase())
-      .filter(Boolean),
-  );
+  // Check each candidate draw to see if it contains either cleanA or cleanB
+  for (const groups of allCandidateGroups) {
+    let bracketA: string | null = null;
+    let bracketB: string | null = null;
 
-  if (groupTeamNames.size < 2) {
-    return true;
-  }
+    for (const grp of groups) {
+      const letter = grp.letter?.toUpperCase();
+      if (!letter || !Array.isArray(grp.slots)) continue;
 
-  // If categoryId was not specified, verify the target group actually includes at least one team before rejecting
-  if (!categoryId) {
-    const hasEither = groupTeamNames.has(cleanA) || groupTeamNames.has(cleanB);
-    if (!hasEither) {
-      return true;
+      for (const slot of grp.slots) {
+        const sName = getSlotTeamName(slot);
+        if (!sName) continue;
+        if (sName === cleanA || cleanA.includes(sName) || sName.includes(cleanA)) {
+          bracketA = letter;
+        }
+        if (sName === cleanB || cleanB.includes(sName) || sName.includes(cleanB)) {
+          bracketB = letter;
+        }
+      }
+    }
+
+    // If both teams belong to this draw
+    if (bracketA && bracketB) {
+      // If they belong to different brackets within this draw, reject the cross-bracket matchup
+      if (bracketA !== bracketB) {
+        return false;
+      }
+      // Both belong to the same bracket
+      return bracketA === bracketLetter;
+    }
+
+    // If only one team was matched in this draw, verify that its bracket matches the stage
+    if (bracketA && !bracketB) {
+      if (bracketA === bracketLetter) {
+        return true;
+      }
+    }
+    if (bracketB && !bracketA) {
+      if (bracketB === bracketLetter) {
+        return true;
+      }
     }
   }
 
-  return groupTeamNames.has(cleanA) && groupTeamNames.has(cleanB);
+  // If neither team was explicitly mapped to conflicting brackets, fail-open to avoid blocking tournament play
+  return true;
 }
+
