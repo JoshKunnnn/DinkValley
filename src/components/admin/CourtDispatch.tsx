@@ -60,6 +60,7 @@ import { getDrawnGroups } from "@/components/admin/BracketDraw";
 import { getMainDrawMatches } from "@/components/admin/DrawsManager";
 import { dbUpdateCourtStation, dbSubscribeToLive } from "@/lib/supabase-service";
 import { DispatchDebugStation, type DebugTab } from "@/components/admin/DispatchDebugStation";
+import { Search, X, Filter } from "lucide-react";
 
 /** Returns prev when next is structurally identical, so React skips re-renders and memo recomputation. */
 function keepIfEqual<T>(prev: T, next: T): T {
@@ -139,11 +140,49 @@ function computeCategoryUnassignedMatches(
             (validTeamIds.has(t.id) || validTeamNames.has(t.name.trim().toLowerCase())),
         );
 
+      const nameCounts = new Map<string, number>();
+      for (const t of teams) {
+        const k = t.name.trim().toLowerCase();
+        nameCounts.set(k, (nameCounts.get(k) || 0) + 1);
+      }
+
       const pairs = generateBalancedRoundRobinPairs(teams);
       pairs.forEach(([teamA, teamB], pIdx) => {
-        if (teamA.name.trim().toLowerCase() === teamB.name.trim().toLowerCase()) return;
-        const canonicalId = createPairMatchId(tournamentSlug, cat.id, `Bracket ${group.letter}`, teamA.name, teamB.name);
-        const existingLive = findMatchForPair(matches, teamA.name, teamB.name, tournamentSlug, cat.id, group.letter);
+        const isSameTeam =
+          (teamA.id && teamB.id && teamA.id === teamB.id) ||
+          (teamA.name.trim().toLowerCase() === teamB.name.trim().toLowerCase() &&
+            teamA.players &&
+            teamB.players &&
+            teamA.players.length > 0 &&
+            teamB.players.length > 0 &&
+            teamA.players.slice().sort().join(",").toLowerCase() ===
+              teamB.players.slice().sort().join(",").toLowerCase());
+        if (isSameTeam) return;
+
+        const isDupA = (nameCounts.get(teamA.name.trim().toLowerCase()) || 0) > 1;
+        const isDupB = (nameCounts.get(teamB.name.trim().toLowerCase()) || 0) > 1;
+
+        const canonicalId = createPairMatchId(
+          tournamentSlug,
+          cat.id,
+          `Bracket ${group.letter}`,
+          teamA.name,
+          teamB.name,
+          teamA.players,
+          teamB.players,
+          isDupA,
+          isDupB,
+        );
+        const existingLive = findMatchForPair(
+          matches,
+          teamA.name,
+          teamB.name,
+          tournamentSlug,
+          cat.id,
+          group.letter,
+          teamA.players,
+          teamB.players,
+        );
         const effectiveMatchId = existingLive ? existingLive.id : canonicalId;
 
         if (existingLive?.status === "final") return;
@@ -252,7 +291,15 @@ export function CourtDispatch({
   const [selectedCourtForDispatch, setSelectedCourtForDispatch] = useState<FacilityCourt | null>(null);
   const [bracketModalCategory, setBracketModalCategory] = useState<string>(categoryId);
   const [bracketModalSelectedLetter, setBracketModalSelectedLetter] = useState<string>("A");
+  const [bracketModalSearchQuery, setBracketModalSearchQuery] = useState<string>("");
+  const [bracketModalStatusFilter, setBracketModalStatusFilter] = useState<"all" | "unplayed" | "ready" | "queued" | "completed">("unplayed");
+  const [bracketModalTeamFilter, setBracketModalTeamFilter] = useState<string>("all");
   const [bracketModalShowCompleted, setBracketModalShowCompleted] = useState(false);
+
+  // Main Page Active Queue & Unassigned Filtering State
+  const [queueBracketFilter, setQueueBracketFilter] = useState<string>("all");
+  const [unassignedBracketFilter, setUnassignedBracketFilter] = useState<string>("all");
+  const [unassignedTeamFilter, setUnassignedTeamFilter] = useState<string>("all");
   const [courtReplaceConfirm, setCourtReplaceConfirm] = useState<{
     court: FacilityCourt;
     pendingMatch: {
@@ -742,21 +789,54 @@ export function CourtDispatch({
           .map((s) => s.team)
           .filter((t): t is { id: string; name: string; players: string[] } => t !== null);
 
+        const nameCounts = new Map<string, number>();
+        for (const t of teams) {
+          const k = t.name.trim().toLowerCase();
+          nameCounts.set(k, (nameCounts.get(k) || 0) + 1);
+        }
+
         const groupMatches: typeof groupsList[number]["matches"] = [];
 
         for (let i = 0; i < teams.length; i++) {
           for (let j = i + 1; j < teams.length; j++) {
             const teamA = teams[i]!;
             const teamB = teams[j]!;
-            if (teamA.name.trim().toLowerCase() === teamB.name.trim().toLowerCase()) continue;
+            const isSameTeam =
+              (teamA.id && teamB.id && teamA.id === teamB.id) ||
+              (teamA.name.trim().toLowerCase() === teamB.name.trim().toLowerCase() &&
+                teamA.players &&
+                teamB.players &&
+                teamA.players.length > 0 &&
+                teamB.players.length > 0 &&
+                teamA.players.slice().sort().join(",").toLowerCase() ===
+                  teamB.players.slice().sort().join(",").toLowerCase());
+            if (isSameTeam) continue;
+
+            const isDupA = (nameCounts.get(teamA.name.trim().toLowerCase()) || 0) > 1;
+            const isDupB = (nameCounts.get(teamB.name.trim().toLowerCase()) || 0) > 1;
 
             const stage = `Bracket ${group.letter} (Pool Play)`;
-            if (!isMatchInSameBracket(tournamentSlug, activeCat.id, stage, teamA.name, teamB.name)) {
-              continue;
-            }
-
-            const matchId = createPairMatchId(tournamentSlug, activeCat.id, `Bracket ${group.letter}`, teamA.name, teamB.name);
-            const existing = findMatchForPair(matches, teamA.name, teamB.name, tournamentSlug, activeCat.id, group.letter);
+            const matchId = createPairMatchId(
+              tournamentSlug,
+              activeCat.id,
+              `Bracket ${group.letter}`,
+              teamA.name,
+              teamB.name,
+              teamA.players,
+              teamB.players,
+              isDupA,
+              isDupB,
+            );
+            const existing = findMatchForPair(
+              matches,
+              teamA.name,
+              teamB.name,
+              tournamentSlug,
+              activeCat.id,
+              group.letter,
+              teamA.players,
+              teamB.players,
+            );
             const effectiveMatchId = existing?.id || matchId;
 
             let matchStatus: "unassigned" | "queued" | "live" | "final" = "unassigned";
@@ -961,7 +1041,7 @@ export function CourtDispatch({
           }
         }
       } else {
-        const exists = bracketModalData.groups.some((g) => g.letter === bracketModalSelectedLetter);
+        const exists = bracketModalSelectedLetter === "ALL" || bracketModalData.groups.some((g) => g.letter === bracketModalSelectedLetter);
         if (!exists) {
           const firstWithUnplayed = bracketModalData.groups.find((g) => g.unplayedCount > 0);
           setBracketModalSelectedLetter(firstWithUnplayed ? firstWithUnplayed.letter : (bracketModalData.groups[0]?.letter ?? "A"));
@@ -976,7 +1056,172 @@ export function CourtDispatch({
     prevCourtModalRef.current = null;
     setSelectedCourtForDispatch(court);
     setBracketModalCategory(categoryId);
+    setBracketModalSearchQuery("");
+    setBracketModalStatusFilter("unplayed");
+    setBracketModalTeamFilter("all");
     setBracketModalShowCompleted(false);
+  };
+
+  // Matches for current modal selection (either "ALL" merged or single bracket group)
+  const modalSourceMatches = useMemo(() => {
+    if (bracketModalSelectedLetter === "ALL") {
+      return bracketModalData.groups.flatMap((g) => g.matches);
+    }
+    const currentGroup = bracketModalData.groups.find((g) => g.letter === bracketModalSelectedLetter);
+    return currentGroup ? currentGroup.matches : [];
+  }, [bracketModalData.groups, bracketModalSelectedLetter]);
+
+  // Unique teams/clubs present in current modal bracket selection
+  const availableModalTeams = useMemo(() => {
+    const set = new Set<string>();
+    modalSourceMatches.forEach((m) => {
+      if (m.teamAName) set.add(m.teamAName.trim());
+      if (m.teamBName) set.add(m.teamBName.trim());
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [modalSourceMatches]);
+
+  // Quick statistics for current modal bracket selection
+  const modalStats = useMemo(() => {
+    const total = modalSourceMatches.length;
+    const completed = modalSourceMatches.filter((m) => m.status === "final").length;
+    const queued = modalSourceMatches.filter((m) => m.status === "queued").length;
+    const live = modalSourceMatches.filter((m) => m.status === "live").length;
+    const unplayed = modalSourceMatches.filter((m) => m.status !== "final").length;
+    const ready = modalSourceMatches.filter((m) => {
+      if (m.status !== "unassigned") return false;
+      const liveA = checkSimultaneousPlayConflict(m.teamAName, m.teamAPlayers, tournamentSlug);
+      const liveB = checkSimultaneousPlayConflict(m.teamBName, m.teamBPlayers, tournamentSlug);
+      return !liveA && !liveB;
+    }).length;
+    return { total, completed, queued, live, unplayed, ready };
+  }, [modalSourceMatches, tournamentSlug]);
+
+  // Filtered matches for direct court modal (search query, team/club filter, status filter)
+  const displayedModalMatches = useMemo(() => {
+    const q = bracketModalSearchQuery.trim().toLowerCase();
+    return modalSourceMatches.filter((m) => {
+      // 1. Status filter
+      if (bracketModalStatusFilter === "unplayed" && m.status === "final") return false;
+      if (bracketModalStatusFilter === "completed" && m.status !== "final") return false;
+      if (bracketModalStatusFilter === "queued" && m.status !== "queued") return false;
+      if (bracketModalStatusFilter === "ready") {
+        if (m.status !== "unassigned") return false;
+        const liveA = checkSimultaneousPlayConflict(m.teamAName, m.teamAPlayers, tournamentSlug);
+        const liveB = checkSimultaneousPlayConflict(m.teamBName, m.teamBPlayers, tournamentSlug);
+        if (liveA || liveB) return false;
+      }
+
+      // 2. Team/Club filter
+      if (bracketModalTeamFilter !== "all") {
+        const tf = bracketModalTeamFilter.trim().toLowerCase();
+        const matchA = m.teamAName.trim().toLowerCase() === tf;
+        const matchB = m.teamBName.trim().toLowerCase() === tf;
+        if (!matchA && !matchB) return false;
+      }
+
+      // 3. Search query
+      if (q) {
+        const inA = m.teamAName.toLowerCase().includes(q);
+        const inB = m.teamBName.toLowerCase().includes(q);
+        const inStage = m.stage.toLowerCase().includes(q);
+        const inPlayersA = (m.teamAPlayers || []).some((p) => p.toLowerCase().includes(q));
+        const inPlayersB = (m.teamBPlayers || []).some((p) => p.toLowerCase().includes(q));
+        if (!inA && !inB && !inStage && !inPlayersA && !inPlayersB) return false;
+      }
+
+      return true;
+    });
+  }, [
+    modalSourceMatches,
+    bracketModalStatusFilter,
+    bracketModalTeamFilter,
+    bracketModalSearchQuery,
+    tournamentSlug,
+  ]);
+
+  // Push single match from modal into active dispatch queue
+  const handleQueueModalSingle = (match: {
+    id: string;
+    stage: string;
+    teamAName: string;
+    teamAPlayers: string[];
+    teamBName: string;
+    teamBPlayers: string[];
+  }) => {
+    if (
+      !isMatchInSameBracket(
+        tournamentSlug,
+        bracketModalCategory,
+        match.stage,
+        match.teamAName,
+        match.teamBName,
+        undefined,
+        undefined,
+        match.teamAPlayers,
+        match.teamBPlayers,
+      )
+    ) {
+      setCopyNotice("Cannot queue: teams belong to different brackets");
+      setTimeout(() => setCopyNotice(null), 3000);
+      return;
+    }
+
+    addMatchesToQueue([
+      {
+        matchId: match.id,
+        tournamentSlug,
+        categoryId: bracketModalCategory,
+        stage: match.stage,
+        teamAName: match.teamAName,
+        teamAPlayers: match.teamAPlayers,
+        teamBName: match.teamBName,
+        teamBPlayers: match.teamBPlayers,
+      },
+    ]);
+    reloadData();
+    setCopyNotice(`Queued ${match.teamAName} vs ${match.teamBName}`);
+    setTimeout(() => setCopyNotice(null), 3000);
+  };
+
+  // Push all displayed unassigned matches from modal into active dispatch queue
+  const handleQueueAllDisplayedModalMatches = () => {
+    const unassignedInView = displayedModalMatches.filter((m) => m.status === "unassigned");
+    const valid = unassignedInView.filter((m) =>
+      isMatchInSameBracket(
+        tournamentSlug,
+        bracketModalCategory,
+        m.stage,
+        m.teamAName,
+        m.teamBName,
+        undefined,
+        undefined,
+        m.teamAPlayers,
+        m.teamBPlayers,
+      ),
+    );
+
+    if (valid.length === 0) {
+      setCopyNotice("No unassigned matches to queue in current view");
+      setTimeout(() => setCopyNotice(null), 2500);
+      return;
+    }
+
+    const items = valid.map((m) => ({
+      matchId: m.id,
+      tournamentSlug,
+      categoryId: bracketModalCategory,
+      stage: m.stage,
+      teamAName: m.teamAName,
+      teamAPlayers: m.teamAPlayers,
+      teamBName: m.teamBName,
+      teamBPlayers: m.teamBPlayers,
+    }));
+
+    addMatchesToQueue(items);
+    reloadData();
+    setCopyNotice(`Queued ${items.length} match(es) to dispatch queue`);
+    setTimeout(() => setCopyNotice(null), 3000);
   };
 
   const handleSelectBracketMatchForCourt = (
@@ -1048,7 +1293,7 @@ export function CourtDispatch({
       .filter((item) => item.status === "queued" || item.status === "on_deck")
       .filter((item) => {
         // Strictly only display matches where both teams belong to the same bracket
-        if (!isMatchInSameBracket(item.tournamentSlug || tournamentSlug, item.categoryId || categoryId, item.stage, item.teamAName, item.teamBName)) {
+        if (!isMatchInSameBracket(item.tournamentSlug || tournamentSlug, item.categoryId || categoryId, item.stage, item.teamAName, item.teamBName, undefined, undefined, item.teamAPlayers, item.teamBPlayers)) {
           return false;
         }
 
@@ -1077,6 +1322,10 @@ export function CourtDispatch({
             return false;
           }
         }
+        // Bracket filter for active queue
+        if (queueBracketFilter !== "all" && !isStageMatchingBracket(item.stage, queueBracketFilter)) {
+          return false;
+        }
         return true;
       })
       .filter(
@@ -1089,7 +1338,36 @@ export function CourtDispatch({
           (item.teamBPlayers ?? []).some((p) => p.toLowerCase().includes(q)),
       )
       .sort((a, b) => a.priority - b.priority);
-  }, [queue, searchQuery, queueDivisionFilter, categoryId, tournamentSlug, category]);
+  }, [queue, searchQuery, queueDivisionFilter, queueBracketFilter, categoryId, tournamentSlug, category]);
+
+  // Unique brackets represented in the active queue for current division
+  const availableQueueBrackets = useMemo(() => {
+    const set = new Set<string>();
+    queue.forEach((q) => {
+      if (q.status !== "queued" && q.status !== "on_deck") return;
+      if (queueDivisionFilter === "current" && q.categoryId && q.categoryId !== categoryId) return;
+      const letterMatch = q.stage.match(/(?:bracket|pool)\s+([a-z])/i);
+      if (letterMatch) {
+        set.add(`Bracket ${letterMatch[1]!.toUpperCase()}`);
+      } else if (!/(?:bracket|pool)\s+[a-z]/i.test(q.stage)) {
+        set.add("Playoffs");
+      }
+    });
+    return Array.from(set).sort();
+  }, [queue, queueDivisionFilter, categoryId]);
+
+  // Counts of queued items by bracket
+  const queueCountByBracket = useMemo(() => {
+    const map: Record<string, number> = {};
+    queue.forEach((q) => {
+      if (q.status !== "queued" && q.status !== "on_deck") return;
+      if (queueDivisionFilter === "current" && q.categoryId && q.categoryId !== categoryId) return;
+      const letterMatch = q.stage.match(/(?:bracket|pool)\s+([a-z])/i);
+      const key = letterMatch ? `Bracket ${letterMatch[1]!.toUpperCase()}` : "Playoffs";
+      map[key] = (map[key] || 0) + 1;
+    });
+    return map;
+  }, [queue, queueDivisionFilter, categoryId]);
 
   // Filtered history (search-aware, division-aware)
   const filteredHistory = useMemo(() => {
@@ -1105,19 +1383,32 @@ export function CourtDispatch({
     );
   }, [matches, searchQuery, queueDivisionFilter, categoryId]);
 
-  // Unassigned matches grouped by bracket stage (search-aware, Pool Play first)
+  // Unassigned matches grouped by bracket stage (search-aware, bracket-aware, team-aware, Pool Play first)
   const groupedUnassigned = useMemo(() => {
     const q = searchQuery.toLowerCase();
-    const filtered = !q
-      ? unassignedMatches
-      : unassignedMatches.filter(
-        (m) =>
+    const filtered = unassignedMatches
+      .filter((m) => {
+        if (!q) return true;
+        return (
           m.teamAName.toLowerCase().includes(q) ||
           m.teamBName.toLowerCase().includes(q) ||
           m.stage.toLowerCase().includes(q) ||
           m.teamAPlayers.some((p) => p.toLowerCase().includes(q)) ||
-          m.teamBPlayers.some((p) => p.toLowerCase().includes(q)),
-      );
+          m.teamBPlayers.some((p) => p.toLowerCase().includes(q))
+        );
+      })
+      .filter((m) => {
+        if (unassignedBracketFilter === "all") return true;
+        return isStageMatchingBracket(m.stage, unassignedBracketFilter);
+      })
+      .filter((m) => {
+        if (unassignedTeamFilter === "all") return true;
+        const tf = unassignedTeamFilter.trim().toLowerCase();
+        return (
+          m.teamAName.trim().toLowerCase() === tf ||
+          m.teamBName.trim().toLowerCase() === tf
+        );
+      });
 
     const map = new Map<string, typeof unassignedMatches>();
     filtered.forEach((m) => {
@@ -1132,7 +1423,34 @@ export function CourtDispatch({
       if (!aPool && bPool) return 1;
       return a.localeCompare(b);
     });
-  }, [unassignedMatches, searchQuery]);
+  }, [unassignedMatches, searchQuery, unassignedBracketFilter, unassignedTeamFilter]);
+
+  // Unique brackets present in remaining unassigned matches
+  const availableUnassignedBrackets = useMemo(() => {
+    const set = new Set<string>();
+    unassignedMatches.forEach((m) => {
+      const letterMatch = m.stage.match(/(?:bracket|pool)\s+([a-z])/i);
+      if (letterMatch) {
+        set.add(`Bracket ${letterMatch[1]!.toUpperCase()}`);
+      } else if (!/(?:bracket|pool)\s+[a-z]/i.test(m.stage)) {
+        set.add("Playoffs");
+      }
+    });
+    return Array.from(set).sort();
+  }, [unassignedMatches]);
+
+  // Unique teams present in remaining unassigned matches (optionally filtered by selected bracket)
+  const availableUnassignedTeams = useMemo(() => {
+    const set = new Set<string>();
+    unassignedMatches.forEach((m) => {
+      if (unassignedBracketFilter !== "all" && !isStageMatchingBracket(m.stage, unassignedBracketFilter)) {
+        return;
+      }
+      if (m.teamAName) set.add(m.teamAName.trim());
+      if (m.teamBName) set.add(m.teamBName.trim());
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [unassignedMatches, unassignedBracketFilter]);
 
   // Matches ready to be added to the queue (neither team is currently playing on court and neither team is already queued)
   const readyUnassignedMatches = useMemo(() => {
@@ -1150,7 +1468,7 @@ export function CourtDispatch({
 
     for (const m of unassignedMatches) {
       if (existingQueueIds.has(m.id)) continue;
-      if (!isMatchInSameBracket(tournamentSlug, categoryId, m.stage, m.teamAName, m.teamBName)) continue;
+      if (!isMatchInSameBracket(tournamentSlug, categoryId, m.stage, m.teamAName, m.teamBName, undefined, undefined, m.teamAPlayers, m.teamBPlayers)) continue;
       const a = m.teamAName.trim().toLowerCase();
       const b = m.teamBName.trim().toLowerCase();
 
@@ -1194,7 +1512,7 @@ export function CourtDispatch({
 
     const candidates = unassignedMatches.filter((m) => {
       if (existingQueueIds.has(m.id)) return false;
-      if (!isMatchInSameBracket(tournamentSlug, categoryId, m.stage, m.teamAName, m.teamBName)) return false;
+      if (!isMatchInSameBracket(tournamentSlug, categoryId, m.stage, m.teamAName, m.teamBName, undefined, undefined, m.teamAPlayers, m.teamBPlayers)) return false;
       const a = m.teamAName.trim().toLowerCase();
       const b = m.teamBName.trim().toLowerCase();
       return namesSet.has(a) || namesSet.has(b);
@@ -1251,7 +1569,7 @@ export function CourtDispatch({
     },
     umpire?: string,
   ) => {
-    if (match.stage && !isMatchInSameBracket(match.tournamentSlug || tournamentSlug, match.categoryId || categoryId, match.stage, match.teamAName, match.teamBName)) {
+    if (match.stage && !isMatchInSameBracket(match.tournamentSlug || tournamentSlug, match.categoryId || categoryId, match.stage, match.teamAName, match.teamBName, undefined, undefined, match.teamAPlayers, match.teamBPlayers)) {
       setCopyNotice(`Cannot dispatch: ${match.teamAName} and ${match.teamBName} do not belong to ${match.stage}`);
       setTimeout(() => setCopyNotice(null), 4000);
       return;
@@ -1416,8 +1734,10 @@ export function CourtDispatch({
   };
 
   const handleQueueUnassignedAll = useCallback(() => {
-    const valid = unassignedMatches.filter((m) =>
-      isMatchInSameBracket(tournamentSlug, categoryId, m.stage, m.teamAName, m.teamBName)
+    // Queue all matches currently visible in groupedUnassigned
+    const visibleMatches = groupedUnassigned.flatMap(([, stageMatches]) => stageMatches);
+    const valid = visibleMatches.filter((m) =>
+      isMatchInSameBracket(tournamentSlug, categoryId, m.stage, m.teamAName, m.teamBName, undefined, undefined, m.teamAPlayers, m.teamBPlayers)
     );
     const items = valid.map((m) => ({
       matchId: m.id,
@@ -1432,11 +1752,13 @@ export function CourtDispatch({
     if (items.length > 0) {
       addMatchesToQueue(items);
       reloadData();
+      setCopyNotice(`Added ${items.length} match(es) to dispatch queue`);
+      setTimeout(() => setCopyNotice(null), 3000);
     }
-  }, [unassignedMatches, tournamentSlug, categoryId, reloadData]);
+  }, [groupedUnassigned, tournamentSlug, categoryId, reloadData]);
 
   const handleQueueSingle = (m: typeof unassignedMatches[number]) => {
-    if (!isMatchInSameBracket(tournamentSlug, categoryId, m.stage, m.teamAName, m.teamBName)) {
+    if (!isMatchInSameBracket(tournamentSlug, categoryId, m.stage, m.teamAName, m.teamBName, undefined, undefined, m.teamAPlayers, m.teamBPlayers)) {
       return;
     }
     addMatchesToQueue([
@@ -1582,7 +1904,7 @@ export function CourtDispatch({
     }>,
   ) => {
     const valid = stageMatches.filter((m) =>
-      isMatchInSameBracket(tournamentSlug, categoryId, m.stage, m.teamAName, m.teamBName)
+      isMatchInSameBracket(tournamentSlug, categoryId, m.stage, m.teamAName, m.teamBName, undefined, undefined, m.teamAPlayers, m.teamBPlayers)
     );
     addMatchesToQueue(
       valid.map((m) => ({
@@ -1882,6 +2204,10 @@ export function CourtDispatch({
                   q.stage,
                   q.teamAName,
                   q.teamBName,
+                  undefined,
+                  undefined,
+                  q.teamAPlayers,
+                  q.teamBPlayers,
                 ),
               );
 
@@ -2752,6 +3078,41 @@ export function CourtDispatch({
         {/* ── TAB 1: ACTIVE QUEUE ── */}
         {activeQueueTab === "queue" && (
           <div className="space-y-3">
+            {/* Active Queue Bracket Filter Strip */}
+            {availableQueueBrackets.length > 1 && (
+              <div className="flex flex-wrap items-center gap-1.5 py-1.5 px-2 bg-card border border-border">
+                <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground mr-1 font-bold shrink-0">
+                  Filter Bracket:
+                </span>
+                <button
+                  onClick={() => setQueueBracketFilter("all")}
+                  className={`px-2 py-0.5 text-[0.65rem] font-bold uppercase tracking-wider border transition-colors cursor-pointer shrink-0 ${
+                    queueBracketFilter === "all"
+                      ? "bg-pickle text-sand border-pickle"
+                      : "bg-charcoal text-sand/70 border-border hover:border-sand"
+                  }`}
+                >
+                  All Brackets ({queue.filter((q) => (q.status === "queued" || q.status === "on_deck") && (queueDivisionFilter === "all" || !q.categoryId || q.categoryId === categoryId)).length})
+                </button>
+                {availableQueueBrackets.map((b) => {
+                  const count = queueCountByBracket[b] || 0;
+                  const isActive = queueBracketFilter === b;
+                  return (
+                    <button
+                      key={b}
+                      onClick={() => setQueueBracketFilter(b)}
+                      className={`px-2 py-0.5 text-[0.65rem] font-bold uppercase tracking-wider border transition-colors cursor-pointer shrink-0 ${
+                        isActive
+                          ? "bg-pickle text-sand border-pickle font-bold"
+                          : "bg-charcoal text-sand/70 border-border hover:border-sand"
+                      }`}
+                    >
+                      {b} ({count})
+                    </button>
+                  );
+                })}
+              </div>
+            )}
             {filteredQueue.length === 0 ? (
               <div className="py-12 text-center space-y-3">
                 {searchQuery ? (
@@ -3036,22 +3397,95 @@ export function CourtDispatch({
         {/* ── TAB 2: BRACKET CARDS ── */}
         {activeQueueTab === "unassigned" && (
           <div className="space-y-4">
-            {/* Sub-header */}
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-b border-border/50 pb-3">
-              <span className="text-xs text-muted-foreground">
-                {searchQuery
-                  ? `${groupedUnassigned.reduce((acc, [, m]) => acc + m.length, 0)} match(es) in ${groupedUnassigned.length
-                  } bracket(s) matching "${searchQuery}"`
-                  : `${groupedUnassigned.length} bracket(s) — ${unassignedMatches.length} matches remaining`}
-              </span>
-              {unassignedMatches.length > 0 && !searchQuery && (
-                <button
-                  onClick={handleQueueUnassignedAll}
-                  className="px-3 py-1.5 text-xs font-bold uppercase tracking-wider bg-pickle text-sand border border-pickle hover:bg-pickle/90 transition-colors cursor-pointer"
-                >
-                  Queue All ({unassignedMatches.length})
-                </button>
-              )}
+            {/* Sub-header & Filter Controls */}
+            <div className="flex flex-col gap-2.5 border-b border-border/50 pb-3">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                <span className="text-xs text-muted-foreground">
+                  {searchQuery || unassignedBracketFilter !== "all" || unassignedTeamFilter !== "all"
+                    ? `${groupedUnassigned.reduce((acc, [, m]) => acc + m.length, 0)} match(es) in ${groupedUnassigned.length} bracket(s) matching filters`
+                    : `${groupedUnassigned.length} bracket(s) — ${unassignedMatches.length} matches remaining`}
+                </span>
+                {groupedUnassigned.length > 0 && (
+                  <button
+                    onClick={handleQueueUnassignedAll}
+                    className="px-3 py-1.5 text-xs font-bold uppercase tracking-wider bg-pickle text-sand border border-pickle hover:bg-pickle/90 transition-colors cursor-pointer self-start sm:self-auto shadow-sm"
+                  >
+                    {unassignedBracketFilter !== "all"
+                      ? `Queue ${unassignedBracketFilter} (${groupedUnassigned.reduce((acc, [, m]) => acc + m.length, 0)})`
+                      : unassignedTeamFilter !== "all" || searchQuery
+                        ? `Queue Filtered (${groupedUnassigned.reduce((acc, [, m]) => acc + m.length, 0)})`
+                        : `Queue All (${unassignedMatches.length})`}
+                  </button>
+                )}
+              </div>
+
+              {/* Bracket & Team Filter Controls */}
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                {/* Bracket Filter Pills */}
+                {availableUnassignedBrackets.length > 1 && (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground font-bold shrink-0">
+                      Bracket:
+                    </span>
+                    <button
+                      onClick={() => setUnassignedBracketFilter("all")}
+                      className={`px-2 py-0.5 text-[0.65rem] font-bold uppercase tracking-wider border transition-colors cursor-pointer shrink-0 ${
+                        unassignedBracketFilter === "all"
+                          ? "bg-pickle text-sand border-pickle"
+                          : "bg-charcoal text-sand/70 border-border hover:border-sand"
+                      }`}
+                    >
+                      All ({unassignedMatches.length})
+                    </button>
+                    {availableUnassignedBrackets.map((b) => {
+                      const count = unassignedMatches.filter((m) => isStageMatchingBracket(m.stage, b)).length;
+                      return (
+                        <button
+                          key={b}
+                          onClick={() => setUnassignedBracketFilter(b)}
+                          className={`px-2 py-0.5 text-[0.65rem] font-bold uppercase tracking-wider border transition-colors cursor-pointer shrink-0 ${
+                            unassignedBracketFilter === b
+                              ? "bg-pickle text-sand border-pickle font-bold"
+                              : "bg-charcoal text-sand/70 border-border hover:border-sand"
+                          }`}
+                        >
+                          {b} ({count})
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Team Filter Dropdown */}
+                {availableUnassignedTeams.length > 1 && (
+                  <div className="flex items-center gap-1.5 ml-auto">
+                    <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground font-bold shrink-0">
+                      Team:
+                    </span>
+                    <select
+                      value={unassignedTeamFilter}
+                      onChange={(e) => setUnassignedTeamFilter(e.target.value)}
+                      className="px-2 py-1 text-xs bg-card text-foreground border border-border rounded focus:outline-hidden focus:border-pickle cursor-pointer"
+                    >
+                      <option value="all">All Teams ({availableUnassignedTeams.length})</option>
+                      {availableUnassignedTeams.map((teamName) => (
+                        <option key={teamName} value={teamName}>
+                          {teamName}
+                        </option>
+                      ))}
+                    </select>
+                    {unassignedTeamFilter !== "all" && (
+                      <button
+                        onClick={() => setUnassignedTeamFilter("all")}
+                        className="text-xs text-muted-foreground hover:text-foreground cursor-pointer px-1"
+                        title="Reset team filter"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
 
             {groupedUnassigned.length === 0 ? (
@@ -3386,41 +3820,175 @@ export function CourtDispatch({
               </div>
             )}
 
-            {/* Bracket Tabs Strip — 4-column responsive grid on mobile, flex-wrap on desktop */}
-            <div className="grid grid-cols-4 sm:flex sm:flex-wrap items-center gap-1.5 p-3 bg-card border-b-2 border-border">
+            {/* Bracket Tabs Strip — responsive grid on mobile, flex-wrap on desktop */}
+            <div className="grid grid-cols-3 sm:flex sm:flex-wrap items-center gap-1.5 p-3 bg-card border-b-2 border-border">
               {bracketModalData.groups.length === 0 ? (
-                <span className="text-xs text-muted-foreground italic px-2 col-span-4">
+                <span className="text-xs text-muted-foreground italic px-2 col-span-3">
                   No brackets found for this division.
                 </span>
               ) : (
-                bracketModalData.groups.map((group) => {
-                  const isActive = group.letter === bracketModalSelectedLetter;
-                  const hasUnplayed = group.unplayedCount > 0;
-                  return (
-                    <button
-                      key={group.letter}
-                      onClick={() => setBracketModalSelectedLetter(group.letter)}
-                      className={`p-1.5 sm:px-3 sm:py-1.5 text-[0.65rem] sm:text-xs font-display tracking-wider uppercase border transition-all flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 cursor-pointer ${isActive
-                          ? "bg-pickle text-sand border-pickle shadow-sm font-bold"
-                          : "bg-charcoal text-sand/80 border-border hover:border-sand/60"
+                <>
+                  {/* All Brackets Tab */}
+                  <button
+                    onClick={() => setBracketModalSelectedLetter("ALL")}
+                    className={`p-1.5 sm:px-3 sm:py-1.5 text-[0.65rem] sm:text-xs font-display tracking-wider uppercase border transition-all flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 cursor-pointer ${bracketModalSelectedLetter === "ALL"
+                        ? "bg-pickle text-sand border-pickle shadow-sm font-bold"
+                        : "bg-charcoal text-sand/80 border-border hover:border-sand/60"
+                      }`}
+                  >
+                    <span>All Brackets</span>
+                    <span
+                      className={`px-1.5 py-0.2 text-[0.6rem] font-mono font-bold rounded-sm ${bracketModalSelectedLetter === "ALL"
+                          ? "bg-sand text-charcoal"
+                          : bracketModalData.groups.reduce((acc, g) => acc + g.unplayedCount, 0) > 0
+                            ? "bg-pickle/20 text-pickle"
+                            : "bg-emerald-500/20 text-emerald-400"
                         }`}
                     >
-                      <span>{group.label}</span>
-                      <span
-                        className={`px-1.5 py-0.2 text-[0.6rem] font-mono font-bold rounded-sm ${isActive
-                            ? "bg-sand text-charcoal"
-                            : hasUnplayed
-                              ? "bg-pickle/20 text-pickle"
-                              : "bg-emerald-500/20 text-emerald-400"
+                      {bracketModalData.groups.reduce((acc, g) => acc + g.unplayedCount, 0) > 0
+                        ? `${bracketModalData.groups.reduce((acc, g) => acc + g.unplayedCount, 0)} left`
+                        : "Done"}
+                    </span>
+                  </button>
+
+                  {/* Individual Bracket Tabs */}
+                  {bracketModalData.groups.map((group) => {
+                    const isActive = group.letter === bracketModalSelectedLetter;
+                    const hasUnplayed = group.unplayedCount > 0;
+                    return (
+                      <button
+                        key={group.letter}
+                        onClick={() => setBracketModalSelectedLetter(group.letter)}
+                        className={`p-1.5 sm:px-3 sm:py-1.5 text-[0.65rem] sm:text-xs font-display tracking-wider uppercase border transition-all flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 cursor-pointer ${isActive
+                            ? "bg-pickle text-sand border-pickle shadow-sm font-bold"
+                            : "bg-charcoal text-sand/80 border-border hover:border-sand/60"
                           }`}
                       >
-                        {hasUnplayed ? `${group.unplayedCount} left` : "Done"}
-                      </span>
-                    </button>
-                  );
-                })
+                        <span>{group.label}</span>
+                        <span
+                          className={`px-1.5 py-0.2 text-[0.6rem] font-mono font-bold rounded-sm ${isActive
+                              ? "bg-sand text-charcoal"
+                              : hasUnplayed
+                                ? "bg-pickle/20 text-pickle"
+                                : "bg-emerald-500/20 text-emerald-400"
+                            }`}
+                        >
+                          {hasUnplayed ? `${group.unplayedCount} left` : "Done"}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </>
               )}
             </div>
+
+            {/* Filter, Search & Batch Push Toolbar */}
+            {bracketModalData.groups.length > 0 && (
+              <div className="p-3 bg-card border-b border-border/80 space-y-2.5">
+                {/* Search Bar + Team Filter + Batch Push Action */}
+                <div className="flex flex-col sm:flex-row sm:items-center gap-2 justify-between">
+                  <div className="flex items-center gap-2 flex-1 min-w-0">
+                    {/* Live Search */}
+                    <div className="relative flex-1 min-w-0">
+                      <input
+                        type="text"
+                        value={bracketModalSearchQuery}
+                        onChange={(e) => setBracketModalSearchQuery(e.target.value)}
+                        placeholder="Search team, player, or bracket..."
+                        className="w-full px-3 py-1.5 text-xs bg-charcoal text-sand border border-border rounded-sm focus:outline-hidden focus:border-pickle pr-7"
+                      />
+                      {bracketModalSearchQuery && (
+                        <button
+                          onClick={() => setBracketModalSearchQuery("")}
+                          className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground text-xs cursor-pointer"
+                        >
+                          Clear
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Team Filter Dropdown */}
+                    {availableModalTeams.length > 1 && (
+                      <select
+                        value={bracketModalTeamFilter}
+                        onChange={(e) => setBracketModalTeamFilter(e.target.value)}
+                        className="px-2 py-1.5 text-xs bg-charcoal text-sand border border-border rounded-sm focus:outline-hidden focus:border-pickle cursor-pointer max-w-[140px] sm:max-w-[180px] truncate shrink-0"
+                        title="Filter matchups by team or club"
+                      >
+                        <option value="all">All Teams ({availableModalTeams.length})</option>
+                        {availableModalTeams.map((t) => (
+                          <option key={t} value={t}>
+                            {t}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+
+                  {/* Batch Push Button */}
+                  {displayedModalMatches.some((m) => m.status === "unassigned") && (
+                    <button
+                      onClick={handleQueueAllDisplayedModalMatches}
+                      className="px-3 py-1.5 text-xs font-bold uppercase tracking-wider bg-pickle text-sand border border-pickle hover:bg-pickle/90 transition-colors cursor-pointer shrink-0 shadow-sm"
+                    >
+                      + Queue Displayed ({displayedModalMatches.filter((m) => m.status === "unassigned").length})
+                    </button>
+                  )}
+                </div>
+
+                {/* Status Filter Pills */}
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground font-bold mr-1 shrink-0">
+                    Status:
+                  </span>
+                  <button
+                    onClick={() => setBracketModalStatusFilter("all")}
+                    className={`px-2 py-0.5 text-[0.65rem] font-bold uppercase tracking-wider border transition-colors cursor-pointer ${bracketModalStatusFilter === "all"
+                        ? "bg-pickle text-sand border-pickle"
+                        : "bg-charcoal text-sand/70 border-border hover:border-sand"
+                      }`}
+                  >
+                    All ({modalStats.total})
+                  </button>
+                  <button
+                    onClick={() => setBracketModalStatusFilter("unplayed")}
+                    className={`px-2 py-0.5 text-[0.65rem] font-bold uppercase tracking-wider border transition-colors cursor-pointer ${bracketModalStatusFilter === "unplayed"
+                        ? "bg-pickle text-sand border-pickle"
+                        : "bg-charcoal text-sand/70 border-border hover:border-sand"
+                      }`}
+                  >
+                    Unplayed ({modalStats.unplayed})
+                  </button>
+                  <button
+                    onClick={() => setBracketModalStatusFilter("ready")}
+                    className={`px-2 py-0.5 text-[0.65rem] font-bold uppercase tracking-wider border transition-colors cursor-pointer ${bracketModalStatusFilter === "ready"
+                        ? "bg-emerald-600 text-sand border-emerald-500 font-bold"
+                        : "bg-charcoal text-sand/70 border-border hover:border-sand"
+                      }`}
+                  >
+                    Ready Now ({modalStats.ready})
+                  </button>
+                  <button
+                    onClick={() => setBracketModalStatusFilter("queued")}
+                    className={`px-2 py-0.5 text-[0.65rem] font-bold uppercase tracking-wider border transition-colors cursor-pointer ${bracketModalStatusFilter === "queued"
+                        ? "bg-amber-600 text-sand border-amber-500 font-bold"
+                        : "bg-charcoal text-sand/70 border-border hover:border-sand"
+                      }`}
+                  >
+                    In Queue ({modalStats.queued})
+                  </button>
+                  <button
+                    onClick={() => setBracketModalStatusFilter("completed")}
+                    className={`px-2 py-0.5 text-[0.65rem] font-bold uppercase tracking-wider border transition-colors cursor-pointer ${bracketModalStatusFilter === "completed"
+                        ? "bg-pickle text-sand border-pickle"
+                        : "bg-charcoal text-sand/70 border-border hover:border-sand"
+                      }`}
+                  >
+                    Completed ({modalStats.completed})
+                  </button>
+                </div>
+              </div>
+            )}
 
             {/* Match Cards Body */}
             <div className="p-4 sm:p-5 overflow-y-auto space-y-3.5 flex-1 min-h-[220px]">
@@ -3438,25 +4006,18 @@ export function CourtDispatch({
                   );
                 }
 
-                const currentGroup =
-                  bracketModalData.groups.find((g) => g.letter === bracketModalSelectedLetter) ||
-                  bracketModalData.groups[0];
-
-                if (!currentGroup) return null;
-
-                const unplayed = currentGroup.matches.filter((m) => m.status !== "final");
-                const completed = currentGroup.matches.filter((m) => m.status === "final");
-
                 return (
                   <div className="space-y-4">
-                    {/* Header info for selected bracket */}
+                    {/* Header info */}
                     <div className="flex items-center justify-between border-b border-border/60 pb-2">
                       <div className="flex items-center gap-2">
                         <span className="font-display text-lg sm:text-xl text-foreground">
-                          {currentGroup.label} Matches
+                          {bracketModalSelectedLetter === "ALL"
+                            ? "All Division Matches"
+                            : `${bracketModalData.groups.find((g) => g.letter === bracketModalSelectedLetter)?.label ?? `Bracket ${bracketModalSelectedLetter}`} Matches`}
                         </span>
                         <span className="text-xs text-muted-foreground">
-                          ({unplayed.length} unplayed, {completed.length} completed)
+                          ({displayedModalMatches.length} shown of {modalStats.total})
                         </span>
                       </div>
                       <span className="text-[0.65rem] uppercase tracking-wider text-pickle font-bold">
@@ -3464,42 +4025,48 @@ export function CourtDispatch({
                       </span>
                     </div>
 
-                    {/* Unplayed Games List */}
-                    {unplayed.length === 0 ? (
-                      <div className="p-6 text-center border-2 border-border bg-card rounded-xl shadow-xs space-y-3">
-                        <div>
-                          <span className="text-xs uppercase tracking-widest text-pickle font-bold block">
-                            Bracket Completed
-                          </span>
-                          <p className="text-xs sm:text-sm text-foreground font-semibold mt-1">
-                            All pool play matches for {currentGroup.label} have concluded.
-                          </p>
+                    {/* Filtered Matches List */}
+                    {displayedModalMatches.length === 0 ? (
+                      <div className="p-8 text-center border-2 border-border bg-card rounded-xl shadow-xs space-y-3">
+                        <span className="text-xs uppercase tracking-widest text-muted-foreground font-bold block">
+                          No Matches Found
+                        </span>
+                        <p className="text-xs sm:text-sm text-foreground/80 max-w-md mx-auto">
+                          {bracketModalSearchQuery || bracketModalTeamFilter !== "all" || bracketModalStatusFilter !== "all"
+                            ? "No matches match the selected filters."
+                            : "All matches in this bracket have concluded."}
+                        </p>
+                        <div className="pt-2 flex flex-wrap items-center justify-center gap-2">
+                          {(bracketModalSearchQuery || bracketModalTeamFilter !== "all" || bracketModalStatusFilter !== "all") && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setBracketModalSearchQuery("");
+                                setBracketModalTeamFilter("all");
+                                setBracketModalStatusFilter("all");
+                              }}
+                              className="px-3 py-1.5 text-xs font-bold uppercase tracking-wider bg-pickle text-sand hover:bg-pickle/90 transition-colors cursor-pointer shadow-sm"
+                            >
+                              Reset Filters
+                            </button>
+                          )}
+                          {bracketModalData.groups.some((g) => g.unplayedCount > 0 && g.letter !== bracketModalSelectedLetter) && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const nextWithUnplayed = bracketModalData.groups.find((g) => g.unplayedCount > 0 && g.letter !== bracketModalSelectedLetter);
+                                if (nextWithUnplayed) setBracketModalSelectedLetter(nextWithUnplayed.letter);
+                              }}
+                              className="px-3 py-1.5 text-xs font-bold uppercase tracking-wider border border-border text-sand hover:border-sand transition-colors cursor-pointer"
+                            >
+                              View Other Brackets
+                            </button>
+                          )}
                         </div>
-                        {bracketModalData.groups.some((g) => g.unplayedCount > 0) && (
-                          <div className="pt-2 border-t border-border/60">
-                            <span className="text-[0.7rem] text-muted-foreground block mb-2 font-medium">
-                              Other brackets still have unplayed matches:
-                            </span>
-                            <div className="flex flex-wrap items-center justify-center gap-2">
-                              {bracketModalData.groups
-                                .filter((g) => g.unplayedCount > 0)
-                                .map((g) => (
-                                  <button
-                                    key={g.letter}
-                                    type="button"
-                                    onClick={() => setBracketModalSelectedLetter(g.letter)}
-                                    className="px-3 py-1.5 text-xs font-bold uppercase tracking-wider bg-pickle text-sand hover:bg-pickle/90 transition-colors cursor-pointer shadow-sm"
-                                  >
-                                    View {g.label} ({g.unplayedCount} left) &rarr;
-                                  </button>
-                                ))}
-                            </div>
-                          </div>
-                        )}
                       </div>
                     ) : (
                       <div className="space-y-2.5">
-                        {unplayed.map((match, idx) => {
+                        {displayedModalMatches.map((match, idx) => {
                           const restA = checkRestPeriodConflict(match.teamAName, match.teamAPlayers);
                           const restB = checkRestPeriodConflict(match.teamBName, match.teamBPlayers);
                           const liveA = checkSimultaneousPlayConflict(match.teamAName, match.teamAPlayers, tournamentSlug);
@@ -3513,7 +4080,9 @@ export function CourtDispatch({
                           const isMatchAlreadyOnOtherCourt = Boolean(
                             match.status === "live" && match.assignedCourt && match.assignedCourt !== selectedCourtForDispatch,
                           );
+                          const isMatchFinal = match.status === "final";
                           const isActionDisabled =
+                            isMatchFinal ||
                             isMatchAlreadyOnThisCourt ||
                             isMatchAlreadyOnOtherCourt ||
                             isTeamPlayingElsewhere;
@@ -3523,9 +4092,11 @@ export function CourtDispatch({
                               key={match.id}
                               className={`p-3.5 border transition-all flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 ${isMatchAlreadyOnThisCourt
                                   ? "border-pickle/60 bg-pickle/5"
-                                  : isActionDisabled
+                                  : isActionDisabled && !isMatchFinal
                                     ? "border-border/40 bg-card/40 opacity-75"
-                                    : "border-border bg-card hover:border-pickle/60"
+                                    : isMatchFinal
+                                      ? "border-border/40 bg-card/30 opacity-70"
+                                      : "border-border bg-card hover:border-pickle/60"
                                 }`}
                             >
                               <div className="min-w-0 space-y-1.5 flex-1">
@@ -3533,7 +4104,11 @@ export function CourtDispatch({
                                   <span className="font-mono text-xs text-muted-foreground font-bold">
                                     #{idx + 1}
                                   </span>
-                                  {match.status === "live" ? (
+                                  {isMatchFinal ? (
+                                    <span className="px-2 py-0.5 text-[0.6rem] font-bold uppercase tracking-wider bg-card text-muted-foreground border border-border">
+                                      Final
+                                    </span>
+                                  ) : match.status === "live" ? (
                                     <span className="px-2 py-0.5 text-[0.6rem] font-bold uppercase tracking-wider bg-pickle/20 text-pickle border border-pickle/40">
                                       Active on {match.assignedCourt}
                                     </span>
@@ -3580,7 +4155,7 @@ export function CourtDispatch({
                                   </div>
                                 </div>
 
-                                {/* Conflict warnings */}
+                                {/* Conflict & Rest Warnings */}
                                 {activeConflict && (
                                   <div className="text-[0.65rem] text-brick font-bold pt-0.5">
                                     Cannot dispatch: {activeConflict.isPlayerConflict ? `${activeConflict.playerName} (${activeConflict.teamName})` : activeConflict.teamName} is currently {activeConflict.status === "on_deck" ? "on-deck" : "live"} on {activeConflict.court}
@@ -3593,74 +4168,55 @@ export function CourtDispatch({
                                 )}
                               </div>
 
-                              {/* Dispatch Action Button */}
-                              <div className="shrink-0 sm:self-center">
-                                <button
-                                  onClick={() => handleSelectBracketMatchForCourt(selectedCourtForDispatch, match)}
-                                  disabled={isActionDisabled}
-                                  title={
-                                    isMatchAlreadyOnThisCourt
-                                      ? "Currently live on this court"
+                              {/* Card Action Buttons: Queue & Dispatch */}
+                              <div className="shrink-0 flex items-center gap-2 sm:self-center">
+                                {!isMatchFinal && match.status === "unassigned" && (
+                                  <button
+                                    onClick={() => handleQueueModalSingle(match)}
+                                    title="Add matchup to dispatch queue"
+                                    className="px-3 py-2.5 text-xs font-bold uppercase tracking-wider bg-charcoal text-sand border border-border hover:border-sand transition-colors cursor-pointer"
+                                  >
+                                    + Queue
+                                  </button>
+                                )}
+
+                                {!isMatchFinal ? (
+                                  <button
+                                    onClick={() => handleSelectBracketMatchForCourt(selectedCourtForDispatch, match)}
+                                    disabled={isActionDisabled}
+                                    title={
+                                      isMatchAlreadyOnThisCourt
+                                        ? "Currently live on this court"
+                                        : isMatchAlreadyOnOtherCourt
+                                          ? `Currently live on ${match.assignedCourt}`
+                                          : activeConflict
+                                            ? `Cannot dispatch: ${activeConflict.teamName} is ${activeConflict.status === "on_deck" ? "on-deck" : "live"} on ${activeConflict.court}`
+                                            : `Dispatch match to ${selectedCourtForDispatch}`
+                                    }
+                                    className={`px-4 py-2.5 text-xs font-bold uppercase tracking-wider border transition-all ${isActionDisabled
+                                        ? "border-2 border-border text-muted-foreground bg-card cursor-not-allowed opacity-60"
+                                        : "bg-pickle text-sand border-pickle hover:bg-pickle/90 cursor-pointer shadow-sm"
+                                      }`}
+                                  >
+                                    {isMatchAlreadyOnThisCourt
+                                      ? "Active On Court"
                                       : isMatchAlreadyOnOtherCourt
-                                        ? `Currently live on ${match.assignedCourt}`
+                                        ? `Live on ${match.assignedCourt}`
                                         : activeConflict
-                                          ? `Cannot dispatch: ${activeConflict.teamName} is ${activeConflict.status === "on_deck" ? "on-deck" : "live"} on ${activeConflict.court}`
-                                          : `Dispatch match to ${selectedCourtForDispatch}`
-                                  }
-                                  className={`w-full sm:w-auto px-4 py-2.5 text-xs font-bold uppercase tracking-wider border transition-all ${isActionDisabled
-                                      ? "border-2 border-border text-muted-foreground bg-card cursor-not-allowed opacity-60"
-                                      : "bg-pickle text-sand border-pickle hover:bg-pickle/90 cursor-pointer shadow-sm"
-                                    }`}
-                                >
-                                  {isMatchAlreadyOnThisCourt
-                                    ? "Active On Court"
-                                    : isMatchAlreadyOnOtherCourt
-                                      ? `Live on ${match.assignedCourt}`
-                                      : activeConflict
-                                        ? activeConflict.status === "on_deck"
-                                          ? `On-Deck on ${activeConflict.court}`
-                                          : `In Play on ${activeConflict.court}`
-                                        : `Dispatch to ${selectedCourtForDispatch} ->`}
-                                </button>
+                                          ? activeConflict.status === "on_deck"
+                                            ? `On-Deck on ${activeConflict.court}`
+                                            : `In Play on ${activeConflict.court}`
+                                          : `Dispatch to ${selectedCourtForDispatch} ->`}
+                                  </button>
+                                ) : (
+                                  <div className="px-3 py-2 text-xs font-mono font-bold text-muted-foreground border border-border/50 bg-card/60">
+                                    {match.liveScore ? `${match.liveScore.teamAScore} - ${match.liveScore.teamBScore}` : "Final"}
+                                  </div>
+                                )}
                               </div>
                             </div>
                           );
                         })}
-                      </div>
-                    )}
-
-                    {/* Toggle Completed Games */}
-                    {completed.length > 0 && (
-                      <div className="pt-2 border-t border-border/60">
-                        <button
-                          onClick={() => setBracketModalShowCompleted((prev) => !prev)}
-                          className="text-xs uppercase tracking-wider text-muted-foreground hover:text-foreground font-bold cursor-pointer transition-colors"
-                        >
-                          {bracketModalShowCompleted ? "Hide Completed Games" : `Show Completed Games (${completed.length})`}
-                        </button>
-
-                        {bracketModalShowCompleted && (
-                          <div className="mt-2.5 space-y-2">
-                            {completed.map((cm) => (
-                              <div
-                                key={cm.id}
-                                className="p-2.5 border-2 border-border bg-card rounded-md shadow-xs flex items-center justify-between text-xs"
-                              >
-                                <div className="flex items-center gap-2">
-                                  <span className="font-bold text-foreground">
-                                    {cm.teamAName} vs {cm.teamBName}
-                                  </span>
-                                  <span className="text-[0.65rem] text-foreground/80 font-bold">
-                                    {cm.stage}
-                                  </span>
-                                </div>
-                                <div className="font-mono text-pickle font-bold">
-                                  {cm.liveScore ? `${cm.liveScore.teamAScore} - ${cm.liveScore.teamBScore}` : "Final"}
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        )}
                       </div>
                     )}
                   </div>

@@ -256,15 +256,43 @@ export function DrawsManager({
         .map((s) => s.team)
         .filter((t): t is Team => t !== null);
 
+      const nameCounts = new Map<string, number>();
+      for (const t of teams) {
+        const k = t.name.trim().toLowerCase();
+        nameCounts.set(k, (nameCounts.get(k) || 0) + 1);
+      }
+
       const matches: BracketMatch[] = [];
       for (let i = 0; i < teams.length; i++) {
         for (let j = i + 1; j < teams.length; j++) {
           const teamA = teams[i]!;
           const teamB = teams[j]!;
-          const matchId = createPairMatchId(tournamentSlug, categoryId, `Bracket ${dGrp.letter}`, teamA.name, teamB.name);
+          const isDupA = (nameCounts.get(teamA.name.trim().toLowerCase()) || 0) > 1;
+          const isDupB = (nameCounts.get(teamB.name.trim().toLowerCase()) || 0) > 1;
+
+          const matchId = createPairMatchId(
+            tournamentSlug,
+            categoryId,
+            `Bracket ${dGrp.letter}`,
+            teamA.name,
+            teamB.name,
+            teamA.players,
+            teamB.players,
+            isDupA,
+            isDupB,
+          );
           const bracketMatchId = `bracket-${dGrp.letter}-m${i + 1}-${j + 1}`;
 
-          const liveMatch = findMatchForPair(liveMatches, teamA.name, teamB.name, tournamentSlug, categoryId, dGrp.letter);
+          const liveMatch = findMatchForPair(
+            liveMatches,
+            teamA.name,
+            teamB.name,
+            tournamentSlug,
+            categoryId,
+            dGrp.letter,
+            teamA.players,
+            teamB.players,
+          );
 
           let scoreA: number | undefined = undefined;
           let scoreB: number | undefined = undefined;

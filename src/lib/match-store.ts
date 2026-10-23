@@ -1003,6 +1003,10 @@ export function createPairMatchId(
   stageOrBracket: string,
   teamAName: string,
   teamBName: string,
+  teamAPlayers?: string[],
+  teamBPlayers?: string[],
+  isTeamADuplicate = false,
+  isTeamBDuplicate = false,
 ): string {
   const normSlug = (tournamentSlug || "tournament").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
   const normCat = (categoryId || "cat").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
@@ -1016,8 +1020,21 @@ export function createPairMatchId(
   }
   const normStage = cleanStage.replace(/[^a-z0-9]+/g, "-").replace(/-+/g, "-");
 
-  const normA = (teamAName || "teama").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-  const normB = (teamBName || "teamb").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  let normA = (teamAName || "teama").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  let normB = (teamBName || "teamb").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+
+  // If two teams share the same club/team name, or either is a duplicate in its bracket, disambiguate using player names
+  const shouldDisambiguateA = (normA === normB || isTeamADuplicate) && teamAPlayers && teamAPlayers.length > 0;
+  const shouldDisambiguateB = (normA === normB || isTeamBDuplicate) && teamBPlayers && teamBPlayers.length > 0;
+
+  if (shouldDisambiguateA) {
+    const pA = teamAPlayers!.map((p) => p.trim().toLowerCase().replace(/[^a-z0-9]+/g, "")).filter(Boolean).sort().join("-");
+    if (pA) normA = `${normA}-${pA}`;
+  }
+  if (shouldDisambiguateB) {
+    const pB = teamBPlayers!.map((p) => p.trim().toLowerCase().replace(/[^a-z0-9]+/g, "")).filter(Boolean).sort().join("-");
+    if (pB) normB = `${normB}-${pB}`;
+  }
 
   // Sort team names alphabetically so Team A vs Team B produces the EXACT same match ID as Team B vs Team A
   const sortedPairs = [normA, normB].sort().join("-vs-");
@@ -1060,6 +1077,8 @@ export function findMatchForPair(
   tournamentSlug?: string,
   categoryId?: string,
   stageOrBracket?: string,
+  teamAPlayers?: string[],
+  teamBPlayers?: string[],
 ): LiveMatch | undefined {
   if (!teamAName || !teamBName) return undefined;
   const normA = teamAName.trim().toLowerCase();
@@ -1073,6 +1092,18 @@ export function findMatchForPair(
     const mb = m.teamBName?.trim().toLowerCase();
     const teamsMatch = (ma === normA && mb === normB) || (ma === normB && mb === normA);
     if (!teamsMatch) return false;
+
+    // Disambiguate if both teams share the exact same club/team name
+    if (normA === normB && teamAPlayers && teamBPlayers && m.teamAPlayers && m.teamBPlayers) {
+      const matchP1 = [...m.teamAPlayers].sort().join(",").toLowerCase();
+      const matchP2 = [...m.teamBPlayers].sort().join(",").toLowerCase();
+      const targetP1 = [...teamAPlayers].sort().join(",").toLowerCase();
+      const targetP2 = [...teamBPlayers].sort().join(",").toLowerCase();
+      const playerMatch =
+        (matchP1 === targetP1 && matchP2 === targetP2) ||
+        (matchP1 === targetP2 && matchP2 === targetP1);
+      if (!playerMatch) return false;
+    }
 
     if (stageOrBracket && m.stage) {
       const cleanTarget = stageOrBracket.trim().toLowerCase();
@@ -1278,19 +1309,41 @@ export function syncDrawnBracketsToLiveMatches(
       .map((s) => s.team)
       .filter((t): t is { id: string; name: string; players: string[]; club?: string | undefined } => t !== null);
 
+    const nameCounts = new Map<string, number>();
+    for (const t of teams) {
+      const k = t.name.trim().toLowerCase();
+      nameCounts.set(k, (nameCounts.get(k) || 0) + 1);
+    }
+
     const pairs = generateBalancedRoundRobinPairs(teams);
     pairs.forEach(([teamA, teamB]) => {
+      const isDupA = (nameCounts.get(teamA.name.trim().toLowerCase()) || 0) > 1;
+      const isDupB = (nameCounts.get(teamB.name.trim().toLowerCase()) || 0) > 1;
+
       const matchId = createPairMatchId(
         tournamentSlug,
         categoryId,
         `Bracket ${group.letter}`,
         teamA.name,
         teamB.name,
+        teamA.players,
+        teamB.players,
+        isDupA,
+        isDupB,
       );
       const courtName = "Queue";
 
       // Check if a match for these two teams already exists in the store
-      const existing = findMatchForPair(currentMatches, teamA.name, teamB.name, tournamentSlug, categoryId, group.letter);
+      const existing = findMatchForPair(
+        currentMatches,
+        teamA.name,
+        teamB.name,
+        tournamentSlug,
+        categoryId,
+        group.letter,
+        teamA.players,
+        teamB.players,
+      );
       if (existing) {
         newMatches.push({
           ...existing,
@@ -1347,7 +1400,7 @@ export function syncDrawnBracketsToLiveMatches(
         return true;
       }
       // If it's a pool play match, only retain if both teams are actually in the same bracket in drawnGroups
-      if (!isMatchInSameBracket(tournamentSlug, categoryId, m.stage, m.teamAName, m.teamBName)) {
+      if (!isMatchInSameBracket(tournamentSlug, categoryId, m.stage, m.teamAName, m.teamBName, undefined, undefined, m.teamAPlayers, m.teamBPlayers)) {
         return false;
       }
       if (m.status === "live") {
@@ -1357,7 +1410,7 @@ export function syncDrawnBracketsToLiveMatches(
     }
 
     // Also for other matches, ensure pool play matches don't cross brackets
-    if (m.stage && m.stage.includes("Bracket ") && !isMatchInSameBracket(m.tournamentSlug || "", m.categoryId || "", m.stage, m.teamAName, m.teamBName)) {
+    if (m.stage && m.stage.includes("Bracket ") && !isMatchInSameBracket(m.tournamentSlug || "", m.categoryId || "", m.stage, m.teamAName, m.teamBName, undefined, undefined, m.teamAPlayers, m.teamBPlayers)) {
       return false;
     }
 

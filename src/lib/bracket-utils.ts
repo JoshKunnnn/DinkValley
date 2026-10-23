@@ -29,25 +29,61 @@ export function isMatchInSameBracket(
   stage?: string,
   teamAName?: string,
   teamBName?: string,
+  teamAId?: string,
+  teamBId?: string,
+  teamAPlayers?: string[],
+  teamBPlayers?: string[],
 ): boolean {
   if (!teamAName || !teamBName) return false;
   const cleanA = teamAName.trim().toLowerCase();
   const cleanB = teamBName.trim().toLowerCase();
-  if (cleanA === cleanB) return false; // A team cannot play itself
+
+  // Same team playing itself
+  if (teamAId && teamBId && teamAId === teamBId) return false;
+  if (!teamAId && !teamBId && cleanA === cleanB) {
+    if (teamAPlayers && teamBPlayers && teamAPlayers.length > 0 && teamBPlayers.length > 0) {
+      const pA = [...teamAPlayers].sort().join(",").toLowerCase();
+      const pB = [...teamBPlayers].sort().join(",").toLowerCase();
+      if (pA === pB) return false;
+    } else {
+      return false;
+    }
+  }
 
   if (!stage) return true;
 
   // Non-bracket stages (e.g. Finals, Semifinals, Exhibition) are not pool play brackets
-  const match = stage.match(/Bracket ([A-H])/i);
+  const match = stage.match(/(?:bracket|pool)\s*([a-h])\b/i);
   if (!match) {
     return true; // Knockout or exhibition match
   }
 
   const bracketLetter = match[1]!.toUpperCase();
 
-  // Collect all available candidate group lists for this tournament
+  const isSlotMatch = (slot: any, cleanName: string, teamId?: string, players?: string[]): boolean => {
+    if (teamId && slot?.team?.id && slot.team.id === teamId) return true;
+    const sName = (slot?.team?.name || slot?.name || "").trim().toLowerCase();
+    if (!sName || !cleanName) return false;
+
+    if (sName === cleanName) {
+      if (players && players.length > 0 && slot?.team?.players && slot.team.players.length > 0) {
+        const p1 = [...players].sort().join(",").toLowerCase();
+        const p2 = [...slot.team.players].sort().join(",").toLowerCase();
+        return p1 === p2;
+      }
+      return true;
+    }
+    // Disallow substring collision on short team names (e.g. 'nv', 'dv', 'ro', 'dmd')
+    if (sName.length >= 4 && cleanName.length >= 4) {
+      if (sName.includes(cleanName) || cleanName.includes(sName)) return true;
+    }
+    return false;
+  };
+
+  // Collect candidate group lists
   const allCandidateGroups: Array<any[]> = [];
 
+  // Priority 1: Category-specific groups (Never mix other categories if categoryId is provided)
   if (tournamentSlug && categoryId) {
     const cached = getCachedDrawnGroups(tournamentSlug, categoryId);
     if (cached && Array.isArray(cached) && cached.length > 0) {
@@ -59,7 +95,8 @@ export function isMatchInSameBracket(
     }
   }
 
-  if (typeof localStorage !== "undefined") {
+  // Priority 2: Only fallback to scanning other keys if no category-specific groups were found
+  if (allCandidateGroups.length === 0 && typeof localStorage !== "undefined") {
     try {
       for (let i = 0; i < localStorage.length; i++) {
         const key = localStorage.key(i);
@@ -80,55 +117,51 @@ export function isMatchInSameBracket(
     return true; // No draw found, allow match
   }
 
-  const getSlotTeamName = (slot: any): string => {
-    return (slot?.team?.name || slot?.name || "").trim().toLowerCase();
-  };
-
-  // Check each candidate draw to see if it contains either cleanA or cleanB
   for (const groups of allCandidateGroups) {
-    let bracketA: string | null = null;
-    let bracketB: string | null = null;
+    // 1. Check target group directly
+    const targetGroup = groups.find((g: any) => g.letter?.toUpperCase() === bracketLetter);
+    if (targetGroup && Array.isArray(targetGroup.slots)) {
+      const hasA = targetGroup.slots.some((s: any) => isSlotMatch(s, cleanA, teamAId, teamAPlayers));
+      const hasB = targetGroup.slots.some((s: any) => isSlotMatch(s, cleanB, teamBId, teamBPlayers));
 
+      // Both belong to the target bracket
+      if (hasA && hasB) {
+        return true;
+      }
+
+      // If one team is definitely in target bracket, but other is in a different bracket of this draw
+      if (hasA && !hasB) {
+        const bInOther = groups.some(
+          (g: any) =>
+            g.letter?.toUpperCase() !== bracketLetter &&
+            Array.isArray(g.slots) &&
+            g.slots.some((s: any) => isSlotMatch(s, cleanB, teamBId, teamBPlayers))
+        );
+        if (bInOther) return false;
+      }
+
+      if (hasB && !hasA) {
+        const aInOther = groups.some(
+          (g: any) =>
+            g.letter?.toUpperCase() !== bracketLetter &&
+            Array.isArray(g.slots) &&
+            g.slots.some((s: any) => isSlotMatch(s, cleanA, teamAId, teamAPlayers))
+        );
+        if (aInOther) return false;
+      }
+    }
+
+    // 2. Check if both teams belong together in a different bracket of this draw
     for (const grp of groups) {
       const letter = grp.letter?.toUpperCase();
-      if (!letter || !Array.isArray(grp.slots)) continue;
-
-      for (const slot of grp.slots) {
-        const sName = getSlotTeamName(slot);
-        if (!sName) continue;
-        if (sName === cleanA || cleanA.includes(sName) || sName.includes(cleanA)) {
-          bracketA = letter;
-        }
-        if (sName === cleanB || cleanB.includes(sName) || sName.includes(cleanB)) {
-          bracketB = letter;
-        }
-      }
-    }
-
-    // If both teams belong to this draw
-    if (bracketA && bracketB) {
-      // If they belong to different brackets within this draw, reject the cross-bracket matchup
-      if (bracketA !== bracketB) {
-        return false;
-      }
-      // Both belong to the same bracket
-      return bracketA === bracketLetter;
-    }
-
-    // If only one team was matched in this draw, verify that its bracket matches the stage
-    if (bracketA && !bracketB) {
-      if (bracketA === bracketLetter) {
-        return true;
-      }
-    }
-    if (bracketB && !bracketA) {
-      if (bracketB === bracketLetter) {
-        return true;
+      if (!letter || letter === bracketLetter || !Array.isArray(grp.slots)) continue;
+      const inThisA = grp.slots.some((s: any) => isSlotMatch(s, cleanA, teamAId, teamAPlayers));
+      const inThisB = grp.slots.some((s: any) => isSlotMatch(s, cleanB, teamBId, teamBPlayers));
+      if (inThisA && inThisB) {
+        return false; // Both belong to this OTHER bracket, not the target bracket!
       }
     }
   }
 
-  // If neither team was explicitly mapped to conflicting brackets, fail-open to avoid blocking tournament play
   return true;
 }
-

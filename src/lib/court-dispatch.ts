@@ -361,7 +361,7 @@ export function getDispatchQueue(): QueueItem[] {
 
   // Filter out any matches that pair players across different brackets in pool play
   const valid = items.filter((q) =>
-    isMatchInSameBracket(q.tournamentSlug, q.categoryId, q.stage, q.teamAName, q.teamBName)
+    isMatchInSameBracket(q.tournamentSlug, q.categoryId, q.stage, q.teamAName, q.teamBName, undefined, undefined, q.teamAPlayers, q.teamBPlayers)
   );
 
   if (valid.length !== items.length) {
@@ -374,7 +374,7 @@ export function getDispatchQueue(): QueueItem[] {
 export function saveDispatchQueue(queue: QueueItem[]): void {
   // Ensure only matches with teams in the same bracket are persisted
   const sanitized = queue.filter((q) =>
-    isMatchInSameBracket(q.tournamentSlug, q.categoryId, q.stage, q.teamAName, q.teamBName)
+    isMatchInSameBracket(q.tournamentSlug, q.categoryId, q.stage, q.teamAName, q.teamBName, undefined, undefined, q.teamAPlayers, q.teamBPlayers)
   );
 
   dbSaveDispatchQueue(sanitized).catch((err) => {
@@ -485,7 +485,7 @@ export function dispatchMatchToCourt(
   startImmediately = false,
 ): void {
   // Validate that pool play matches only pair teams within the exact same bracket
-  if (match.stage && !isMatchInSameBracket(match.tournamentSlug || "", match.categoryId || "", match.stage, match.teamAName, match.teamBName)) {
+  if (match.stage && !isMatchInSameBracket(match.tournamentSlug || "", match.categoryId || "", match.stage, match.teamAName, match.teamBName, undefined, undefined, match.teamAPlayers, match.teamBPlayers)) {
     console.warn(`[Dispatch Rejected] ${match.teamAName} vs ${match.teamBName} are not in the same bracket for stage: ${match.stage}`);
     return;
   }
@@ -506,6 +506,8 @@ export function dispatchMatchToCourt(
     match.stage || "",
     match.teamAName,
     match.teamBName,
+    match.teamAPlayers,
+    match.teamBPlayers,
   );
   const effectiveId = match.id.startsWith("match-") ? match.id : canonicalId;
 
@@ -521,6 +523,11 @@ export function dispatchMatchToCourt(
     const ta = match.teamAName.trim().toLowerCase();
     const tb = match.teamBName.trim().toLowerCase();
     if ((ma === ta && mb === tb) || (ma === tb && mb === ta)) {
+      if (ta === tb && match.teamAPlayers && match.teamBPlayers && m.teamAPlayers && m.teamBPlayers) {
+        const matchP = [m.teamAPlayers.slice().sort().join(",").toLowerCase(), m.teamBPlayers.slice().sort().join(",").toLowerCase()].sort().join(" vs ");
+        const targetP = [match.teamAPlayers.slice().sort().join(",").toLowerCase(), match.teamBPlayers.slice().sort().join(",").toLowerCase()].sort().join(" vs ");
+        return matchP === targetP;
+      }
       return true;
     }
     // 2. ID match only if match doesn't have opposing teams
@@ -860,7 +867,7 @@ export function autoDispatchNext(court: FacilityCourt, tournamentSlug?: string, 
     .filter((q) => !tournamentSlug || !q.tournamentSlug || q.tournamentSlug === tournamentSlug)
     .filter((q) => isStageMatchingBracket(q.stage, activeBracket))
     .filter((q) => !checkSimultaneousPlayConflict(q.teamAName, q.teamAPlayers, q.tournamentSlug || tournamentSlug, q.teamAClub) && !checkSimultaneousPlayConflict(q.teamBName, q.teamBPlayers, q.tournamentSlug || tournamentSlug, q.teamBClub))
-    .filter((q) => isMatchInSameBracket(q.tournamentSlug || tournamentSlug || "", q.categoryId || "", q.stage, q.teamAName, q.teamBName))
+    .filter((q) => isMatchInSameBracket(q.tournamentSlug || tournamentSlug || "", q.categoryId || "", q.stage, q.teamAName, q.teamBName, undefined, undefined, q.teamAPlayers, q.teamBPlayers))
     .sort((a, b) => a.priority - b.priority);
 
   // If court has a dedicated bracket filter, but all matches for that bracket are finished/exhausted,
@@ -877,7 +884,7 @@ export function autoDispatchNext(court: FacilityCourt, tournamentSlug?: string, 
         .filter((q) => q.status === "queued" || q.status === "on_deck")
         .filter((q) => !tournamentSlug || !q.tournamentSlug || q.tournamentSlug === tournamentSlug)
         .filter((q) => !checkSimultaneousPlayConflict(q.teamAName, q.teamAPlayers, q.tournamentSlug || tournamentSlug, q.teamAClub) && !checkSimultaneousPlayConflict(q.teamBName, q.teamBPlayers, q.tournamentSlug || tournamentSlug, q.teamBClub))
-        .filter((q) => isMatchInSameBracket(q.tournamentSlug || tournamentSlug || "", q.categoryId || "", q.stage, q.teamAName, q.teamBName))
+        .filter((q) => isMatchInSameBracket(q.tournamentSlug || tournamentSlug || "", q.categoryId || "", q.stage, q.teamAName, q.teamBName, undefined, undefined, q.teamAPlayers, q.teamBPlayers))
         .sort((a, b) => a.priority - b.priority);
     }
   }
@@ -1360,7 +1367,7 @@ export function addMatchesToQueue(
   for (const it of items) {
     if (existingIds.has(it.matchId)) continue;
     // Strictly ensure only matches within the same bracket are added to the queue
-    if (!isMatchInSameBracket(it.tournamentSlug, it.categoryId, it.stage, it.teamAName, it.teamBName)) {
+    if (!isMatchInSameBracket(it.tournamentSlug, it.categoryId, it.stage, it.teamAName, it.teamBName, undefined, undefined, it.teamAPlayers, it.teamBPlayers)) {
       continue;
     }
     newItems.push({
