@@ -21,6 +21,7 @@ import {
   markStationLocalWrite,
   getOfflineScoreJournal,
   broadcastDispatchAlert,
+  dbSaveCategoryArrangement,
 } from "./supabase-service";
 import { isMatchInSameBracket } from "./bracket-utils";
 
@@ -1897,6 +1898,8 @@ export function saveCategorySequence(
   } catch {
     // ignore
   }
+  // Sync to Supabase in background for cross-device realtime consistency
+  dbSaveCategoryArrangement(tournamentSlug, sequence, undefined).catch(() => {});
 }
 
 export function getActiveWaveId(
@@ -1922,6 +1925,193 @@ export function setActiveWaveId(
   } catch {
     // ignore
   }
+  // Sync to Supabase in background for cross-device realtime consistency
+  dbSaveCategoryArrangement(tournamentSlug, undefined, categoryId).catch(() => {});
+}
+
+/**
+ * Checks if a match belongs to a specified tournament category.
+ * Accurately matches against category ID, category slug, match ID substrings, or registered team rosters.
+ */
+export function isMatchInCategory(
+  match: {
+    categoryId?: string | null | undefined;
+    id?: string | undefined;
+    tournamentSlug?: string | undefined;
+    teamAName?: string | undefined;
+    teamBName?: string | undefined;
+    stage?: string | undefined;
+    teamAPlayers?: string[] | undefined;
+    teamBPlayers?: string[] | undefined;
+  },
+  category: {
+    id: string;
+    category_slug?: string | undefined;
+    teams?: Array<{ id?: string | undefined; name: string }> | undefined;
+  },
+  tournamentSlug?: string | undefined,
+): boolean {
+  if (!match || !category) return false;
+
+  // 1. If tournamentSlug is specified and match has tournamentSlug, verify they match
+  if (tournamentSlug && match.tournamentSlug && match.tournamentSlug !== tournamentSlug) {
+    return false;
+  }
+
+  // 2. Reject self-play (same team playing against itself)
+  const nameA = match.teamAName?.trim().toLowerCase();
+  const nameB = match.teamBName?.trim().toLowerCase();
+  if (nameA && nameB && nameA === nameB) {
+    return false;
+  }
+
+  // 3. Reject if match ID explicitly belongs to another division/category
+  if (match.id) {
+    const cleanMatchId = match.id.toLowerCase();
+    const isBegCat = category.id.toLowerCase().includes("beginner") || (category.category_slug && category.category_slug.toLowerCase().includes("beginner"));
+    const isNovCat = category.id.toLowerCase().includes("novice") || (category.category_slug && category.category_slug.toLowerCase().includes("novice"));
+
+    if (isBegCat && (cleanMatchId.includes("novice") || cleanMatchId.includes("womens"))) {
+      return false;
+    }
+    if (isNovCat && (cleanMatchId.includes("beginner") || cleanMatchId.includes("womens"))) {
+      return false;
+    }
+  }
+
+  // 4. Team roster membership: Both teams must belong to this category's roster!
+  if (category.teams && category.teams.length > 0 && nameA && nameB) {
+    const validTeamNames = new Set(category.teams.map((t) => t.name.trim().toLowerCase()));
+    const hasA = validTeamNames.has(nameA);
+    const hasB = validTeamNames.has(nameB);
+    if (!hasA || !hasB) {
+      return false;
+    }
+
+    // 5. If it's a pool play bracket match, both teams must be in the exact same bracket
+    if (match.stage && /(?:bracket|pool)\s+[a-z]/i.test(match.stage)) {
+      if (!isMatchInSameBracket(
+        tournamentSlug || match.tournamentSlug || "",
+        category.id,
+        match.stage,
+        match.teamAName,
+        match.teamBName,
+        undefined,
+        undefined,
+        match.teamAPlayers,
+        match.teamBPlayers,
+      )) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  // Fallback for custom or unrostered matches: match by category ID or slug
+  if (match.categoryId) {
+    const cleanMatchCat = match.categoryId.trim().toLowerCase();
+    const cleanCatId = category.id.trim().toLowerCase();
+    if (cleanMatchCat === cleanCatId) return true;
+    if (category.category_slug && cleanMatchCat === category.category_slug.trim().toLowerCase()) return true;
+  }
+
+  if (match.id) {
+    const cleanMatchId = match.id.toLowerCase();
+    if (cleanMatchId.includes(category.id.toLowerCase())) return true;
+    if (category.category_slug && cleanMatchId.includes(category.category_slug.toLowerCase())) return true;
+  }
+
+  return false;
+}
+
+/**
+ * Checks if a queue item belongs to a specified tournament category.
+ */
+export function isQueueItemInCategory(
+  item: {
+    categoryId?: string | null | undefined;
+    matchId?: string | undefined;
+    tournamentSlug?: string | undefined;
+    teamAName?: string | undefined;
+    teamBName?: string | undefined;
+    stage?: string | undefined;
+    teamAPlayers?: string[] | undefined;
+    teamBPlayers?: string[] | undefined;
+  },
+  category: {
+    id: string;
+    category_slug?: string | undefined;
+    teams?: Array<{ id?: string | undefined; name: string }> | undefined;
+  },
+  tournamentSlug?: string | undefined,
+): boolean {
+  if (!item || !category) return false;
+
+  if (tournamentSlug && item.tournamentSlug && item.tournamentSlug !== tournamentSlug) {
+    return false;
+  }
+
+  const nameA = item.teamAName?.trim().toLowerCase();
+  const nameB = item.teamBName?.trim().toLowerCase();
+  if (nameA && nameB && nameA === nameB) {
+    return false;
+  }
+
+  if (item.matchId) {
+    const cleanMatchId = item.matchId.toLowerCase();
+    const isBegCat = category.id.toLowerCase().includes("beginner") || (category.category_slug && category.category_slug.toLowerCase().includes("beginner"));
+    const isNovCat = category.id.toLowerCase().includes("novice") || (category.category_slug && category.category_slug.toLowerCase().includes("novice"));
+
+    if (isBegCat && (cleanMatchId.includes("novice") || cleanMatchId.includes("womens"))) {
+      return false;
+    }
+    if (isNovCat && (cleanMatchId.includes("beginner") || cleanMatchId.includes("womens"))) {
+      return false;
+    }
+  }
+
+  if (category.teams && category.teams.length > 0 && nameA && nameB) {
+    const validTeamNames = new Set(category.teams.map((t) => t.name.trim().toLowerCase()));
+    const hasA = validTeamNames.has(nameA);
+    const hasB = validTeamNames.has(nameB);
+    if (!hasA || !hasB) {
+      return false;
+    }
+
+    if (item.stage && /(?:bracket|pool)\s+[a-z]/i.test(item.stage)) {
+      if (!isMatchInSameBracket(
+        tournamentSlug || item.tournamentSlug || "",
+        category.id,
+        item.stage,
+        item.teamAName,
+        item.teamBName,
+        undefined,
+        undefined,
+        item.teamAPlayers,
+        item.teamBPlayers,
+      )) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  if (item.categoryId) {
+    const cleanItemCat = item.categoryId.trim().toLowerCase();
+    const cleanCatId = category.id.trim().toLowerCase();
+    if (cleanItemCat === cleanCatId) return true;
+    if (category.category_slug && cleanItemCat === category.category_slug.trim().toLowerCase()) return true;
+  }
+
+  if (item.matchId) {
+    const cleanMatchId = item.matchId.toLowerCase();
+    if (cleanMatchId.includes(category.id.toLowerCase())) return true;
+    if (category.category_slug && cleanMatchId.includes(category.category_slug.toLowerCase())) return true;
+  }
+
+  return false;
 }
 
 export function reorderCategorySequence(
@@ -2369,9 +2559,23 @@ export function autoHealDispatchAnomalies(
       deduplicatedMatches.push(m);
       continue;
     }
-    const pair = [m.teamAName.trim().toLowerCase(), m.teamBName.trim().toLowerCase()].sort().join("::");
+    const cleanA = m.teamAName.trim().toLowerCase();
+    const cleanB = m.teamBName.trim().toLowerCase();
+    if (cleanA === cleanB) {
+      // Discard invalid self-match
+      repairedCount++;
+      if (m.id) dbDeleteMatch(m.id).catch(() => {});
+      continue;
+    }
+    const pair = [cleanA, cleanB].sort().join("::");
     const bracket = (m.stage || "").match(/(?:bracket|pool)\s*([a-z])/i)?.[1]?.toLowerCase() || "pool";
-    const key = `${m.tournamentSlug || "event"}::${m.categoryId || "division"}::${bracket}::${pair}`;
+    const stageType = m.stage && /(?:quarter|semi|final|playoff|bronze)/i.test(m.stage) ? "playoff" : bracket;
+    const cleanCat = (m.categoryId?.includes("novice") || m.id.includes("novice"))
+      ? "novice"
+      : (m.categoryId?.includes("beginner") || m.id.includes("beginner") || (m.stage && m.stage.includes("beginner")))
+        ? "beginner"
+        : "pool";
+    const key = `${m.tournamentSlug || "event"}::${cleanCat}::${stageType}::${pair}`;
 
     if (!pairMap.has(key)) {
       pairMap.set(key, m);
@@ -2393,11 +2597,11 @@ export function autoHealDispatchAnomalies(
           deduplicatedMatches[idx] = m;
         }
         pairMap.set(key, m);
-        if (existing.status === "scheduled") {
+        if (existing.status === "scheduled" && existing.id) {
           dbDeleteMatch(existing.id).catch(() => {});
         }
       } else {
-        if (m.status === "scheduled") {
+        if (m.status === "scheduled" && m.id) {
           dbDeleteMatch(m.id).catch(() => {});
         }
       }

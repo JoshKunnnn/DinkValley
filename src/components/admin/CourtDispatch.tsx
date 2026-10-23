@@ -55,16 +55,34 @@ import {
   hydrateCourtStationsFromCloud,
   healAndSyncDispatchStations,
   findMatchForCourtStation,
+  isMatchInCategory,
+  isQueueItemInCategory,
 } from "@/lib/court-dispatch";
 import { getDrawnGroups } from "@/components/admin/BracketDraw";
 import { getMainDrawMatches } from "@/components/admin/DrawsManager";
 import { dbUpdateCourtStation, dbSubscribeToLive } from "@/lib/supabase-service";
 import { DispatchDebugStation, type DebugTab } from "@/components/admin/DispatchDebugStation";
-import { Search, X, Filter } from "lucide-react";
+import { Search, X, Filter, Clock, Award, CheckCircle2, RotateCcw, History } from "lucide-react";
 
 /** Returns prev when next is structurally identical, so React skips re-renders and memo recomputation. */
 function keepIfEqual<T>(prev: T, next: T): T {
   return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
+}
+
+/** Extracts a clean Bracket label (e.g. "Bracket A", "Bracket B", "Playoffs") from a match. */
+function getMatchBracketLabel(m: LiveMatch): string {
+  if (m.bracketLetter) {
+    const letter = m.bracketLetter.replace(/^bracket\s*/i, "").trim().toUpperCase();
+    return `Bracket ${letter}`;
+  }
+  const match = (m.stage || "").match(/(?:bracket|pool)\s+([a-z0-9]+)/i);
+  if (match) {
+    return `Bracket ${match[1]!.toUpperCase()}`;
+  }
+  if (m.stage && /quarter|semi|final|playoff|bronze|gold|knockout/i.test(m.stage)) {
+    return "Playoffs";
+  }
+  return m.stage || "Completed Matches";
 }
 
 /**
@@ -300,6 +318,11 @@ export function CourtDispatch({
   const [queueBracketFilter, setQueueBracketFilter] = useState<string>("all");
   const [unassignedBracketFilter, setUnassignedBracketFilter] = useState<string>("all");
   const [unassignedTeamFilter, setUnassignedTeamFilter] = useState<string>("all");
+
+  // Match History Filtering State
+  const [historyCategoryFilter, setHistoryCategoryFilter] = useState<string>("all");
+  const [historyBracketFilter, setHistoryBracketFilter] = useState<string>("all");
+  const [historySearchQuery, setHistorySearchQuery] = useState<string>("");
   const [courtReplaceConfirm, setCourtReplaceConfirm] = useState<{
     court: FacilityCourt;
     pendingMatch: {
@@ -443,6 +466,7 @@ export function CourtDispatch({
         hydrateCourtStationsFromCloud().then((cloudStations) => {
           if (mounted) {
             setStations((prev) => keepIfEqual(prev, cloudStations));
+            reloadData();
           }
         });
       },
@@ -453,6 +477,7 @@ export function CourtDispatch({
             setStations((prev) => keepIfEqual(prev, cloudStations));
             if (refreshFromCloud) refreshFromCloud();
             else refreshMatches();
+            reloadData();
           }
         });
       }
@@ -640,24 +665,61 @@ export function CourtDispatch({
     >();
 
     for (const cat of tournament.categories) {
+      const poolGroups = getDrawnGroups(tournamentSlug, cat.id);
+      const playoffMatches = getMainDrawMatches(tournamentSlug, cat.id);
+
+      // 1. Calculate true scheduled match capacity based on drawn groups and playoff draw
+      let scheduledPoolMatches = 0;
+      if (poolGroups && poolGroups.length > 0) {
+        for (const g of poolGroups) {
+          const validSlots = g.slots.filter((s) => s.team !== null);
+          if (validSlots.length >= 2) {
+            scheduledPoolMatches += (validSlots.length * (validSlots.length - 1)) / 2;
+          }
+        }
+      }
+      const scheduledPlayoffs = playoffMatches && playoffMatches.length > 0 ? playoffMatches.length : 0;
+      const scheduledTotal = scheduledPoolMatches + scheduledPlayoffs;
+
       const unassigned = computeCategoryUnassignedMatches(tournamentSlug, cat, queue, stations, matches);
-      const completedCount = matches.filter(
-        (m) => (m.categoryId === cat.id || m.id.includes(cat.id)) && m.status === "final",
-      ).length;
-      const onCourtCount = matches.filter(
-        (m) =>
-          (m.categoryId === cat.id || m.id.includes(cat.id)) &&
-          (m.status === "live" || m.status === "scheduled"),
-      ).length;
+
+      // 2. Deduplicate completed matches by canonical matchup pair and stage so duplicate DB rows count once
+      const seenCompletedKeys = new Set<string>();
+      matches.forEach((m) => {
+        if (m.status !== "final") return;
+        if (!isMatchInCategory(m, cat, tournamentSlug)) return;
+        const a = m.teamAName?.trim().toLowerCase();
+        const b = m.teamBName?.trim().toLowerCase();
+        if (!a || !b || a === b) return;
+        const pairKey = [a, b].sort().join("::");
+        const stageKey = (m.stage || "match").trim().toLowerCase();
+        seenCompletedKeys.add(`${pairKey}::${stageKey}`);
+      });
+      const completedCount = seenCompletedKeys.size;
+
+      const onCourtCount = matches.filter((m) => {
+        if (!isMatchInCategory(m, cat, tournamentSlug)) return false;
+        if (m.status === "live") return true;
+        return Object.values(stations).some(
+          (s) => s?.currentMatchId === m.id && (s.status === "live" || s.status === "warmup"),
+        );
+      }).length;
+
       const queuedCount = queue.filter(
         (q) =>
           (q.status === "queued" || q.status === "on_deck") &&
-          (q.categoryId === cat.id || q.matchId.includes(cat.id)),
+          isQueueItemInCategory(q, cat, tournamentSlug),
       ).length;
+
       const unassignedCount = unassigned.length;
-      const totalMatches = completedCount + onCourtCount + queuedCount + unassignedCount;
-      const progressPercent = totalMatches > 0 ? Math.round((completedCount / totalMatches) * 100) : 0;
-      const isCompleted = totalMatches > 0 && completedCount === totalMatches;
+      
+      // True scheduled total from tournament draws takes precedence
+      const totalMatches =
+        scheduledTotal > 0
+          ? scheduledTotal
+          : completedCount + onCourtCount + queuedCount + unassignedCount;
+      const progressPercent = totalMatches > 0 ? Math.min(100, Math.round((completedCount / totalMatches) * 100)) : 0;
+      const isCompleted = totalMatches > 0 && completedCount >= totalMatches;
 
       map.set(cat.id, {
         totalMatches,
@@ -1369,19 +1431,123 @@ export function CourtDispatch({
     return map;
   }, [queue, queueDivisionFilter, categoryId]);
 
-  // Filtered history (search-aware, division-aware)
+  // All completed matches in the tournament (deduplicated by matchup pair so duplicate DB rows count once)
+  const allCompletedMatches = useMemo(() => {
+    const finals = matches.filter((m) => m.status === "final");
+    const seenMatchups = new Map<string, LiveMatch>();
+
+    for (const m of finals) {
+      if (!m.teamAName || !m.teamBName) continue;
+      const cleanA = m.teamAName.trim().toLowerCase();
+      const cleanB = m.teamBName.trim().toLowerCase();
+      if (cleanA === cleanB) continue; // Skip invalid self-matches
+      const pairKey = [cleanA, cleanB].sort().join("::");
+      const stageKey = (m.stage || "match").trim().toLowerCase();
+      const key = `${m.tournamentSlug || tournamentSlug || "all"}::${pairKey}::${stageKey}`;
+
+      if (!seenMatchups.has(key)) {
+        seenMatchups.set(key, m);
+      } else {
+        const existing = seenMatchups.get(key)!;
+        const existingScore = (existing.score?.teamAScore ?? 0) + (existing.score?.teamBScore ?? 0);
+        const newScore = (m.score?.teamAScore ?? 0) + (m.score?.teamBScore ?? 0);
+        if (newScore > existingScore || (m.endedAt && !existing.endedAt) || (m.officiatedBy && !existing.officiatedBy)) {
+          seenMatchups.set(key, m);
+        }
+      }
+    }
+
+    return Array.from(seenMatchups.values()).sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0));
+  }, [matches, tournamentSlug]);
+
+  // Categories available for match history filtering with completed counts
+  const availableHistoryCategories = useMemo(() => {
+    return tournament.categories.map((cat) => {
+      const count = allCompletedMatches.filter((m) => isMatchInCategory(m, cat)).length;
+      return {
+        id: cat.id,
+        label: cat.label,
+        count,
+      };
+    });
+  }, [tournament.categories, allCompletedMatches]);
+
+  // Brackets available within the currently selected category filter with completed counts
+  const availableHistoryBrackets = useMemo(() => {
+    const counts: Record<string, number> = {};
+    const set = new Set<string>();
+
+    allCompletedMatches.forEach((m) => {
+      if (historyCategoryFilter !== "all") {
+        const cat = tournament.categories.find((c) => c.id === historyCategoryFilter);
+        if (cat && !isMatchInCategory(m, cat)) return;
+      }
+      const bracket = getMatchBracketLabel(m);
+      set.add(bracket);
+      counts[bracket] = (counts[bracket] || 0) + 1;
+    });
+
+    return Array.from(set).sort().map((bracket) => ({
+      bracket,
+      count: counts[bracket] || 0,
+    }));
+  }, [allCompletedMatches, historyCategoryFilter, tournament.categories]);
+
+  // Filtered match history (category-aware, bracket-aware, search-aware)
   const filteredHistory = useMemo(() => {
-    const q = searchQuery.toLowerCase();
-    return matches.filter(
-      (m) =>
-        m.status === "final" &&
-        (queueDivisionFilter === "all" || !m.categoryId || m.categoryId === categoryId) &&
-        (!q ||
-          m.teamAName.toLowerCase().includes(q) ||
-          m.teamBName.toLowerCase().includes(q) ||
-          (m.stage ?? "").toLowerCase().includes(q)),
-    );
-  }, [matches, searchQuery, queueDivisionFilter, categoryId]);
+    const q = historySearchQuery.trim().toLowerCase();
+    return allCompletedMatches
+      .filter((m) => {
+        // Category filter
+        if (historyCategoryFilter !== "all") {
+          const cat = tournament.categories.find((c) => c.id === historyCategoryFilter);
+          if (cat && !isMatchInCategory(m, cat)) return false;
+        }
+        // Bracket filter
+        if (historyBracketFilter !== "all") {
+          const bracket = getMatchBracketLabel(m);
+          if (bracket !== historyBracketFilter) return false;
+        }
+        // Search query
+        if (q) {
+          const catLabel = tournament.categories.find((c) => isMatchInCategory(m, c))?.label || "";
+          const searchHaystack = [
+            m.teamAName,
+            m.teamBName,
+            ...(m.teamAPlayers ?? []),
+            ...(m.teamBPlayers ?? []),
+            m.court || "",
+            m.officiatedBy || "",
+            m.stage || "",
+            m.bracketLetter ? `Bracket ${m.bracketLetter}` : "",
+            catLabel,
+          ]
+            .join(" ")
+            .toLowerCase();
+          if (!searchHaystack.includes(q)) return false;
+        }
+        return true;
+      })
+      .sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0));
+  }, [allCompletedMatches, historyCategoryFilter, historyBracketFilter, historySearchQuery, tournament.categories]);
+
+  // Match history grouped by bracket stage
+  const groupedHistory = useMemo(() => {
+    const map = new Map<string, LiveMatch[]>();
+    for (const m of filteredHistory) {
+      const key = getMatchBracketLabel(m);
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(m);
+    }
+
+    return Array.from(map.entries()).sort(([a], [b]) => {
+      const aIsPool = /bracket|pool/i.test(a);
+      const bIsPool = /bracket|pool/i.test(b);
+      if (aIsPool && !bIsPool) return -1;
+      if (!aIsPool && bIsPool) return 1;
+      return a.localeCompare(b);
+    });
+  }, [filteredHistory]);
 
   // Unassigned matches grouped by bracket stage (search-aware, bracket-aware, team-aware, Pool Play first)
   const groupedUnassigned = useMemo(() => {
@@ -1791,7 +1957,7 @@ export function CourtDispatch({
     if (targetCategory && targetCategory.teams && targetCategory.teams.length >= 2) {
       const existingQueueCount = queue.filter(
         (q) =>
-          (q.categoryId === catId || (!q.categoryId && q.matchId && q.matchId.includes(catId))) &&
+          isQueueItemInCategory(q, targetCategory) &&
           (!q.tournamentSlug || q.tournamentSlug === tournamentSlug || (q.matchId && q.matchId.includes(tournamentSlug))),
       ).length;
 
@@ -2896,7 +3062,7 @@ export function CourtDispatch({
                       })`,
                   },
                   { key: "unassigned", label: `Unassigned (${unassignedMatches.length})` },
-                  { key: "history", label: `Log (${filteredHistory.length})` },
+                  { key: "history", label: `Match History (${allCompletedMatches.length})` },
                   { key: "custom", label: "+ Custom" },
                 ].map((t) => (
                   <button
@@ -2912,8 +3078,8 @@ export function CourtDispatch({
                 ))}
               </div>
 
-              {/* Division Scope Toggle (Active Queue & Log) */}
-              {(activeQueueTab === "queue" || activeQueueTab === "history") && (
+              {/* Division Scope Toggle (Active Queue only) */}
+              {activeQueueTab === "queue" && (
                 <div className="flex items-center border border-border overflow-hidden">
                   <button
                     onClick={() => setQueueDivisionFilter("current")}
@@ -3609,45 +3775,361 @@ export function CourtDispatch({
 
         {/* ── TAB 3: COURT MATCH HISTORY / COMPLETED ── */}
         {activeQueueTab === "history" && (
-          <div className="space-y-3">
+          <div className="space-y-5 pt-1">
+            {/* History Header & Summary Bar */}
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 bg-charcoal/50 p-3.5 border border-border">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs uppercase tracking-[0.2em] font-bold text-pickle">
+                    Official Record
+                  </span>
+                  <span className="px-2 py-0.5 text-[0.65rem] font-bold uppercase tracking-wider bg-card text-sand border border-border">
+                    {filteredHistory.length} of {allCompletedMatches.length} Matches Shown
+                  </span>
+                </div>
+                <h4 className="font-display text-lg sm:text-xl text-foreground mt-0.5">
+                  Tournament Match History
+                </h4>
+              </div>
+
+              {(historyCategoryFilter !== "all" || historyBracketFilter !== "all" || historySearchQuery) && (
+                <button
+                  onClick={() => {
+                    setHistoryCategoryFilter("all");
+                    setHistoryBracketFilter("all");
+                    setHistorySearchQuery("");
+                  }}
+                  className="px-3 py-1.5 text-xs font-bold uppercase tracking-wider bg-card text-sand hover:text-pickle border border-border hover:border-pickle transition-colors cursor-pointer flex items-center gap-1.5 self-start sm:self-auto"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Reset Filters</span>
+                </button>
+              )}
+            </div>
+
+            {/* Filter Controls Row: Category Pills & Bracket Pills */}
+            <div className="space-y-3.5 surface-card p-4 border border-border">
+              {/* Category Filter Pills */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between text-xs text-muted-foreground">
+                  <span className="uppercase tracking-wider font-bold text-[0.65rem] text-sand/80">
+                    Filter by Category
+                  </span>
+                  {historyCategoryFilter !== "all" && (
+                    <button
+                      onClick={() => {
+                        setHistoryCategoryFilter("all");
+                        setHistoryBracketFilter("all");
+                      }}
+                      className="text-[0.65rem] text-pickle hover:underline uppercase tracking-wider font-semibold cursor-pointer"
+                    >
+                      Show All Categories
+                    </button>
+                  )}
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    onClick={() => {
+                      setHistoryCategoryFilter("all");
+                      setHistoryBracketFilter("all");
+                    }}
+                    className={`px-3 py-1.5 text-xs font-bold uppercase tracking-wider border transition-colors cursor-pointer flex items-center gap-1.5 ${
+                      historyCategoryFilter === "all"
+                        ? "bg-pickle text-sand border-pickle shadow-sm"
+                        : "bg-charcoal text-sand/80 border-border hover:border-sand/60"
+                    }`}
+                  >
+                    <span>All Categories</span>
+                    <span className="text-[0.65rem] opacity-75">({allCompletedMatches.length})</span>
+                  </button>
+
+                  {availableHistoryCategories.map((cat) => (
+                    <button
+                      key={cat.id}
+                      onClick={() => {
+                        setHistoryCategoryFilter(cat.id);
+                        setHistoryBracketFilter("all");
+                      }}
+                      className={`px-3 py-1.5 text-xs font-bold uppercase tracking-wider border transition-colors cursor-pointer flex items-center gap-1.5 ${
+                        historyCategoryFilter === cat.id
+                          ? "bg-pickle text-sand border-pickle shadow-sm"
+                          : "bg-charcoal text-sand/80 border-border hover:border-sand/60"
+                      }`}
+                    >
+                      <span>{cat.label}</span>
+                      <span className="text-[0.65rem] opacity-75">({cat.count})</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Bracket Filter Pills */}
+              <div className="space-y-1.5 pt-2 border-t border-border/50">
+                <div className="flex items-center justify-between text-xs text-muted-foreground">
+                  <span className="uppercase tracking-wider font-bold text-[0.65rem] text-sand/80">
+                    Filter by Bracket / Stage
+                  </span>
+                  {historyBracketFilter !== "all" && (
+                    <button
+                      onClick={() => setHistoryBracketFilter("all")}
+                      className="text-[0.65rem] text-pickle hover:underline uppercase tracking-wider font-semibold cursor-pointer"
+                    >
+                      Show All Brackets
+                    </button>
+                  )}
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    onClick={() => setHistoryBracketFilter("all")}
+                    className={`px-3 py-1.5 text-xs font-bold uppercase tracking-wider border transition-colors cursor-pointer flex items-center gap-1.5 ${
+                      historyBracketFilter === "all"
+                        ? "bg-pickle text-sand border-pickle shadow-sm"
+                        : "bg-charcoal text-sand/80 border-border hover:border-sand/60"
+                    }`}
+                  >
+                    <span>All Brackets</span>
+                    <span className="text-[0.65rem] opacity-75">
+                      (
+                      {
+                        allCompletedMatches.filter((m) => {
+                          if (historyCategoryFilter === "all") return true;
+                          const cat = tournament.categories.find((c) => c.id === historyCategoryFilter);
+                          return cat ? isMatchInCategory(m, cat) : true;
+                        }).length
+                      }
+                      )
+                    </span>
+                  </button>
+
+                  {availableHistoryBrackets.map(({ bracket, count }) => (
+                    <button
+                      key={bracket}
+                      onClick={() => setHistoryBracketFilter(bracket)}
+                      className={`px-3 py-1.5 text-xs font-bold uppercase tracking-wider border transition-colors cursor-pointer flex items-center gap-1.5 ${
+                        historyBracketFilter === bracket
+                          ? "bg-pickle text-sand border-pickle shadow-sm"
+                          : "bg-charcoal text-sand/80 border-border hover:border-sand/60"
+                      }`}
+                    >
+                      <span>{bracket}</span>
+                      <span className="text-[0.65rem] opacity-75">({count})</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Search Bar Input */}
+              <div className="pt-2 border-t border-border/50">
+                <div className="relative">
+                  <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                  <input
+                    type="text"
+                    value={historySearchQuery}
+                    onChange={(e) => setHistorySearchQuery(e.target.value)}
+                    placeholder="Search by team name, player names, court (e.g. Court 1), or official..."
+                    className="w-full bg-charcoal text-sand text-xs placeholder:text-muted-foreground border border-border pl-9 pr-9 py-2 focus:border-pickle focus:outline-none"
+                  />
+                  {historySearchQuery && (
+                    <button
+                      onClick={() => setHistorySearchQuery("")}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-sand cursor-pointer"
+                      title="Clear search"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Match Cards or Empty State */}
             {filteredHistory.length === 0 ? (
-              <div className="py-12 text-center text-xs text-muted-foreground">
-                {searchQuery
-                  ? `No completed matches found for "${searchQuery}".`
-                  : "No completed matches yet."}
+              <div className="py-14 px-4 text-center surface-card border border-border space-y-3">
+                <History className="w-8 h-8 mx-auto text-muted-foreground/60" />
+                <h4 className="font-display text-lg text-foreground">
+                  No Completed Matches Found
+                </h4>
+                <p className="text-xs text-muted-foreground max-w-sm mx-auto">
+                  {historySearchQuery || historyCategoryFilter !== "all" || historyBracketFilter !== "all"
+                    ? "No completed matches match the selected category, bracket, or search criteria."
+                    : "No matches have finished with official scores logged in this tournament yet."}
+                </p>
+                {(historySearchQuery || historyCategoryFilter !== "all" || historyBracketFilter !== "all") && (
+                  <button
+                    onClick={() => {
+                      setHistoryCategoryFilter("all");
+                      setHistoryBracketFilter("all");
+                      setHistorySearchQuery("");
+                    }}
+                    className="px-4 py-2 text-xs font-bold uppercase tracking-wider bg-pickle text-sand hover:bg-pickle/90 transition-colors cursor-pointer"
+                  >
+                    Reset Filters &amp; Show All
+                  </button>
+                )}
               </div>
             ) : (
-              <div className="divide-y divide-border">
-                {filteredHistory.map((m) => (
-                  <div
-                    key={m.id}
-                    className="py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2"
-                  >
-                    <div className="flex items-center gap-3">
-                      <span className="px-2 py-0.5 text-[0.65rem] font-bold uppercase tracking-wider bg-charcoal text-sand border border-border">
-                        {m.court}
-                      </span>
-                      <div>
-                        <span className="font-semibold text-sm text-foreground">
-                          {m.teamAName} vs {m.teamBName}
+              <div className="space-y-6">
+                {groupedHistory.map(([bracketStage, stageMatches]) => (
+                  <div key={bracketStage} className="space-y-3">
+                    {/* Bracket Stage Header */}
+                    <div className="flex items-center justify-between border-b border-border/80 pb-2">
+                      <div className="flex items-center gap-2">
+                        <span className="font-display text-base sm:text-lg text-sand tracking-wide">
+                          {bracketStage}
                         </span>
-                        {m.winnerTeam && (
-                          <span className="block text-[0.65rem] text-pickle font-medium">
-                            Winner: {m.winnerTeam}
-                          </span>
-                        )}
+                        <span className="px-2 py-0.5 text-[0.65rem] font-bold uppercase tracking-wider bg-charcoal text-sand border border-border">
+                          {stageMatches.length} {stageMatches.length === 1 ? "Match" : "Matches"}
+                        </span>
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-4 text-right">
-                      <div className="font-display text-xl text-sand">
-                        {m.score.teamAScore} - {m.score.teamBScore}
-                      </div>
-                      {m.officiatedBy && (
-                        <span className="text-[0.65rem] text-muted-foreground uppercase tracking-wider">
-                          Official: {m.officiatedBy}
-                        </span>
-                      )}
+                    {/* Stage Matches Grid */}
+                    <div className="grid grid-cols-1 xl:grid-cols-2 gap-3.5">
+                      {stageMatches.map((m) => {
+                        const cat = tournament.categories.find((c) => isMatchInCategory(m, c));
+                        const isTeamAWinner =
+                          m.winnerTeam === m.teamAName || m.score.teamAScore > m.score.teamBScore;
+                        const isTeamBWinner =
+                          m.winnerTeam === m.teamBName || m.score.teamBScore > m.score.teamAScore;
+                        const durationMin =
+                          m.startedAt && m.endedAt && m.endedAt > m.startedAt
+                            ? Math.max(1, Math.round((m.endedAt - m.startedAt) / 60000))
+                            : null;
+
+                        return (
+                          <div
+                            key={m.id}
+                            className="surface-card p-3.5 sm:p-4 border border-border bg-card hover:border-border/80 transition-all space-y-3"
+                          >
+                            {/* Card Top Meta Strip */}
+                            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/50 pb-2.5">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="px-2 py-0.5 text-[0.65rem] font-bold uppercase tracking-wider bg-charcoal text-sand border border-border">
+                                  {m.court || "Court"}
+                                </span>
+                                {cat && (
+                                  <span className="px-2 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wider bg-card text-sand/90 border border-border">
+                                    {cat.label}
+                                  </span>
+                                )}
+                                <span className="px-2 py-0.5 text-[0.65rem] font-medium uppercase tracking-wider bg-pickle/15 text-pickle border border-pickle/30">
+                                  {m.stage || "Official Match"}
+                                </span>
+                              </div>
+
+                              <div className="flex items-center gap-2 text-[0.65rem] text-muted-foreground">
+                                <Clock className="w-3 h-3 text-muted-foreground" />
+                                <span>
+                                  {m.endedAt
+                                    ? new Date(m.endedAt).toLocaleTimeString([], {
+                                        hour: "numeric",
+                                        minute: "2-digit",
+                                      })
+                                    : "Final"}
+                                </span>
+                                {durationMin !== null && (
+                                  <span className="font-mono text-sand/60">({durationMin}m)</span>
+                                )}
+                              </div>
+                            </div>
+
+                            {/* Scoreboard Body */}
+                            <div className="space-y-2">
+                              {/* Team A Row */}
+                              <div
+                                className={`flex items-center justify-between p-2.5 rounded border transition-colors ${
+                                  isTeamAWinner
+                                    ? "bg-pickle/10 border-pickle/40"
+                                    : "bg-charcoal/40 border-border/40"
+                                }`}
+                              >
+                                <div className="min-w-0 mr-3">
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    {isTeamAWinner && (
+                                      <span className="px-1.5 py-0.5 text-[0.6rem] font-bold uppercase tracking-widest bg-pickle text-sand shrink-0">
+                                        Winner
+                                      </span>
+                                    )}
+                                    <span
+                                      className={`font-semibold text-sm truncate ${
+                                        isTeamAWinner ? "text-sand font-bold" : "text-foreground"
+                                      }`}
+                                    >
+                                      {m.teamAName}
+                                    </span>
+                                  </div>
+                                  {m.teamAPlayers && m.teamAPlayers.length > 0 && (
+                                    <span className="block text-[0.65rem] text-muted-foreground truncate mt-0.5">
+                                      {m.teamAPlayers.join(" / ")}
+                                    </span>
+                                  )}
+                                </div>
+                                <span
+                                  className={`font-display text-2xl sm:text-3xl tabular-nums ${
+                                    isTeamAWinner ? "text-pickle font-bold" : "text-sand/80"
+                                  }`}
+                                >
+                                  {m.score.teamAScore}
+                                </span>
+                              </div>
+
+                              {/* Team B Row */}
+                              <div
+                                className={`flex items-center justify-between p-2.5 rounded border transition-colors ${
+                                  isTeamBWinner
+                                    ? "bg-pickle/10 border-pickle/40"
+                                    : "bg-charcoal/40 border-border/40"
+                                }`}
+                              >
+                                <div className="min-w-0 mr-3">
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    {isTeamBWinner && (
+                                      <span className="px-1.5 py-0.5 text-[0.6rem] font-bold uppercase tracking-widest bg-pickle text-sand shrink-0">
+                                        Winner
+                                      </span>
+                                    )}
+                                    <span
+                                      className={`font-semibold text-sm truncate ${
+                                        isTeamBWinner ? "text-sand font-bold" : "text-foreground"
+                                      }`}
+                                    >
+                                      {m.teamBName}
+                                    </span>
+                                  </div>
+                                  {m.teamBPlayers && m.teamBPlayers.length > 0 && (
+                                    <span className="block text-[0.65rem] text-muted-foreground truncate mt-0.5">
+                                      {m.teamBPlayers.join(" / ")}
+                                    </span>
+                                  )}
+                                </div>
+                                <span
+                                  className={`font-display text-2xl sm:text-3xl tabular-nums ${
+                                    isTeamBWinner ? "text-pickle font-bold" : "text-sand/80"
+                                  }`}
+                                >
+                                  {m.score.teamBScore}
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Card Footer */}
+                            <div className="flex items-center justify-between text-[0.65rem] text-muted-foreground pt-2 border-t border-border/40">
+                              <div className="flex items-center gap-1.5">
+                                <span className="uppercase tracking-wider">
+                                  Official:
+                                </span>
+                                <span className="font-semibold text-sand">
+                                  {m.officiatedBy || "Desk Recorded"}
+                                </span>
+                              </div>
+
+                              <span className="font-mono text-[0.6rem] text-muted-foreground/60">
+                                ID: {m.id}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 ))}

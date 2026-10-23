@@ -185,6 +185,19 @@ export async function dbGetTournaments(): Promise<Tournament[] | null> {
         if (Array.isArray(metaObj.dispatchQueue)) {
           _dispatchQueueCache = metaObj.dispatchQueue;
         }
+        if (Array.isArray(metaObj.categorySequence) && typeof window !== "undefined") {
+          try {
+            localStorage.setItem(
+              `dv_category_sequence_${t.slug}`,
+              JSON.stringify(metaObj.categorySequence)
+            );
+          } catch {}
+        }
+        if (typeof metaObj.activeWaveId === "string" && metaObj.activeWaveId && typeof window !== "undefined") {
+          try {
+            localStorage.setItem(`dv_active_wave_${t.slug}`, metaObj.activeWaveId);
+          } catch {}
+        }
       }
 
       const categories: Category[] = (t.categories || []).map((c: any) => {
@@ -1762,6 +1775,47 @@ export async function dbDeleteDispatchQueue(
     return true;
   } catch (err) {
     console.warn("[Supabase] Failed to delete dispatch queue:", err);
+    return false;
+  }
+}
+
+/**
+ * Save category sequence and active wave arrangement to Supabase.
+ */
+export async function dbSaveCategoryArrangement(
+  tournamentSlug: string,
+  sequence?: string[],
+  activeWaveId?: string
+): Promise<boolean> {
+  try {
+    const slug = tournamentSlug || "dink-valley-tournament";
+    const { data: tourney } = await supabase
+      .from("tournaments")
+      .select("id, rules")
+      .eq("slug", slug)
+      .maybeSingle();
+
+    if (!tourney) return false;
+
+    const existing =
+      tourney.rules && typeof tourney.rules === "object" && !Array.isArray(tourney.rules)
+        ? (tourney.rules as any)
+        : { rules: Array.isArray(tourney.rules) ? tourney.rules : [] };
+
+    const updatedMeta = {
+      ...existing,
+      ...(sequence ? { categorySequence: sequence } : {}),
+      ...(activeWaveId ? { activeWaveId } : {}),
+    };
+
+    const { error } = await supabase
+      .from("tournaments")
+      .update({ rules: updatedMeta, updated_at: new Date().toISOString() })
+      .eq("slug", slug);
+
+    return !error;
+  } catch (err) {
+    console.warn("[Supabase] Failed to save category arrangement:", err);
     return false;
   }
 }
