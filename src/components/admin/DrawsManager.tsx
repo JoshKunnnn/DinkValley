@@ -75,6 +75,10 @@ const MAIN_DRAW_KEY = (slug: string, catId: string) => `dv_main_draw_${slug}_${c
 
 export function saveMainDrawMatches(slug: string, catId: string, matches: KnockoutMatch[]) {
   try {
+    const cached = getMainDrawMatches(slug, catId);
+    if (cached && JSON.stringify(cached) === JSON.stringify(matches)) {
+      return;
+    }
     dbSaveMainDraw(slug, catId, matches).catch((err) => {
       console.warn("[Supabase] Failed to save main draw:", err);
     });
@@ -114,9 +118,42 @@ export function getMainDrawMatches(slug: string, catId: string): KnockoutMatch[]
 
   try {
     const raw = typeof localStorage !== "undefined" ? localStorage.getItem(MAIN_DRAW_KEY(slug, catId)) : null;
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as KnockoutMatch[];
-    if (!Array.isArray(parsed)) return null;
+    let parsed: KnockoutMatch[] | null = null;
+    if (raw) {
+      try {
+        const val = JSON.parse(raw);
+        if (Array.isArray(val) && val.length > 0) parsed = val;
+      } catch {
+        // ignore
+      }
+    }
+
+    // Fallback: check other keys in localStorage matching slug and catId alias
+    if (!parsed && typeof localStorage !== "undefined") {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith(`dv_main_draw_${slug}_`)) {
+          const suffix = k.replace(`dv_main_draw_${slug}_`, "").toLowerCase();
+          const target = (catId || "").toLowerCase();
+          if (suffix === target || target.includes(suffix) || suffix.includes(target)) {
+            const rawVal = localStorage.getItem(k);
+            if (rawVal) {
+              try {
+                const val = JSON.parse(rawVal);
+                if (Array.isArray(val) && val.length > 0) {
+                  parsed = val;
+                  break;
+                }
+              } catch {
+                // ignore
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if (!parsed || !Array.isArray(parsed)) return null;
 
     let modified = false;
     const sanitized = parsed.map((m) => {
@@ -141,9 +178,215 @@ export function getMainDrawMatches(slug: string, catId: string): KnockoutMatch[]
   }
 }
 
+function isSamePlayoffTeam(t1?: Team, t2?: Team): boolean {
+  if (!t1 && !t2) return true;
+  if (!t1 || !t2) return false;
+  if (t1.id && t2.id && t1.id === t2.id) return true;
+  return t1.name.trim().toLowerCase() === t2.name.trim().toLowerCase();
+}
+
+/**
+ * Executes automatic tournament bracket advancement rules across rounds:
+ * Round of 16 -> Quarterfinals -> Semifinals -> Finals & Bronze
+ */
+export function advancePlayoffBracket(matches: KnockoutMatch[]): { updated: KnockoutMatch[]; hasChanges: boolean } {
+  let hasChanges = false;
+  let updated = [...matches];
+
+  // 1. Auto-advance R16 winners to Quarterfinals
+  const r16Matches = updated.filter((m) => m.round === "Round of 16");
+  if (r16Matches.length > 0) {
+    const getWinner = (id: string) => updated.find((m) => m.id === id)?.winner;
+
+    updated = updated.map((m) => {
+      let teamA = m.teamA;
+      let teamB = m.teamB;
+      if (m.id === "md-qf-1") {
+        teamA = getWinner("md-r16-1") ?? m.teamA;
+        teamB = getWinner("md-r16-2") ?? m.teamB;
+      } else if (m.id === "md-qf-2") {
+        teamA = getWinner("md-r16-3") ?? m.teamA;
+        teamB = getWinner("md-r16-4") ?? m.teamB;
+      } else if (m.id === "md-qf-3") {
+        teamA = getWinner("md-r16-5") ?? m.teamA;
+        teamB = getWinner("md-r16-6") ?? m.teamB;
+      } else if (m.id === "md-qf-4") {
+        teamA = getWinner("md-r16-7") ?? m.teamA;
+        teamB = getWinner("md-r16-8") ?? m.teamB;
+      }
+      if (!isSamePlayoffTeam(teamA, m.teamA) || !isSamePlayoffTeam(teamB, m.teamB)) {
+        hasChanges = true;
+        return { ...m, teamA, teamB };
+      }
+      return m;
+    });
+  }
+
+  // 2. Auto-advance QF winners to Semifinals
+  const qfMatches = updated.filter((m) => m.round === "Quarterfinal");
+  if (qfMatches.length > 0) {
+    const qf1 = updated.find((m) => m.id === "md-qf-1");
+    const qf2 = updated.find((m) => m.id === "md-qf-2");
+    const qf3 = updated.find((m) => m.id === "md-qf-3");
+    const qf4 = updated.find((m) => m.id === "md-qf-4");
+
+    updated = updated.map((m) => {
+      let teamA = m.teamA;
+      let teamB = m.teamB;
+      if (m.id === "md-sf-1") {
+        teamA = qf1?.winner ?? m.teamA;
+        teamB = qf2?.winner ?? m.teamB;
+      } else if (m.id === "md-sf-2") {
+        teamA = qf3?.winner ?? m.teamA;
+        teamB = qf4?.winner ?? m.teamB;
+      }
+      if (!isSamePlayoffTeam(teamA, m.teamA) || !isSamePlayoffTeam(teamB, m.teamB)) {
+        hasChanges = true;
+        return { ...m, teamA, teamB };
+      }
+      return m;
+    });
+  }
+
+  // 3. Auto-advance SF winners to Final & losers to Bronze
+  const sf1 = updated.find((m) => m.id === "md-sf-1");
+  const sf2 = updated.find((m) => m.id === "md-sf-2");
+
+  updated = updated.map((m) => {
+    if (m.id === "md-final") {
+      const teamA = sf1?.winner ?? m.teamA;
+      const teamB = sf2?.winner ?? m.teamB;
+      if (!isSamePlayoffTeam(teamA, m.teamA) || !isSamePlayoffTeam(teamB, m.teamB)) {
+        hasChanges = true;
+        return { ...m, teamA, teamB };
+      }
+    }
+    if (m.id === "md-bronze") {
+      let teamA = m.teamA;
+      let teamB = m.teamB;
+      if (sf1?.winner && sf1.teamA && sf1.teamB) {
+        const isAWinner = sf1.winner.id === sf1.teamA.id || sf1.winner.name.trim().toLowerCase() === sf1.teamA.name.trim().toLowerCase();
+        teamA = isAWinner ? sf1.teamB : sf1.teamA;
+      }
+      if (sf2?.winner && sf2.teamA && sf2.teamB) {
+        const isAWinner = sf2.winner.id === sf2.teamA.id || sf2.winner.name.trim().toLowerCase() === sf2.teamA.name.trim().toLowerCase();
+        teamB = isAWinner ? sf2.teamB : sf2.teamA;
+      }
+      if (!isSamePlayoffTeam(teamA, m.teamA) || !isSamePlayoffTeam(teamB, m.teamB)) {
+        hasChanges = true;
+        return { ...m, teamA, teamB };
+      }
+    }
+    return m;
+  });
+
+  return { updated, hasChanges };
+}
+
+/**
+ * Automatically synchronizes playoff knockout matches with completed/live matches
+ * from the live court match store and advances winners to subsequent rounds.
+ */
+export function syncMainDrawWithLiveMatches(
+  tournamentSlug: string,
+  categoryId: string,
+  liveMatches?: LiveMatch[],
+  persist: boolean = true,
+): KnockoutMatch[] | null {
+  const currentDraw = getMainDrawMatches(tournamentSlug, categoryId);
+  if (!currentDraw || currentDraw.length === 0) return null;
+
+  const matches = liveMatches ?? getMatches();
+  let modified = false;
+
+  const updatedMatches = currentDraw.map((km) => {
+    if (!km.teamA || !km.teamB) return km;
+
+    const nameA = km.teamA.name.trim().toLowerCase();
+    const nameB = km.teamB.name.trim().toLowerCase();
+
+    // Find corresponding match in liveMatches by ID or team names
+    const live = matches.find((m) => {
+      // 1. Direct ID match
+      const stage = `${km.round} - ${km.label}`;
+      const canonical = createPairMatchId(tournamentSlug, categoryId, stage, km.teamA!.name, km.teamB!.name);
+      const legacy = `live-ko-${tournamentSlug}-${categoryId}-${km.id}`;
+      if (m.id === canonical || m.id === legacy || m.id === km.id) return true;
+
+      // 2. Matching teams and stage
+      const ma = m.teamAName?.trim().toLowerCase();
+      const mb = m.teamBName?.trim().toLowerCase();
+      const teamsMatch = (ma === nameA && mb === nameB) || (ma === nameB && mb === nameA);
+      if (!teamsMatch) return false;
+
+      // Ensure stage is knockout or matches km.round / km.label
+      const mStage = (m.stage || "").toLowerCase();
+      const kmRound = km.round.toLowerCase();
+      const kmLabel = km.label.toLowerCase();
+      const isKnockoutStage =
+        mStage.includes(kmRound) ||
+        mStage.includes(kmLabel) ||
+        mStage.includes("quarter") ||
+        mStage.includes("semi") ||
+        mStage.includes("final") ||
+        mStage.includes("playoff") ||
+        mStage.includes("bronze");
+
+      return isKnockoutStage;
+    });
+
+    if (!live) return km;
+
+    let nextKm = { ...km };
+
+    // Sync score if available
+    const scoreA = live.teamAName?.trim().toLowerCase() === nameA ? live.score?.teamAScore : live.score?.teamBScore;
+    const scoreB = live.teamAName?.trim().toLowerCase() === nameA ? live.score?.teamBScore : live.score?.teamAScore;
+
+    if (scoreA !== undefined && scoreA !== nextKm.scoreA) {
+      nextKm.scoreA = scoreA;
+      modified = true;
+    }
+    if (scoreB !== undefined && scoreB !== nextKm.scoreB) {
+      nextKm.scoreB = scoreB;
+      modified = true;
+    }
+
+    // Determine winner
+    if (live.status === "final" || live.winnerTeam || (scoreA !== undefined && scoreB !== undefined && (scoreA >= 11 || scoreB >= 11) && Math.abs(scoreA - scoreB) >= 2)) {
+      let winningTeam: Team | undefined;
+      const winName = live.winnerTeam?.trim().toLowerCase();
+      if (winName) {
+        winningTeam = winName === nameA ? km.teamA : winName === nameB ? km.teamB : undefined;
+      } else if (scoreA !== undefined && scoreB !== undefined && scoreA !== scoreB) {
+        winningTeam = scoreA > scoreB ? km.teamA : km.teamB;
+      }
+
+      if (winningTeam && (!nextKm.winner || !isSamePlayoffTeam(nextKm.winner, winningTeam))) {
+        nextKm.winner = winningTeam;
+        modified = true;
+      }
+    }
+
+    return nextKm;
+  });
+
+  const { updated: advanced, hasChanges: advancedChanges } = advancePlayoffBracket(updatedMatches);
+
+  if (modified || advancedChanges) {
+    if (persist) {
+      saveMainDrawMatches(tournamentSlug, categoryId, advanced);
+      syncKnockoutToLiveMatches(tournamentSlug, categoryId, advanced);
+    }
+    return advanced;
+  }
+
+  return currentDraw;
+}
+
 /**
  * Syncs generated playoff knockout matches to the live match store
- * so umpires can officiate them in the Umpire Console.
+ * so umpires can officiate them in the Umpire Console and admins can dispatch them.
  */
 export function syncKnockoutToLiveMatches(
   tournamentSlug: string,
@@ -162,15 +405,24 @@ export function syncKnockoutToLiveMatches(
     const canonicalId = createPairMatchId(tournamentSlug, categoryId, stage, teamA.name, teamB.name);
     const cleanCourt = sanitizeCourtName(km.court);
 
-    // Look for existing match by canonicalId, legacyId, or team matchup
-    const existing = current.find((m) =>
-      m.id === canonicalId ||
-      m.id === legacyId ||
-      (m.teamAName?.trim().toLowerCase() === teamA.name.trim().toLowerCase() &&
-        m.teamBName?.trim().toLowerCase() === teamB.name.trim().toLowerCase()) ||
-      (m.teamAName?.trim().toLowerCase() === teamB.name.trim().toLowerCase() &&
-        m.teamBName?.trim().toLowerCase() === teamA.name.trim().toLowerCase())
-    );
+    // Look for existing match strictly within knockout stages
+    const existing = current.find((m) => {
+      if (m.id === canonicalId || m.id === legacyId || m.id === km.id) return true;
+      const ma = m.teamAName?.trim().toLowerCase();
+      const mb = m.teamBName?.trim().toLowerCase();
+      const ta = teamA.name.trim().toLowerCase();
+      const tb = teamB.name.trim().toLowerCase();
+      const teamsMatch = (ma === ta && mb === tb) || (ma === tb && mb === ta);
+      if (!teamsMatch) return false;
+      const mStage = (m.stage || "").toLowerCase();
+      const isKnockoutStage =
+        mStage.includes("quarter") ||
+        mStage.includes("semi") ||
+        mStage.includes("final") ||
+        mStage.includes("playoff") ||
+        mStage.includes("bronze");
+      return isKnockoutStage;
+    });
 
     const effectiveId = existing?.id || canonicalId;
 
@@ -182,6 +434,8 @@ export function syncKnockoutToLiveMatches(
         tournamentSlug: tournamentSlug || existing.tournamentSlug,
         categoryId: categoryId || existing.categoryId,
         stage: existing.stage || stage,
+        winnerTeam: km.winner?.name || existing.winnerTeam,
+        status: km.winner ? "final" : existing.status,
       });
     } else {
       newMatches.push({
@@ -212,7 +466,7 @@ export function syncKnockoutToLiveMatches(
 
   const updatedIds = new Set(newMatches.map((m) => m.id));
   const retained = current.filter((m) => !updatedIds.has(m.id));
-  saveMatches([...newMatches, ...retained], false);
+  saveMatches([...newMatches, ...retained], true, newMatches);
 }
 
 /* ─────────────────────────────────────────────
@@ -820,6 +1074,7 @@ export function DrawsManager({
 
     setMainDrawMatches(matches);
     saveMainDrawMatches(tournamentSlug, categoryId, matches);
+    syncKnockoutToLiveMatches(tournamentSlug, categoryId, matches);
     setMainDrawGenerated(true);
     setStageView("main_draw");
   };
@@ -857,72 +1112,10 @@ export function DrawsManager({
         return nextMatch;
       });
 
-      // 1. Auto-advance R16 winners to Quarterfinals
-      const r16Matches = updated.filter((m) => m.round === "Round of 16");
-      if (r16Matches.length > 0) {
-        const getWinner = (id: string) => updated.find((m) => m.id === id)?.winner;
-
-        updated = updated.map((m) => {
-          if (m.id === "md-qf-1") {
-            return { ...m, teamA: getWinner("md-r16-1") ?? m.teamA, teamB: getWinner("md-r16-2") ?? m.teamB };
-          }
-          if (m.id === "md-qf-2") {
-            return { ...m, teamA: getWinner("md-r16-3") ?? m.teamA, teamB: getWinner("md-r16-4") ?? m.teamB };
-          }
-          if (m.id === "md-qf-3") {
-            return { ...m, teamA: getWinner("md-r16-5") ?? m.teamA, teamB: getWinner("md-r16-6") ?? m.teamB };
-          }
-          if (m.id === "md-qf-4") {
-            return { ...m, teamA: getWinner("md-r16-7") ?? m.teamA, teamB: getWinner("md-r16-8") ?? m.teamB };
-          }
-          return m;
-        });
-      }
-
-      // 2. Auto-advance QF winners to Semifinals
-      const qfMatches = updated.filter((m) => m.round === "Quarterfinal");
-      if (qfMatches.length > 0) {
-        const qf1 = updated.find((m) => m.id === "md-qf-1");
-        const qf2 = updated.find((m) => m.id === "md-qf-2");
-        const qf3 = updated.find((m) => m.id === "md-qf-3");
-        const qf4 = updated.find((m) => m.id === "md-qf-4");
-
-        updated = updated.map((m) => {
-          if (m.id === "md-sf-1") {
-            return { ...m, teamA: qf1?.winner ?? m.teamA, teamB: qf2?.winner ?? m.teamB };
-          }
-          if (m.id === "md-sf-2") {
-            return { ...m, teamA: qf3?.winner ?? m.teamA, teamB: qf4?.winner ?? m.teamB };
-          }
-          return m;
-        });
-      }
-
-      // 3. Auto-advance SF winners to Final & losers to Bronze
-      const sf1 = updated.find((m) => m.id === "md-sf-1");
-      const sf2 = updated.find((m) => m.id === "md-sf-2");
-
-      updated = updated.map((m) => {
-        if (m.id === "md-final") {
-          return { ...m, teamA: sf1?.winner ?? m.teamA, teamB: sf2?.winner ?? m.teamB };
-        }
-        if (m.id === "md-bronze") {
-          const next: KnockoutMatch = { ...m };
-          if (sf1?.scoreA !== undefined && sf1?.scoreB !== undefined && sf1.winner) {
-            const loser = sf1.winner.id === sf1.teamA?.id ? sf1.teamB : sf1.teamA;
-            if (loser) next.teamA = loser;
-          }
-          if (sf2?.scoreA !== undefined && sf2?.scoreB !== undefined && sf2.winner) {
-            const loser = sf2.winner.id === sf2.teamA?.id ? sf2.teamB : sf2.teamA;
-            if (loser) next.teamB = loser;
-          }
-          return next;
-        }
-        return m;
-      });
-
-      saveMainDrawMatches(tournamentSlug, categoryId, updated);
-      return updated;
+      const { updated: advanced } = advancePlayoffBracket(updated);
+      saveMainDrawMatches(tournamentSlug, categoryId, advanced);
+      syncKnockoutToLiveMatches(tournamentSlug, categoryId, advanced);
+      return advanced;
     });
   };
 

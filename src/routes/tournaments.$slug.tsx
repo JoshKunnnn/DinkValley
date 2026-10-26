@@ -12,6 +12,7 @@ import {
   useMatchStore,
   findLiveMatchForTeams,
   generateBalancedRoundRobinPairs,
+  createCategoryScopedMatchId,
   type LiveMatch,
 } from "@/lib/match-store";
 import {
@@ -24,7 +25,7 @@ import {
   hydrateCourtStationsFromCloud,
 } from "@/lib/court-dispatch";
 import { getDrawnGroups, type BracketGroup } from "@/components/admin/BracketDraw";
-import { getMainDrawMatches, type KnockoutMatch } from "@/components/admin/DrawsManager";
+import { getMainDrawMatches, syncMainDrawWithLiveMatches, type KnockoutMatch } from "@/components/admin/DrawsManager";
 import { dbGetTournaments, dbGetDrawnGroups, getCachedDrawnGroups, dbSubscribeToLive } from "@/lib/supabase-service";
 import { MiniCourtVisualizer } from "@/components/public/MiniCourtVisualizer";
 import { FindMatchesModal } from "@/components/public/FindMatchesModal";
@@ -318,8 +319,8 @@ function TournamentPage() {
   // Check if Point Differential seeded Main Draw exists from DrawsManager
   const mainDrawMatches = useMemo(() => {
     if (!category) return [];
-    return getMainDrawMatches(t.slug, category.id);
-  }, [t.slug, category, drawRevision]);
+    return syncMainDrawWithLiveMatches(t.slug, category.id, matches, false) || getMainDrawMatches(t.slug, category.id);
+  }, [t.slug, category, matches, drawRevision]);
 
 
   if (!category) {
@@ -665,6 +666,7 @@ function TournamentPage() {
                 <LiveCourtsTab
                   matches={matches}
                   category={category}
+                  stations={stations}
                 />
               )}
               {tab === "bracket" && (
@@ -916,13 +918,14 @@ function LiveActionTicker({
 function LiveCourtsTab({
   matches,
   category,
+  stations,
 }: {
   matches: LiveMatch[];
   category: Category;
+  stations: Record<FacilityCourt, CourtStation>;
 }) {
   const [filter, setFilter] = useState<"all" | "live" | "final" | "scheduled">("all");
 
-  const stations = useMemo(() => getCourtStations(), [matches]);
   const queue = useMemo(() => getDispatchQueue(), [matches]);
   const queuedUpcoming = useMemo(() => queue.filter((q) => q.status === "queued" || q.status === "on_deck"), [queue]);
 
@@ -1897,11 +1900,13 @@ function BracketCard({
   matches,
   defaultOpen = false,
   onShareBracket,
+  categoryId,
 }: {
   grp: BracketGroup;
   matches: LiveMatch[];
   defaultOpen?: boolean;
   onShareBracket?: ((letter: string) => void) | undefined;
+  categoryId?: string;
 }) {
   const [open, setOpen] = useState(defaultOpen);
   const teams = grp.slots.map((s) => s.team).filter((t): t is Team => t !== null);
@@ -1909,12 +1914,17 @@ function BracketCard({
   // Generate balanced round-robin match pairings (Berger rotation)
   const groupMatches: { id: string; teamA: Team; teamB: Team }[] = useMemo(() => {
     const pairs = generateBalancedRoundRobinPairs(teams);
-    return pairs.map(([teamA, teamB], pIdx) => ({
-      id: `drawn-${grp.letter}-${teamA.id}-${teamB.id}-${pIdx}`,
-      teamA,
-      teamB,
-    }));
-  }, [teams, grp.letter]);
+    return pairs.map(([teamA, teamB], pIdx) => {
+      const matchId = categoryId
+        ? createCategoryScopedMatchId(categoryId, grp.letter, teamA.id, teamB.id)
+        : `drawn-${grp.letter}-${teamA.id}-${teamB.id}-${pIdx}`;
+      return {
+        id: matchId,
+        teamA,
+        teamB,
+      };
+    });
+  }, [teams, grp.letter, categoryId]);
 
   // Compute live standings for this group from match-store
   const standings = useMemo(() => {
@@ -1941,7 +1951,7 @@ function BracketCard({
     );
 
     groupMatches.forEach((gm) => {
-      const live = findLiveMatchForTeams(matches, gm.teamA.name, gm.teamB.name);
+      const live = matches.find((m) => m.id === gm.id) || findLiveMatchForTeams(matches, gm.teamA.name, gm.teamB.name);
       if (!live || live.status !== "final") return;
 
       const sA = live.teamAName === gm.teamA.name ? live.score.teamAScore : live.score.teamBScore;
@@ -1966,12 +1976,12 @@ function BracketCard({
   }, [matches, groupMatches, teams]);
 
   const completedCount = groupMatches.filter((gm) => {
-    const live = findLiveMatchForTeams(matches, gm.teamA.name, gm.teamB.name);
+    const live = matches.find((m) => m.id === gm.id) || findLiveMatchForTeams(matches, gm.teamA.name, gm.teamB.name);
     return live?.status === "final";
   }).length;
 
   const liveCount = groupMatches.filter((gm) => {
-    const live = findLiveMatchForTeams(matches, gm.teamA.name, gm.teamB.name);
+    const live = matches.find((m) => m.id === gm.id) || findLiveMatchForTeams(matches, gm.teamA.name, gm.teamB.name);
     return live?.status === "live";
   }).length;
 
@@ -2164,7 +2174,7 @@ function BracketCard({
             </div>
             <div className="space-y-2">
               {groupMatches.map((gm, matchIdx) => {
-                const live = findLiveMatchForTeams(matches, gm.teamA.name, gm.teamB.name);
+                const live = matches.find((m) => m.id === gm.id) || findLiveMatchForTeams(matches, gm.teamA.name, gm.teamB.name);
                 const isLive = live?.status === "live";
                 const isFinal = live?.status === "final";
 
@@ -2362,6 +2372,7 @@ function Pools({
               key={grp.letter}
               grp={grp}
               matches={matches}
+              categoryId={category.id}
               defaultOpen={selectedBracket !== "all" || expandedAll || idx === 0}
               onShareBracket={onShareBracket}
             />
@@ -2419,7 +2430,10 @@ function Pools({
                 .map((m) => {
                   const nameA = teamName(category, m.teamA);
                   const nameB = teamName(category, m.teamB);
-                  const live = findLiveMatchForTeams(matches, nameA, nameB);
+                  const scopedMatchId = (m.teamA && m.teamB)
+                    ? createCategoryScopedMatchId(category.id, pool, m.teamA, m.teamB)
+                    : null;
+                  const live = (scopedMatchId ? matches.find((lm) => lm.id === scopedMatchId) : null) || findLiveMatchForTeams(matches, nameA, nameB);
 
                   const isLive = live?.status === "live";
                   const isFinal = live?.status === "final";

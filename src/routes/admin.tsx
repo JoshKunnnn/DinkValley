@@ -418,11 +418,10 @@ function Admin() {
                     setActiveTab(key);
                     setMobileMenuOpen(false);
                   }}
-                  className={`flex items-center justify-between rounded px-4 py-3 text-left text-sm font-semibold uppercase tracking-widest transition-colors cursor-pointer ${
-                    activeTab === key
+                  className={`flex items-center justify-between rounded px-4 py-3 text-left text-sm font-semibold uppercase tracking-widest transition-colors cursor-pointer ${activeTab === key
                       ? "bg-brick text-sand font-bold"
                       : "text-sand/80 hover:bg-charcoal/60 hover:text-sand"
-                  }`}
+                    }`}
                 >
                   <span>{label}</span>
                 </button>
@@ -473,11 +472,10 @@ function Admin() {
             <button
               key={key}
               onClick={() => setActiveTab(key)}
-              className={`flex items-center justify-between rounded px-4 py-3 text-left text-sm font-semibold uppercase tracking-widest transition-colors cursor-pointer ${
-                activeTab === key
+              className={`flex items-center justify-between rounded px-4 py-3 text-left text-sm font-semibold uppercase tracking-widest transition-colors cursor-pointer ${activeTab === key
                   ? "bg-brick text-sand font-bold"
                   : "text-sand/80 hover:bg-charcoal/60 hover:text-sand"
-              }`}
+                }`}
             >
               <span>{label}</span>
             </button>
@@ -533,9 +531,8 @@ function Admin() {
           <div className="flex items-center gap-2">
             <div className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 text-[0.65rem] font-bold uppercase tracking-wider rounded border border-border bg-card">
               <span
-                className={`w-1.5 h-1.5 rounded-full ${
-                  isOnline ? "bg-pickle animate-pulse" : "bg-amber-600"
-                }`}
+                className={`w-1.5 h-1.5 rounded-full ${isOnline ? "bg-pickle animate-pulse" : "bg-amber-600"
+                  }`}
               />
               <span className={isOnline ? "text-pickle" : "text-amber-600"}>
                 {isOnline ? "Database Live" : "Offline"}
@@ -557,21 +554,19 @@ function Admin() {
               <div className="grid grid-cols-2 p-1 bg-card rounded-lg border-2 border-border sm:flex sm:w-auto sm:border-0 sm:bg-transparent sm:p-0 sm:border-b-2 sm:border-border sm:rounded-none sm:gap-1">
                 <button
                   onClick={() => setDrawSubTab("bracket-draw")}
-                  className={`py-2 px-3 sm:px-5 sm:py-2.5 text-xs font-bold uppercase tracking-widest text-center transition-all cursor-pointer rounded sm:rounded-none sm:border-b-2 ${
-                    drawSubTab === "bracket-draw"
+                  className={`py-2 px-3 sm:px-5 sm:py-2.5 text-xs font-bold uppercase tracking-widest text-center transition-all cursor-pointer rounded sm:rounded-none sm:border-b-2 ${drawSubTab === "bracket-draw"
                       ? "bg-brick text-white sm:bg-transparent sm:border-brick sm:text-brick font-bold shadow-sm"
                       : "text-foreground hover:text-pickle sm:border-transparent font-bold"
-                  }`}
+                    }`}
                 >
                   Bracket Draw
                 </button>
                 <button
                   onClick={() => setDrawSubTab("brackets")}
-                  className={`py-2 px-3 sm:px-5 sm:py-2.5 text-xs font-bold uppercase tracking-widest text-center transition-all cursor-pointer rounded sm:rounded-none sm:border-b-2 ${
-                    drawSubTab === "brackets"
+                  className={`py-2 px-3 sm:px-5 sm:py-2.5 text-xs font-bold uppercase tracking-widest text-center transition-all cursor-pointer rounded sm:rounded-none sm:border-b-2 ${drawSubTab === "brackets"
                       ? "bg-brick text-white sm:bg-transparent sm:border-brick sm:text-brick font-bold shadow-sm"
                       : "text-foreground hover:text-pickle sm:border-transparent font-bold"
-                  }`}
+                    }`}
                 >
                   Brackets
                 </button>
@@ -1625,11 +1620,10 @@ function TeamsTab({
             type="button"
             onClick={handleDeleteAllPlayers}
             disabled={category.teams.length === 0}
-            className={`px-3.5 py-2 border font-bold text-xs tracking-wider uppercase rounded transition-all ${
-              category.teams.length > 0
+            className={`px-3.5 py-2 border font-bold text-xs tracking-wider uppercase rounded transition-all ${category.teams.length > 0
                 ? "border-2 border-brick bg-brick/15 text-brick hover:bg-brick hover:text-white cursor-pointer"
                 : "border-2 border-border bg-card text-foreground/40 cursor-not-allowed"
-            }`}
+              }`}
           >
             Delete All Players {category.teams.length > 0 ? `(${category.teams.length})` : "(0)"}
           </button>
@@ -1680,11 +1674,10 @@ function TeamsTab({
             <div
               className="h-full rounded-full bg-pickle transition-all duration-500"
               style={{
-                width: `${
-                  currentScopeTeamsCount > 0
+                width: `${currentScopeTeamsCount > 0
                     ? (currentScopePaidCount / currentScopeTeamsCount) * 100
                     : 0
-                }%`,
+                  }%`,
               }}
             />
           </div>
@@ -1767,17 +1760,16 @@ function TeamsTab({
             <button
               key={f}
               onClick={() => setFilter(f)}
-              className={`py-2 px-2 sm:px-4 text-[0.7rem] sm:text-xs font-bold uppercase tracking-wider text-center transition-all cursor-pointer rounded sm:rounded-none sm:border-b-2 ${
-                filter === f
+              className={`py-2 px-2 sm:px-4 text-[0.7rem] sm:text-xs font-bold uppercase tracking-wider text-center transition-all cursor-pointer rounded sm:rounded-none sm:border-b-2 ${filter === f
                   ? "bg-brick text-white sm:bg-transparent sm:border-brick sm:text-brick font-bold shadow-sm"
                   : "text-foreground/80 hover:text-foreground sm:border-transparent font-bold"
-              }`}
+                }`}
             >
               {f === "all"
                 ? `All (${aggregatedTeams.length})`
                 : f === "paid"
-                ? `Paid (${aggregatedTeams.filter((t) => t.allPaid).length})`
-                : `Unpaid (${aggregatedTeams.filter((t) => !t.allPaid).length})`}
+                  ? `Paid (${aggregatedTeams.filter((t) => t.allPaid).length})`
+                  : `Unpaid (${aggregatedTeams.filter((t) => !t.allPaid).length})`}
             </button>
           ))}
         </div>
@@ -1892,11 +1884,10 @@ function TeamsTab({
                     )}
 
                     <span
-                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono font-bold uppercase tracking-wider rounded border-2 transition-all ${
-                        isExpanded
+                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono font-bold uppercase tracking-wider rounded border-2 transition-all ${isExpanded
                           ? "border-pickle bg-pickle text-white font-bold"
                           : "border-2 border-border bg-card text-foreground font-bold hover:border-pickle hover:text-pickle"
-                      }`}
+                        }`}
                     >
                       <span>{isExpanded ? "Hide Pairs" : "View Pairs"}</span>
                       <svg
@@ -1962,11 +1953,10 @@ function TeamsTab({
                                     togglePaid(divTeam.id, divCat.id);
                                   }}
                                   title={isDivPaid ? "Click to set unpaid" : "Click to mark paid"}
-                                  className={`rounded-full px-3 py-1 text-xs font-bold uppercase tracking-widest font-mono transition-colors cursor-pointer ${
-                                    isDivPaid
+                                  className={`rounded-full px-3 py-1 text-xs font-bold uppercase tracking-widest font-mono transition-colors cursor-pointer ${isDivPaid
                                       ? "bg-pickle/20 text-pickle hover:bg-pickle/30 border-2 border-pickle/40"
                                       : "bg-brick/20 text-brick hover:bg-brick/30 border-2 border-brick/40"
-                                  }`}
+                                    }`}
                                 >
                                   {isDivPaid ? "Paid" : "Unpaid"}
                                 </button>
@@ -2152,7 +2142,7 @@ function AccessCodesTab() {
     setCodes(getAccessCodes());
     setCustomCode("");
     setRecentlyGenerated(newEntry.code);
-    navigator.clipboard.writeText(newEntry.code).catch(() => {});
+    navigator.clipboard.writeText(newEntry.code).catch(() => { });
     setTimeout(() => setRecentlyGenerated(null), 5000);
   };
 
@@ -2269,9 +2259,8 @@ function AccessCodesTab() {
           {codes.map((c) => (
             <div
               key={c.id}
-              className={`flex items-center justify-between gap-4 px-6 py-4 text-xs ${
-                c.isUsed ? "bg-card opacity-60" : "bg-card"
-              }`}
+              className={`flex items-center justify-between gap-4 px-6 py-4 text-xs ${c.isUsed ? "bg-card opacity-60" : "bg-card"
+                }`}
             >
               <div className="flex items-center gap-4 min-w-0">
                 <span className="font-mono text-lg font-bold text-foreground tracking-wider bg-card px-3 py-1 border-2 border-border rounded shadow-xs">
@@ -2281,19 +2270,17 @@ function AccessCodesTab() {
                 <div>
                   <div className="flex items-center gap-2">
                     <span
-                      className={`font-bold uppercase tracking-widest px-2 py-0.5 text-[0.6rem] rounded ${
-                        c.role === "admin"
+                      className={`font-bold uppercase tracking-widest px-2 py-0.5 text-[0.6rem] rounded ${c.role === "admin"
                           ? "bg-brick/20 text-brick border border-brick/40"
                           : "bg-pickle/20 text-pickle border border-pickle/40"
-                      }`}
+                        }`}
                     >
                       {c.role === "admin" ? "Admin Code" : "Umpire Code"}
                     </span>
 
                     <span
-                      className={`font-bold uppercase tracking-widest text-[0.6rem] ${
-                        c.isUsed ? "text-brick font-bold" : "text-pickle font-bold"
-                      }`}
+                      className={`font-bold uppercase tracking-widest text-[0.6rem] ${c.isUsed ? "text-brick font-bold" : "text-pickle font-bold"
+                        }`}
                     >
                       {c.isUsed ? `Used by ${c.usedBy}` : "Active"}
                     </span>

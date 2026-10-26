@@ -13,6 +13,7 @@ import {
   undoLastRally,
   resetMatch,
   isMatchMatchingStation,
+  getLocalMatchMutationAt,
   type LiveMatch,
 } from "@/lib/match-store";
 import {
@@ -30,9 +31,10 @@ import {
   isConfirmedDispatchedMatch,
   findMatchForCourtStation,
 } from "@/lib/court-dispatch";
-import { useTournamentStore } from "@/lib/tournament-store";
+import { useTournamentStore, getTournaments } from "@/lib/tournament-store";
 import { dbUpdateCourtStation, dbSubscribeToLive } from "@/lib/supabase-service";
 import { DispatchDebugStation } from "@/components/admin/DispatchDebugStation";
+import { syncMainDrawWithLiveMatches } from "@/components/admin/DrawsManager";
 
 export const Route = createFileRoute("/umpire")({
   beforeLoad: () => {
@@ -96,6 +98,10 @@ function Umpire() {
 
   const [activeTab, setActiveTab] = useState<UmpireTab>("console");
   const [selectedMatchId, setSelectedMatchId] = useState<string | null>(null);
+  const selectedMatchIdRef = useRef<string | null>(selectedMatchId);
+  useEffect(() => {
+    selectedMatchIdRef.current = selectedMatchId;
+  }, [selectedMatchId]);
   const [umpireName, setUmpireName] = useState("Official");
   const [stations, setStations] = useState<Record<FacilityCourt, CourtStation>>(() => getCourtStations());
   const [isDebugOpen, setIsDebugOpen] = useState(false);
@@ -164,10 +170,18 @@ function Umpire() {
     });
     refreshFromCloud();
 
+    const safeRefreshFromCloud = () => {
+      const activeId = selectedMatchIdRef.current;
+      if (activeId && Date.now() - getLocalMatchMutationAt(activeId) < 5000) {
+        return;
+      }
+      refreshFromCloud();
+    };
+
     const reloadStations = () => {
       setStations(getCourtStations());
       refresh();
-      refreshFromCloud();
+      safeRefreshFromCloud();
     };
 
     const handleRemoteDispatch = (e: Event) => {
@@ -216,25 +230,25 @@ function Umpire() {
         if (mounted) setStations(cloud);
       });
       // 3. Confirm with fresh matches from cloud
-      refreshFromCloud();
+      safeRefreshFromCloud();
       setTimeout(() => {
         if (mounted) {
           hydrateCourtStationsFromCloud().then((cloud) => {
             if (mounted) setStations(cloud);
           });
-          refreshFromCloud();
+          safeRefreshFromCloud();
         }
       }, 1200);
 
       // Play audio chime and haptic feedback
       try {
         playDeskChime();
-      } catch {}
+      } catch { }
 
       if (typeof navigator !== "undefined" && navigator.vibrate) {
         try {
           navigator.vibrate([150, 75, 150]);
-        } catch {}
+        } catch { }
       }
 
       setDispatchNotice({
@@ -260,14 +274,14 @@ function Umpire() {
       () => {
         // Realtime notification when matches table changes in Supabase
         refresh();
-        refreshFromCloud();
+        safeRefreshFromCloud();
       },
       () => {
         // Realtime notification when court_stations table changes in Supabase
         hydrateCourtStationsFromCloud().then((cloud) => {
           if (mounted) setStations(cloud);
         });
-        refreshFromCloud();
+        safeRefreshFromCloud();
       }
     );
 
@@ -309,6 +323,19 @@ function Umpire() {
       null
     );
   }, [selectedMatchId, activeEventMatches, matches]);
+
+  // Auto-switch umpire console when current court receives a newly dispatched match
+  useEffect(() => {
+    if (!selectedMatch) return;
+    const court = selectedMatch.court as FacilityCourt;
+    if (!court || !(FACILITY_COURTS as readonly string[]).includes(court)) return;
+    const st = stations[court];
+    if (st && (st.status === "live" || st.status === "warmup") && st.currentMatchId) {
+      if (st.currentMatchId !== selectedMatch.id && (selectedMatch.status === "final" || Boolean(selectedMatch.winnerTeam))) {
+        setSelectedMatchId(st.currentMatchId);
+      }
+    }
+  }, [stations, selectedMatch]);
 
   const tabs: { key: UmpireTab; label: string }[] = [
     { key: "console", label: "Court Supervision" },
@@ -648,14 +675,13 @@ function TournamentDesk({
             return (
               <div
                 key={court}
-                className={`surface-card p-0 overflow-hidden border flex flex-col justify-between transition-all ${
-                  isOperatedByOther
+                className={`surface-card p-0 overflow-hidden border flex flex-col justify-between transition-all ${isOperatedByOther
                     ? "border-brick/50 bg-charcoal text-sand"
                     : courtMatch?.status === "live"
-                    ? "border-pickle/70 shadow-md shadow-pickle/10"
-                    : st.status === "maintenance"
-                      ? "border-brick/50 bg-brick/5"
-                      : "border-border hover:border-foreground/40"
+                      ? "border-pickle/70 shadow-md shadow-pickle/10"
+                      : st.status === "maintenance"
+                        ? "border-brick/50 bg-brick/5"
+                        : "border-border hover:border-foreground/40"
                   }`}
               >
                 {/* Court Card Header */}
@@ -1389,13 +1415,12 @@ function CourtDiagramView({
     return (
       <div
         key={`${player.name}-${player.base}-${player.isServing ? "srv" : "nosrv"}`}
-        className={`relative inline-flex items-center gap-1.5 px-2.5 py-1 sm:px-3 sm:py-1.5 rounded-full font-bold text-xs sm:text-sm max-w-[95%] transition-all duration-300 animate-in fade-in zoom-in-95 ${
-          isReceiver
+        className={`relative inline-flex items-center gap-1.5 px-2.5 py-1 sm:px-3 sm:py-1.5 rounded-full font-bold text-xs sm:text-sm max-w-[95%] transition-all duration-300 animate-in fade-in zoom-in-95 ${isReceiver
             ? "border-2 border-dashed border-amber-300 ring-2 ring-amber-400/40 text-sand shadow-md"
             : isServing
-            ? "ring-2 ring-sand/80 shadow-md text-sand"
-            : "text-sand border border-sand/30"
-        } ${teamLetter === "A" ? "bg-pickle" : "bg-brick"}`}
+              ? "ring-2 ring-sand/80 shadow-md text-sand"
+              : "text-sand border border-sand/30"
+          } ${teamLetter === "A" ? "bg-pickle" : "bg-brick"}`}
         title={`${player.name} (Base ${player.base})`}
       >
         {/* Ball marker on active server */}
@@ -1842,7 +1867,7 @@ function UmpireConsole({
         dbUpdateCourtStation(match.court as FacilityCourt, {
           currentMatchId: match.id,
           assignedUmpire: currentUmpire,
-        }).catch(() => {});
+        }).catch(() => { });
         claimCourtStation(match.court as FacilityCourt, currentUmpire);
       }
     }
@@ -1908,26 +1933,23 @@ function UmpireConsole({
               return (
                 <div
                   key={court}
-                  className={`p-0 overflow-hidden flex flex-col justify-between border-2 transition-all font-sans ${
-                    isOperatedByOther
+                  className={`p-0 overflow-hidden flex flex-col justify-between border-2 transition-all font-sans ${isOperatedByOther
                       ? "border-brick/50 bg-charcoal text-sand"
                       : isLive
-                      ? "border-pickle/80 shadow-lg shadow-pickle/15 bg-charcoal text-sand"
-                      : courtMatch
-                      ? "border-border hover:border-pickle/50 bg-charcoal text-sand"
-                      : "border-border border-dashed bg-card text-foreground"
-                  }`}
+                        ? "border-pickle/80 shadow-lg shadow-pickle/15 bg-charcoal text-sand"
+                        : courtMatch
+                          ? "border-border hover:border-pickle/50 bg-charcoal text-sand"
+                          : "border-border border-dashed bg-card text-foreground"
+                    }`}
                 >
                   {/* Card Header */}
                   <div
-                    className={`px-4 py-3 flex items-center justify-between border-b-2 ${
-                      courtMatch ? "bg-charcoal border-white/10" : "bg-muted/40 border-border"
-                    }`}
+                    className={`px-4 py-3 flex items-center justify-between border-b-2 ${courtMatch ? "bg-charcoal border-white/10" : "bg-muted/40 border-border"
+                      }`}
                   >
                     <span
-                      className={`font-display text-2xl tracking-wide ${
-                        courtMatch ? "text-sand" : "text-foreground"
-                      }`}
+                      className={`font-display text-2xl tracking-wide ${courtMatch ? "text-sand" : "text-foreground"
+                        }`}
                     >
                       {court}
                     </span>
@@ -2051,7 +2073,7 @@ function UmpireConsole({
                                   dbUpdateCourtStation(court, {
                                     currentMatchId: courtMatch.id,
                                     assignedUmpire: currentUmpire,
-                                  }).catch(() => {});
+                                  }).catch(() => { });
                                   claimCourtStation(court, currentUmpire);
                                 }
                                 onSelectMatch(courtMatch.id);
@@ -2068,7 +2090,7 @@ function UmpireConsole({
                                   if (typeof localStorage !== "undefined") {
                                     try {
                                       localStorage.removeItem(`dv_toss_done_${courtMatch.id}`);
-                                    } catch {}
+                                    } catch { }
                                   }
                                   if (!courtMatch.officiatedBy) {
                                     onUpdate(courtMatch.id, (m) => ({
@@ -2078,7 +2100,7 @@ function UmpireConsole({
                                     dbUpdateCourtStation(court, {
                                       currentMatchId: courtMatch.id,
                                       assignedUmpire: currentUmpire,
-                                    }).catch(() => {});
+                                    }).catch(() => { });
                                     claimCourtStation(court, currentUmpire);
                                   } else {
                                     onUpdate(courtMatch.id, resetMatch);
@@ -2210,7 +2232,7 @@ function UmpireConsole({
   const leftScore = leftTeam === "A" ? s.teamAScore : s.teamBScore;
   const rightScore = rightTeam === "A" ? s.teamAScore : s.teamBScore;
 
-  const handleChangeCourt = (newCourt: FacilityCourt) => {
+  const handleChangeCourt = async (newCourt: FacilityCourt) => {
     if (!match || match.court === newCourt) {
       setShowChangeCourtModal(false);
       setShowCourtSideModal(false);
@@ -2218,7 +2240,7 @@ function UmpireConsole({
     }
     const oldCourt = match.court;
     if (oldCourt && (FACILITY_COURTS as readonly string[]).includes(oldCourt as string)) {
-      vacateCourt(oldCourt as FacilityCourt);
+      await vacateCourt(oldCourt as FacilityCourt);
     }
     onUpdate(match.id, (m) => ({
       ...m,
@@ -2230,7 +2252,7 @@ function UmpireConsole({
         status: isLiveOrScheduled ? "live" : "standby",
         currentMatchId: match.id,
         assignedUmpire: effectiveUmpire,
-      }).catch(() => {});
+      }).catch(() => { });
     }
     setShowChangeCourtModal(false);
     setShowCourtSideModal(false);
@@ -2339,20 +2361,44 @@ function UmpireConsole({
     }));
   };
 
-  const handleEndGame = () => {
+  const handleEndGame = async () => {
     onUpdate(match.id, (m) => {
       const updated = endGame(m);
       return {
         ...updated,
+        status: "final" as const,
+        court: "Queue",
         officiatedBy: m.officiatedBy ?? currentUmpire,
       };
     });
     // Complete match in dispatch queue
-    completeQueueMatch(match.id);
+    completeQueueMatch(match.id, match.teamAName, match.teamBName, match.stage);
     // Vacate court station in database and release umpire assignment
     if (match.court && match.court !== "Queue") {
-      vacateCourt(match.court as FacilityCourt);
+      await vacateCourt(match.court as FacilityCourt);
       releaseCourtStation(match.court as FacilityCourt);
+    }
+    // Automatically advance playoff bracket if knockout match
+    try {
+      const tSlug = match.tournamentSlug || "dink-valley";
+      let catId = match.categoryId;
+      if (!catId && match.id) {
+        const matchCat = match.id.match(/match-[^-]+-([a-z0-9-]+?)-(?:quarterfinal|semifinal|final|bronze|bracket|pool)/i)?.[1];
+        if (matchCat) catId = matchCat;
+      }
+      if (tSlug && catId) {
+        syncMainDrawWithLiveMatches(tSlug, catId, undefined, true);
+      } else if (tSlug) {
+        const tourneys = getTournaments();
+        const tourney = tourneys.find((t) => t.slug === tSlug) || tourneys[0];
+        if (tourney) {
+          for (const c of tourney.categories) {
+            syncMainDrawWithLiveMatches(tSlug, c.id, undefined, true);
+          }
+        }
+      }
+    } catch (err) {
+      console.warn("[Umpire] Playoff auto-advance sync error:", err);
     }
     setShowEndConfirm(false);
   };
@@ -2568,9 +2614,8 @@ function UmpireConsole({
           {/* Left Team (Matches Left Court End) */}
           <div className="flex-1 min-w-0 flex items-center gap-2">
             <span
-              className={`font-display text-3xl sm:text-5xl font-bold leading-none ${
-                s.servingTeam === leftTeam ? "text-pickle" : "text-foreground"
-              }`}
+              className={`font-display text-3xl sm:text-5xl font-bold leading-none ${s.servingTeam === leftTeam ? "text-pickle" : "text-foreground"
+                }`}
             >
               {leftScore}
             </span>
@@ -2615,9 +2660,8 @@ function UmpireConsole({
               )}
             </div>
             <span
-              className={`font-display text-3xl sm:text-5xl font-bold leading-none ${
-                s.servingTeam === rightTeam ? "text-pickle" : "text-foreground"
-              }`}
+              className={`font-display text-3xl sm:text-5xl font-bold leading-none ${s.servingTeam === rightTeam ? "text-pickle" : "text-foreground"
+                }`}
             >
               {rightScore}
             </span>
@@ -2834,11 +2878,10 @@ function UmpireConsole({
                     onClick={() => {
                       handleChangeCourt(c);
                     }}
-                    className={`py-2 px-3 rounded font-mono font-bold text-xs uppercase tracking-wider border-2 transition-all cursor-pointer text-center ${
-                      match.court === c
+                    className={`py-2 px-3 rounded font-mono font-bold text-xs uppercase tracking-wider border-2 transition-all cursor-pointer text-center ${match.court === c
                         ? "border-pickle bg-pickle text-sand shadow-sm"
                         : "border-border bg-card text-foreground hover:border-pickle hover:text-pickle"
-                    }`}
+                      }`}
                   >
                     {c} {match.court === c ? "(Current)" : ""}
                   </button>
@@ -3138,11 +3181,10 @@ function UmpireMatchResults({
                 key={c}
                 type="button"
                 onClick={() => setCourtFilter(c)}
-                className={`px-3 py-1.5 text-xs font-bold uppercase tracking-wider transition-all cursor-pointer font-sans ${
-                  courtFilter === c
+                className={`px-3 py-1.5 text-xs font-bold uppercase tracking-wider transition-all cursor-pointer font-sans ${courtFilter === c
                     ? "bg-pickle text-sand shadow-sm"
                     : "bg-charcoal text-sand/80 hover:text-white border border-white/20 hover:border-white/40"
-                }`}
+                  }`}
               >
                 {c === "all" ? "All Courts" : c}
               </button>
@@ -3158,11 +3200,10 @@ function UmpireMatchResults({
               <button
                 type="button"
                 onClick={() => setBracketFilter("all")}
-                className={`px-3 py-1.5 text-xs font-bold uppercase tracking-wider transition-all cursor-pointer font-sans ${
-                  bracketFilter === "all"
+                className={`px-3 py-1.5 text-xs font-bold uppercase tracking-wider transition-all cursor-pointer font-sans ${bracketFilter === "all"
                     ? "bg-pickle text-sand shadow-sm"
                     : "bg-charcoal text-sand/80 hover:text-white border border-white/20 hover:border-white/40"
-                }`}
+                  }`}
               >
                 All
               </button>
@@ -3171,11 +3212,10 @@ function UmpireMatchResults({
                   key={stg}
                   type="button"
                   onClick={() => setBracketFilter(stg)}
-                  className={`px-3 py-1.5 text-xs font-bold uppercase tracking-wider transition-all cursor-pointer font-sans ${
-                    bracketFilter === stg
+                  className={`px-3 py-1.5 text-xs font-bold uppercase tracking-wider transition-all cursor-pointer font-sans ${bracketFilter === stg
                       ? "bg-pickle text-sand shadow-sm"
                       : "bg-charcoal text-sand/80 hover:text-white border border-white/20 hover:border-white/40"
-                  }`}
+                    }`}
                 >
                   {stg.replace(" (Pool Play)", "")}
                 </button>
@@ -3214,18 +3254,16 @@ function UmpireMatchResults({
               <div className="space-y-2.5">
                 {/* Team A */}
                 <div
-                  className={`p-3 border-2 transition-colors flex items-center justify-between ${
-                    m.winnerTeam === m.teamAName
+                  className={`p-3 border-2 transition-colors flex items-center justify-between ${m.winnerTeam === m.teamAName
                       ? "bg-pickle/10 border-pickle/50"
                       : "bg-muted/40 border-border/60"
-                  }`}
+                    }`}
                 >
                   <div className="min-w-0 mr-3">
                     <div className="flex items-center gap-1.5 flex-wrap">
                       <span
-                        className={`block text-sm font-bold truncate font-sans ${
-                          m.winnerTeam === m.teamAName ? "text-pickle" : "text-foreground"
-                        }`}
+                        className={`block text-sm font-bold truncate font-sans ${m.winnerTeam === m.teamAName ? "text-pickle" : "text-foreground"
+                          }`}
                       >
                         {m.teamAName}
                       </span>
@@ -3245,9 +3283,8 @@ function UmpireMatchResults({
                     )}
                   </div>
                   <span
-                    className={`font-display text-3xl font-bold ${
-                      m.winnerTeam === m.teamAName ? "text-pickle" : "text-foreground"
-                    }`}
+                    className={`font-display text-3xl font-bold ${m.winnerTeam === m.teamAName ? "text-pickle" : "text-foreground"
+                      }`}
                   >
                     {m.score.teamAScore}
                   </span>
@@ -3255,18 +3292,16 @@ function UmpireMatchResults({
 
                 {/* Team B */}
                 <div
-                  className={`p-3 border-2 transition-colors flex items-center justify-between ${
-                    m.winnerTeam === m.teamBName
+                  className={`p-3 border-2 transition-colors flex items-center justify-between ${m.winnerTeam === m.teamBName
                       ? "bg-pickle/10 border-pickle/50"
                       : "bg-muted/40 border-border/60"
-                  }`}
+                    }`}
                 >
                   <div className="min-w-0 mr-3">
                     <div className="flex items-center gap-1.5 flex-wrap">
                       <span
-                        className={`block text-sm font-bold truncate font-sans ${
-                          m.winnerTeam === m.teamBName ? "text-pickle" : "text-foreground"
-                        }`}
+                        className={`block text-sm font-bold truncate font-sans ${m.winnerTeam === m.teamBName ? "text-pickle" : "text-foreground"
+                          }`}
                       >
                         {m.teamBName}
                       </span>
@@ -3286,9 +3321,8 @@ function UmpireMatchResults({
                     )}
                   </div>
                   <span
-                    className={`font-display text-3xl font-bold ${
-                      m.winnerTeam === m.teamBName ? "text-pickle" : "text-foreground"
-                    }`}
+                    className={`font-display text-3xl font-bold ${m.winnerTeam === m.teamBName ? "text-pickle" : "text-foreground"
+                      }`}
                   >
                     {m.score.teamBScore}
                   </span>
@@ -3796,9 +3830,8 @@ function CoinTossOverlay({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-charcoal/96 backdrop-blur-sm p-4">
       <div
-        className={`surface-card border-2 border-pickle/50 w-full p-5 sm:p-6 space-y-4 text-center relative max-h-[92vh] overflow-y-auto transition-all ${
-          phase === "positioning" ? "max-w-lg" : "max-w-sm"
-        }`}
+        className={`surface-card border-2 border-pickle/50 w-full p-5 sm:p-6 space-y-4 text-center relative max-h-[92vh] overflow-y-auto transition-all ${phase === "positioning" ? "max-w-lg" : "max-w-sm"
+          }`}
       >
         <div className="flex items-center justify-between border-b border-border/40 pb-2">
           <span className="block text-[0.6rem] uppercase tracking-[0.3em] font-bold text-pickle">
@@ -3826,31 +3859,28 @@ function CoinTossOverlay({
         {phase !== "positioning" && (
           <div className="flex flex-col items-center gap-1.5">
             <div
-              className={`relative h-24 w-24 sm:h-28 sm:w-28 rounded-full overflow-hidden select-none ${
-                phase === "flipping"
+              className={`relative h-24 w-24 sm:h-28 sm:w-28 rounded-full overflow-hidden select-none ${phase === "flipping"
                   ? "coin-flip"
                   : phase === "result" || phase === "choosing"
-                  ? "coin-land"
-                  : phase === "done"
-                  ? "opacity-0 scale-90 transition-all duration-500"
-                  : ""
-              }`}
+                    ? "coin-land"
+                    : phase === "done"
+                      ? "opacity-0 scale-90 transition-all duration-500"
+                      : ""
+                }`}
               style={{ willChange: "transform" }}
             >
               <img
                 src="/coin_heads.png"
                 alt="Heads"
-                className={`absolute inset-0 h-full w-full object-cover rounded-full transition-opacity duration-75 ${
-                  face === "heads" || phase === "idle" ? "opacity-100" : "opacity-0"
-                }`}
+                className={`absolute inset-0 h-full w-full object-cover rounded-full transition-opacity duration-75 ${face === "heads" || phase === "idle" ? "opacity-100" : "opacity-0"
+                  }`}
                 draggable={false}
               />
               <img
                 src="/coin_tails.png"
                 alt="Tails"
-                className={`absolute inset-0 h-full w-full object-cover rounded-full transition-opacity duration-75 ${
-                  face === "tails" && phase !== "idle" ? "opacity-100" : "opacity-0"
-                }`}
+                className={`absolute inset-0 h-full w-full object-cover rounded-full transition-opacity duration-75 ${face === "tails" && phase !== "idle" ? "opacity-100" : "opacity-0"
+                  }`}
                 draggable={false}
               />
             </div>
@@ -3885,22 +3915,20 @@ function CoinTossOverlay({
                   <button
                     type="button"
                     onClick={() => setCallingTeam("A")}
-                    className={`p-2.5 text-xs font-bold uppercase tracking-wider border-2 transition-all text-center cursor-pointer truncate rounded ${
-                      callingTeam === "A"
+                    className={`p-2.5 text-xs font-bold uppercase tracking-wider border-2 transition-all text-center cursor-pointer truncate rounded ${callingTeam === "A"
                         ? "bg-pickle text-sand border-pickle shadow-sm"
                         : "bg-card text-foreground border-border hover:border-pickle hover:text-pickle"
-                    }`}
+                      }`}
                   >
                     {teamAName}
                   </button>
                   <button
                     type="button"
                     onClick={() => setCallingTeam("B")}
-                    className={`p-2.5 text-xs font-bold uppercase tracking-wider border-2 transition-all text-center cursor-pointer truncate rounded ${
-                      callingTeam === "B"
+                    className={`p-2.5 text-xs font-bold uppercase tracking-wider border-2 transition-all text-center cursor-pointer truncate rounded ${callingTeam === "B"
                         ? "bg-pickle text-sand border-pickle shadow-sm"
                         : "bg-card text-foreground border-border hover:border-pickle hover:text-pickle"
-                    }`}
+                      }`}
                   >
                     {teamBName}
                   </button>
@@ -3916,22 +3944,20 @@ function CoinTossOverlay({
                   <button
                     type="button"
                     onClick={() => setCallingChoice("heads")}
-                    className={`p-2.5 text-xs font-bold uppercase tracking-wider border-2 transition-all text-center cursor-pointer rounded ${
-                      callingChoice === "heads"
+                    className={`p-2.5 text-xs font-bold uppercase tracking-wider border-2 transition-all text-center cursor-pointer rounded ${callingChoice === "heads"
                         ? "bg-pickle text-sand border-pickle shadow-sm"
                         : "bg-card text-foreground border-border hover:border-pickle hover:text-pickle"
-                    }`}
+                      }`}
                   >
                     Heads
                   </button>
                   <button
                     type="button"
                     onClick={() => setCallingChoice("tails")}
-                    className={`p-2.5 text-xs font-bold uppercase tracking-wider border-2 transition-all text-center cursor-pointer rounded ${
-                      callingChoice === "tails"
+                    className={`p-2.5 text-xs font-bold uppercase tracking-wider border-2 transition-all text-center cursor-pointer rounded ${callingChoice === "tails"
                         ? "bg-pickle text-sand border-pickle shadow-sm"
                         : "bg-card text-foreground border-border hover:border-pickle hover:text-pickle"
-                    }`}
+                      }`}
                   >
                     Tails
                   </button>
@@ -4053,11 +4079,10 @@ function CoinTossOverlay({
                   {teamAName}
                 </span>
                 <span
-                  className={`text-[0.6rem] font-bold uppercase px-2 py-0.5 rounded font-mono shrink-0 ${
-                    chosenServingTeam === "A"
+                  className={`text-[0.6rem] font-bold uppercase px-2 py-0.5 rounded font-mono shrink-0 ${chosenServingTeam === "A"
                       ? "bg-pickle text-sand"
                       : "bg-muted text-foreground border border-border"
-                  }`}
+                    }`}
                 >
                   {chosenServingTeam === "A" ? "Opening Server (0-0-2)" : "Opening Receiver"}
                 </span>
@@ -4110,11 +4135,10 @@ function CoinTossOverlay({
                   {teamBName}
                 </span>
                 <span
-                  className={`text-[0.6rem] font-bold uppercase px-2 py-0.5 rounded font-mono shrink-0 ${
-                    chosenServingTeam === "B"
+                  className={`text-[0.6rem] font-bold uppercase px-2 py-0.5 rounded font-mono shrink-0 ${chosenServingTeam === "B"
                       ? "bg-pickle text-sand"
                       : "bg-muted text-foreground border border-border"
-                  }`}
+                    }`}
                 >
                   {chosenServingTeam === "B" ? "Opening Server (0-0-2)" : "Opening Receiver"}
                 </span>

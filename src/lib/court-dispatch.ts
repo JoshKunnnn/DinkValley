@@ -14,6 +14,7 @@ import {
   dbSaveDispatchQueue,
   dbDeleteDispatchQueue,
   getCachedDispatchQueue,
+  getCachedDrawnGroups,
   dbSaveMatch,
   dbDeleteMatch,
   dbGetMatches,
@@ -22,6 +23,7 @@ import {
   getOfflineScoreJournal,
   broadcastDispatchAlert,
   dbSaveCategoryArrangement,
+  isSameCategory,
 } from "./supabase-service";
 import { isMatchInSameBracket } from "./bracket-utils";
 
@@ -240,13 +242,17 @@ export function reconcileCourtStations(
     if (st.status === "live" || st.status === "warmup") {
       let activeMatch = st.currentMatchId ? matches.find((m) => m.id === st.currentMatchId) : null;
       if (!activeMatch) {
-        activeMatch = matches.find((m) => m.status !== "final" && isMatchMatchingStation(m, st.currentMatchId, c)) || null;
+        activeMatch = matches.find((m) => m.status !== "final" && !m.winnerTeam && !m.endedAt && isMatchMatchingStation(m, st.currentMatchId, c)) || null;
       }
+
+      const isCompleted = Boolean(
+        activeMatch && (activeMatch.status === "final" || activeMatch.winnerTeam || activeMatch.endedAt)
+      );
 
       // If the assigned match is not in the local store yet (cloud match row still in flight),
       // KEEP the station. Wiping it here is what made dispatched matches vanish on the umpire side.
 
-      if (activeMatch && activeMatch.status !== "final") {
+      if (activeMatch && !isCompleted) {
         if (st.currentMatchId !== activeMatch.id || (activeMatch.status === "live" && st.status !== "live")) {
           stations[c] = {
             ...st,
@@ -263,7 +269,7 @@ export function reconcileCourtStations(
             modified = true;
           }
         }
-      } else if (activeMatch && activeMatch.status === "final") {
+      } else if (isCompleted) {
         // Concluded match still holding the court: free it locally AND in the cloud so
         // hydration does not flip it back on the next poll.
         stations[c] = {
@@ -278,6 +284,14 @@ export function reconcileCourtStations(
           currentMatchId: null,
           dispatchedAt: null,
         }).catch(() => {});
+
+        // Ensure match record itself has status: "final"
+        const mIdx = matches.findIndex((m) => m.id === activeMatch!.id);
+        const targetToFinalize = matches[mIdx];
+        if (mIdx !== -1 && targetToFinalize && targetToFinalize.status !== "final") {
+          matches[mIdx] = { ...targetToFinalize, status: "final" };
+          modified = true;
+        }
       }
       // Note: If no active match could be found or restored, do NOT wipe an active station!
       // This protects courts against timer-based state loss and hallucination.
@@ -330,6 +344,8 @@ export function reconcileCourtStations(
       // ignore
     }
   }
+
+  reconcileDispatchQueue(matches);
 
   return { stations, matches, modified };
   } finally {
@@ -468,7 +484,7 @@ export function playDeskChime(): void {
  * Dispatches a match to a specified court (Court 1, 2, 3, or 4).
  * Synchronizes with dv_live_matches, updates court station, and emits announcement.
  */
-export function dispatchMatchToCourt(
+export async function dispatchMatchToCourt(
   court: FacilityCourt,
   match: {
     id: string;
@@ -484,7 +500,7 @@ export function dispatchMatchToCourt(
   },
   umpire?: string | undefined,
   startImmediately = false,
-): void {
+): Promise<void> {
   // Validate that pool play matches only pair teams within the exact same bracket
   if (match.stage && !isMatchInSameBracket(match.tournamentSlug || "", match.categoryId || "", match.stage, match.teamAName, match.teamBName, undefined, undefined, match.teamAPlayers, match.teamBPlayers)) {
     console.warn(`[Dispatch Rejected] ${match.teamAName} vs ${match.teamBName} are not in the same bracket for stage: ${match.stage}`);
@@ -500,7 +516,7 @@ export function dispatchMatchToCourt(
     return;
   }
 
-  // Always compute canonical deterministic pair ID
+  // Always compute canonical deterministic pair ID as fallback
   const canonicalId = createPairMatchId(
     match.tournamentSlug || "",
     match.categoryId || "",
@@ -510,7 +526,11 @@ export function dispatchMatchToCourt(
     match.teamAPlayers,
     match.teamBPlayers,
   );
-  const effectiveId = match.id.startsWith("match-") ? match.id : canonicalId;
+  // Always preserve category-scoped match IDs (match_...) or explicit deterministic match ID
+  const targetId =
+    match.id && (match.id.startsWith("match_") || match.id.startsWith("match-") || match.id.startsWith("live-ko-") || match.id.startsWith("ko-"))
+      ? match.id
+      : (match.id || canonicalId);
 
   // Make sure matches are migrated to deterministic IDs
   const rawMatches = getMatches();
@@ -518,25 +538,52 @@ export function dispatchMatchToCourt(
   const now = Date.now();
 
   const isTargetMatch = (m: LiveMatch): boolean => {
-    // 1. Strict pair match
+    // 1. Exact ID match
+    if (m.id === targetId || (match.id && m.id === match.id) || m.id === canonicalId) {
+      return true;
+    }
+
+    // 2. Strict pair match
     const ma = m.teamAName?.trim().toLowerCase();
     const mb = m.teamBName?.trim().toLowerCase();
     const ta = match.teamAName.trim().toLowerCase();
     const tb = match.teamBName.trim().toLowerCase();
-    if ((ma === ta && mb === tb) || (ma === tb && mb === ta)) {
-      if (ta === tb && match.teamAPlayers && match.teamBPlayers && m.teamAPlayers && m.teamBPlayers) {
-        const matchP = [m.teamAPlayers.slice().sort().join(",").toLowerCase(), m.teamBPlayers.slice().sort().join(",").toLowerCase()].sort().join(" vs ");
-        const targetP = [match.teamAPlayers.slice().sort().join(",").toLowerCase(), match.teamBPlayers.slice().sort().join(",").toLowerCase()].sort().join(" vs ");
-        return matchP === targetP;
+    const isNormal = ma === ta && mb === tb;
+    const isReverse = ma === tb && mb === ta;
+    if (isNormal || isReverse) {
+      // Disambiguate when player rosters are available
+      if (isNormal) {
+        if (match.teamAPlayers?.length && m.teamAPlayers?.length) {
+          const tA = [...match.teamAPlayers].map((p) => p.trim().toLowerCase()).sort().join(",");
+          const mA = [...m.teamAPlayers].map((p) => p.trim().toLowerCase()).sort().join(",");
+          if (tA !== mA) return false;
+        }
+        if (match.teamBPlayers?.length && m.teamBPlayers?.length) {
+          const tB = [...match.teamBPlayers].map((p) => p.trim().toLowerCase()).sort().join(",");
+          const mB = [...m.teamBPlayers].map((p) => p.trim().toLowerCase()).sort().join(",");
+          if (tB !== mB) return false;
+        }
+      } else if (isReverse) {
+        if (match.teamAPlayers?.length && m.teamBPlayers?.length) {
+          const tA = [...match.teamAPlayers].map((p) => p.trim().toLowerCase()).sort().join(",");
+          const mB = [...m.teamBPlayers].map((p) => p.trim().toLowerCase()).sort().join(",");
+          if (tA !== mB) return false;
+        }
+        if (match.teamBPlayers?.length && m.teamAPlayers?.length) {
+          const tB = [...match.teamBPlayers].map((p) => p.trim().toLowerCase()).sort().join(",");
+          const mA = [...m.teamAPlayers].map((p) => p.trim().toLowerCase()).sort().join(",");
+          if (tB !== mA) return false;
+        }
       }
+
+      // Check stage alignment (pool play vs knockout)
+      if (m.stage && match.stage) {
+        const mKo = /quarter|semi|final|playoff|bronze/i.test(m.stage);
+        const tKo = /quarter|semi|final|playoff|bronze/i.test(match.stage);
+        if (mKo !== tKo) return false;
+      }
+
       return true;
-    }
-    // 2. ID match only if match doesn't have opposing teams
-    if (m.id === effectiveId || m.id === match.id) {
-      if (!m.teamAName || !m.teamBName) return true;
-      if ((ma === ta && mb === tb) || (ma === tb && mb === ta)) return true;
-      // If teams are completely different, it's a legacy index collision!
-      return false;
     }
     return false;
   };
@@ -551,12 +598,12 @@ export function dispatchMatchToCourt(
       const otherSt = stations[otherCourt];
       if (otherSt && otherSt.currentMatchId) {
         const isAssignedHere =
+          otherSt.currentMatchId === targetId ||
           otherSt.currentMatchId === canonicalId ||
           otherSt.currentMatchId === match.id ||
-          otherSt.currentMatchId === effectiveId ||
           isMatchMatchingStation(
             {
-              id: canonicalId,
+              id: targetId,
               teamAName: match.teamAName,
               teamAPlayers: match.teamAPlayers ?? [],
               teamBName: match.teamBName,
@@ -588,7 +635,7 @@ export function dispatchMatchToCourt(
   stations[court] = {
     ...stations[court],
     status: startImmediately ? "live" : "warmup",
-    currentMatchId: canonicalId,
+    currentMatchId: targetId,
     assignedUmpire: umpire ?? stations[court].assignedUmpire,
     dispatchedAt: now,
     maintenanceNote: null,
@@ -597,20 +644,20 @@ export function dispatchMatchToCourt(
   // The cloud push waits for the match row (below); protect the local assignment meanwhile
   for (const c of courtsToSync) markStationLocalWrite(c);
 
-  const pushStationsToCloud = () => {
-    for (const c of courtsToSync) {
+  const pushStationsToCloud = async () => {
+    const promises = courtsToSync.map((c) => {
       const st = stations[c];
-      if (st) {
-        dbUpdateCourtStation(c, {
-          status: st.status,
-          currentMatchId: st.currentMatchId,
-          onDeckMatchId: st.onDeckMatchId,
-          assignedUmpire: st.assignedUmpire,
-          dispatchedAt: st.dispatchedAt,
-          maintenanceNote: st.maintenanceNote,
-        }).catch(() => {});
-      }
-    }
+      if (!st) return Promise.resolve();
+      return dbUpdateCourtStation(c, {
+        status: st.status,
+        currentMatchId: st.currentMatchId,
+        onDeckMatchId: st.onDeckMatchId,
+        assignedUmpire: st.assignedUmpire,
+        dispatchedAt: st.dispatchedAt,
+        maintenanceNote: st.maintenanceNote,
+      });
+    });
+    await Promise.all(promises);
   };
 
   let matchFound = false;
@@ -618,33 +665,46 @@ export function dispatchMatchToCourt(
   const updatedMatches = matches.map((m) => {
     if (isTargetMatch(m)) {
       matchFound = true;
+      const isConcluded = m.status === "final" || Boolean(m.winnerTeam) || Boolean(m.endedAt);
+      const finalTeamAName = (match.teamAName || m.teamAName || "").trim();
+      const finalTeamBName = (match.teamBName || m.teamBName || "").trim();
+      const finalTeamAPlayers = match.teamAPlayers?.length ? match.teamAPlayers : (m.teamAPlayers ?? []);
+      const finalTeamBPlayers = match.teamBPlayers?.length ? match.teamBPlayers : (m.teamBPlayers ?? []);
+      const finalStage = (match.stage || m.stage || "Pool Play").trim();
+      const finalCategoryId = (match.categoryId || m.categoryId || "").trim();
+      const finalTournamentSlug = (match.tournamentSlug || m.tournamentSlug || "").trim();
       return {
         ...m,
-        id: canonicalId,
-        tournamentSlug: match.tournamentSlug ?? m.tournamentSlug,
-        categoryId: match.categoryId ?? m.categoryId,
-        stage: match.stage ?? m.stage,
+        id: targetId,
+        tournamentSlug: finalTournamentSlug,
+        categoryId: finalCategoryId,
+        stage: finalStage,
         court,
-        teamAName: match.teamAName,
-        teamAPlayers: match.teamAPlayers?.length ? match.teamAPlayers : m.teamAPlayers,
+        teamAName: finalTeamAName,
+        teamAPlayers: finalTeamAPlayers,
         teamAClub: match.teamAClub ?? m.teamAClub,
-        teamBName: match.teamBName,
-        teamBPlayers: match.teamBPlayers?.length ? match.teamBPlayers : m.teamBPlayers,
+        teamBName: finalTeamBName,
+        teamBPlayers: finalTeamBPlayers,
         teamBClub: match.teamBClub ?? m.teamBClub,
         status: startImmediately ? ("live" as const) : ("scheduled" as const),
-        startedAt: startImmediately ? (m.startedAt ?? now) : m.startedAt,
+        score: isConcluded ? createInitialScore() : m.score,
+        winnerTeam: undefined,
+        startedAt: startImmediately ? (isConcluded ? now : (m.startedAt ?? now)) : undefined,
+        endedAt: undefined,
         officiatedBy: umpire ?? m.officiatedBy,
       };
     }
 
     // If an old legacy match has colliding ID (e.g. 1v2) with different teams, re-key it to avoid overwriting or collision
-    if ((m.id === match.id || m.id === canonicalId) && !isTargetMatch(m)) {
+    if ((m.id === match.id || m.id === targetId || m.id === canonicalId) && !isTargetMatch(m)) {
       const staleCanonical = createPairMatchId(
         m.tournamentSlug || "",
         m.categoryId || "",
         m.stage || "",
         m.teamAName,
         m.teamBName,
+        m.teamAPlayers,
+        m.teamBPlayers,
       );
       const staleVacated = {
         ...m,
@@ -674,15 +734,15 @@ export function dispatchMatchToCourt(
 
   if (!matchFound) {
     updatedMatches.push({
-      id: canonicalId,
-      tournamentSlug: match.tournamentSlug,
-      categoryId: match.categoryId,
-      stage: match.stage || "Pool Play",
+      id: targetId,
+      tournamentSlug: (match.tournamentSlug || "").trim(),
+      categoryId: (match.categoryId || "").trim(),
+      stage: (match.stage || "Pool Play").trim(),
       court,
-      teamAName: match.teamAName,
+      teamAName: (match.teamAName || "").trim(),
       teamAPlayers: match.teamAPlayers ?? [],
       teamAClub: match.teamAClub,
-      teamBName: match.teamBName,
+      teamBName: (match.teamBName || "").trim(),
       teamBPlayers: match.teamBPlayers ?? [],
       teamBClub: match.teamBClub,
       status: startImmediately ? "live" : "scheduled",
@@ -697,10 +757,9 @@ export function dispatchMatchToCourt(
   // 2. Save matches locally without mass cloud sync
   saveMatches(updatedMatches, false);
 
-  // 3. Save the dispatched match row to Supabase FIRST, then broadcast the station.
-  // Umpire devices react to the station event; if the station arrives before the match row,
-  // they have nothing to render (or fall back to a stale match). Ordering removes that race.
-  const dispatchedRecord = updatedMatches.find((m) => m.id === canonicalId);
+  // 3. Save the dispatched match row to Supabase FIRST, then station rows, then broadcast.
+  // Umpire and Public devices react to Realtime events; establishing deterministic cloud writes eliminates split-brain.
+  const dispatchedRecord = updatedMatches.find((m) => m.id === targetId);
   const matchWrites: Promise<unknown>[] = [];
   if (dispatchedRecord) {
     matchWrites.push(
@@ -716,30 +775,28 @@ export function dispatchMatchToCourt(
       )
     );
   }
-  // Synchronize stations to cloud immediately alongside match record save
-  pushStationsToCloud();
+
+  // Await match rows, then stations, then broadcast
   if (matchWrites.length > 0) {
-    Promise.all(matchWrites)
-      .then(() => {
-        pushStationsToCloud();
-        broadcastDispatchAlert({
-          court,
-          matchId: canonicalId,
-          teamAName: match.teamAName,
-          teamBName: match.teamBName,
-          stage: match.stage,
-          umpire: umpire ?? stations[court].assignedUmpire ?? undefined,
-          match: dispatchedRecord,
-        });
-      })
-      .catch(() => {});
+    await Promise.all(matchWrites);
   }
+  await pushStationsToCloud();
+
+  broadcastDispatchAlert({
+    court,
+    matchId: targetId,
+    teamAName: match.teamAName,
+    teamBName: match.teamBName,
+    stage: match.stage,
+    umpire: umpire ?? stations[court].assignedUmpire ?? undefined,
+    match: dispatchedRecord,
+  });
 
   // Update status of this match in dispatch queue
   const queue = getDispatchQueue();
   const updatedQueue = queue.map((q) => {
     // Revert any previous match on this court back to queued
-    if (q.assignedCourt === court && q.matchId !== canonicalId && q.matchId !== match.id && q.status !== "completed") {
+    if (q.assignedCourt === court && q.matchId !== targetId && q.matchId !== canonicalId && q.matchId !== match.id && q.status !== "completed") {
       return {
         ...q,
         status: "queued" as const,
@@ -751,15 +808,36 @@ export function dispatchMatchToCourt(
     const mb = q.teamBName?.trim().toLowerCase();
     const ta = match.teamAName.trim().toLowerCase();
     const tb = match.teamBName.trim().toLowerCase();
+    const isNormal = ma === ta && mb === tb;
+    const isReverse = ma === tb && mb === ta;
+
+    let isRosterMatch = isNormal || isReverse;
+    if (isRosterMatch && match.teamAPlayers?.length && q.teamAPlayers?.length && match.teamBPlayers?.length && q.teamBPlayers?.length) {
+      if (isNormal) {
+        const tA = [...match.teamAPlayers].map((p) => p.trim().toLowerCase()).sort().join(",");
+        const qA = [...q.teamAPlayers].map((p) => p.trim().toLowerCase()).sort().join(",");
+        const tB = [...match.teamBPlayers].map((p) => p.trim().toLowerCase()).sort().join(",");
+        const qB = [...q.teamBPlayers].map((p) => p.trim().toLowerCase()).sort().join(",");
+        if (tA !== qA || tB !== qB) isRosterMatch = false;
+      } else {
+        const tA = [...match.teamAPlayers].map((p) => p.trim().toLowerCase()).sort().join(",");
+        const qB = [...q.teamBPlayers].map((p) => p.trim().toLowerCase()).sort().join(",");
+        const tB = [...match.teamBPlayers].map((p) => p.trim().toLowerCase()).sort().join(",");
+        const qA = [...q.teamAPlayers].map((p) => p.trim().toLowerCase()).sort().join(",");
+        if (tA !== qB || tB !== qA) isRosterMatch = false;
+      }
+    }
+
     const isTargetQueue =
+      q.matchId === targetId ||
       q.matchId === canonicalId ||
       q.matchId === match.id ||
-      ((ma === ta && mb === tb) || (ma === tb && mb === ta));
+      isRosterMatch;
 
     if (isTargetQueue) {
       return {
         ...q,
-        matchId: canonicalId,
+        matchId: targetId,
         status: startImmediately ? ("live" as const) : ("dispatched" as const),
         assignedCourt: court,
       };
@@ -862,9 +940,11 @@ export function autoDispatchNext(court: FacilityCourt, tournamentSlug?: string, 
   const station = stations[court];
   const activeBracket = station?.activeBracket || "all";
 
-  const queue = getDispatchQueue();
+  const queue = reconcileDispatchQueue();
+  const currentMatches = getMatches();
   let pending = queue
     .filter((q) => q.status === "queued" || q.status === "on_deck")
+    .filter((q) => !isQueueItemFinished(q, currentMatches))
     .filter((q) => !tournamentSlug || !q.tournamentSlug || q.tournamentSlug === tournamentSlug)
     .filter((q) => isStageMatchingBracket(q.stage, activeBracket))
     .filter((q) => !checkSimultaneousPlayConflict(q.teamAName, q.teamAPlayers, q.tournamentSlug || tournamentSlug, q.teamAClub) && !checkSimultaneousPlayConflict(q.teamBName, q.teamBPlayers, q.tournamentSlug || tournamentSlug, q.teamBClub))
@@ -877,12 +957,14 @@ export function autoDispatchNext(court: FacilityCourt, tournamentSlug?: string, 
     const hasRemainingInDedicatedBracket = queue.some(
       (q) =>
         (q.status === "queued" || q.status === "on_deck") &&
+        !isQueueItemFinished(q, currentMatches) &&
         (!tournamentSlug || !q.tournamentSlug || q.tournamentSlug === tournamentSlug) &&
         isStageMatchingBracket(q.stage, activeBracket),
     );
     if (!hasRemainingInDedicatedBracket) {
       pending = queue
         .filter((q) => q.status === "queued" || q.status === "on_deck")
+        .filter((q) => !isQueueItemFinished(q, currentMatches))
         .filter((q) => !tournamentSlug || !q.tournamentSlug || q.tournamentSlug === tournamentSlug)
         .filter((q) => !checkSimultaneousPlayConflict(q.teamAName, q.teamAPlayers, q.tournamentSlug || tournamentSlug, q.teamAClub) && !checkSimultaneousPlayConflict(q.teamBName, q.teamBPlayers, q.tournamentSlug || tournamentSlug, q.teamBClub))
         .filter((q) => isMatchInSameBracket(q.tournamentSlug || tournamentSlug || "", q.categoryId || "", q.stage, q.teamAName, q.teamBName, undefined, undefined, q.teamAPlayers, q.teamBPlayers))
@@ -927,7 +1009,7 @@ export function setCourtLive(court: FacilityCourt, matchId?: string): void {
  * Any non-final match currently assigned to this court is unassigned back to "Queue",
  * and its dispatch queue status is returned to "queued".
  */
-export function vacateCourt(court: FacilityCourt): void {
+export async function vacateCourt(court: FacilityCourt): Promise<void> {
   const stations = getCourtStations();
   const currentMatchId = stations[court]?.currentMatchId;
   stations[court] = {
@@ -938,7 +1020,10 @@ export function vacateCourt(court: FacilityCourt): void {
     maintenanceNote: null,
   };
   saveCourtStations(stations, false);
-  dbUpdateCourtStation(court, {
+  markStationLocalWrite(court);
+
+  // Deterministically clear station in cloud first
+  await dbUpdateCourtStation(court, {
     status: "available",
     currentMatchId: null,
     dispatchedAt: null,
@@ -965,9 +1050,7 @@ export function vacateCourt(court: FacilityCourt): void {
   });
   if (matchesModified) {
     saveMatches(updatedMatches, false);
-    for (const vm of vacatedMatches) {
-      dbSaveMatch(vm).catch(() => {});
-    }
+    await Promise.all(vacatedMatches.map((vm) => dbSaveMatch(vm).catch(() => {})));
   }
 
   // Clear coin toss flag if present
@@ -1178,13 +1261,158 @@ export function reorderQueue(
 }
 
 /**
- * Marks a match in the dispatch queue as completed when finished.
+ * Determines whether a queued item represents a match that has already finished.
+ * Cross-references by exact match ID, or by normalized team names + stage/bracket.
  */
-export function completeQueueMatch(matchId: string): void {
+export function isQueueItemFinished(
+  q: QueueItem,
+  matchesList?: LiveMatch[],
+): boolean {
+  if (q.status === "completed") return true;
+
+  const matches = matchesList ?? getMatches();
+  const qa = q.teamAName?.trim().toLowerCase();
+  const qb = q.teamBName?.trim().toLowerCase();
+  if (!qa || !qb) return false;
+
+  return matches.some((m) => {
+    const isFinal = m.status === "final" || Boolean(m.winnerTeam) || Boolean(m.endedAt);
+    if (!isFinal) return false;
+
+    // 1. Direct ID match
+    if (m.id === q.matchId) return true;
+
+    // 2. Both teams match in either order
+    const ma = m.teamAName?.trim().toLowerCase();
+    const mb = m.teamBName?.trim().toLowerCase();
+    const sameTeams = (ma === qa && mb === qb) || (ma === qb && mb === qa);
+    if (!sameTeams) return false;
+
+    // Disambiguate when player rosters are available
+    const isNormal = ma === qa && mb === qb;
+    if (isNormal) {
+      if (q.teamAPlayers?.length && m.teamAPlayers?.length) {
+        const qA = [...q.teamAPlayers].map((p) => p.trim().toLowerCase()).sort().join(",");
+        const mA = [...m.teamAPlayers].map((p) => p.trim().toLowerCase()).sort().join(",");
+        if (qA !== mA) return false;
+      }
+      if (q.teamBPlayers?.length && m.teamBPlayers?.length) {
+        const qB = [...q.teamBPlayers].map((p) => p.trim().toLowerCase()).sort().join(",");
+        const mB = [...m.teamBPlayers].map((p) => p.trim().toLowerCase()).sort().join(",");
+        if (qB !== mB) return false;
+      }
+    } else {
+      if (q.teamAPlayers?.length && m.teamBPlayers?.length) {
+        const qA = [...q.teamAPlayers].map((p) => p.trim().toLowerCase()).sort().join(",");
+        const mB = [...m.teamBPlayers].map((p) => p.trim().toLowerCase()).sort().join(",");
+        if (qA !== mB) return false;
+      }
+      if (q.teamBPlayers?.length && m.teamAPlayers?.length) {
+        const qB = [...q.teamBPlayers].map((p) => p.trim().toLowerCase()).sort().join(",");
+        const mA = [...m.teamAPlayers].map((p) => p.trim().toLowerCase()).sort().join(",");
+        if (qB !== mA) return false;
+      }
+    }
+
+    // 3. Category match (if both have category specified)
+    if (q.categoryId && m.categoryId && !isSameCategory(q.categoryId, m.categoryId)) {
+      return false;
+    }
+
+    // 4. Tournament slug match (if both have slug specified)
+    if (q.tournamentSlug && m.tournamentSlug && q.tournamentSlug !== m.tournamentSlug) {
+      return false;
+    }
+
+    // 5. Stage alignment
+    const qStage = (q.stage || "").toLowerCase();
+    const mStage = (m.stage || "").toLowerCase();
+    const isQKnockout = /quarter|semi|final|playoff|bronze|gold|knockout/i.test(qStage);
+    const isMKnockout = /quarter|semi|final|playoff|bronze|gold|knockout/i.test(mStage);
+
+    if (isQKnockout !== isMKnockout) {
+      // Disallow mixing pool play matches with playoff matches
+      return false;
+    }
+
+    if (isQKnockout && isMKnockout) {
+      const qRoundMatch = qStage.match(/(quarterfinal\s*\d*|semifinal\s*\d*|final|bronze|gold)/i);
+      const mRoundMatch = mStage.match(/(quarterfinal\s*\d*|semifinal\s*\d*|final|bronze|gold)/i);
+      if (qRoundMatch?.[1] && mRoundMatch?.[1]) {
+        return qRoundMatch[1].replace(/\s+/g, "") === mRoundMatch[1].replace(/\s+/g, "");
+      }
+      return true;
+    }
+
+    // Pool play: compare bracket letter
+    const qBracket = qStage.match(/(?:bracket|pool)\s+([a-z0-9]+)/i);
+    const mBracket = mStage.match(/(?:bracket|pool)\s+([a-z0-9]+)/i) || (m.bracketLetter ? [null, m.bracketLetter] : null);
+    if (qBracket?.[1] && mBracket?.[1]) {
+      return qBracket[1].toUpperCase() === mBracket[1].toUpperCase();
+    }
+
+    return true;
+  });
+}
+
+/**
+ * Automatically audits the dispatch queue against confirmed live matches,
+ * marking any matches that have already concluded as completed.
+ */
+export function reconcileDispatchQueue(matchesInput?: LiveMatch[]): QueueItem[] {
+  const queue = getDispatchQueue();
+  const matches = matchesInput ?? getMatches();
+  let modified = false;
+
+  const updated = queue.map((q) => {
+    if (q.status === "completed") return q;
+
+    if (isQueueItemFinished(q, matches)) {
+      modified = true;
+      return {
+        ...q,
+        status: "completed" as const,
+        assignedCourt: null,
+      };
+    }
+    return q;
+  });
+
+  if (modified) {
+    saveDispatchQueue(updated);
+  }
+  return updated;
+}
+
+/**
+ * Marks a match in the dispatch queue as completed when finished.
+ * Supports exact matchId as well as matchup/stage matching.
+ */
+export function completeQueueMatch(
+  matchId: string,
+  teamAName?: string,
+  teamBName?: string,
+  stage?: string,
+): void {
   const queue = getDispatchQueue();
   let modified = false;
+  const qa = teamAName?.trim().toLowerCase();
+  const qb = teamBName?.trim().toLowerCase();
+  const s = stage?.trim().toLowerCase();
+
   const updated = queue.map((q) => {
-    if (q.matchId === matchId) {
+    let matchesItem = q.matchId === matchId;
+    if (!matchesItem && qa && qb) {
+      const ma = q.teamAName?.trim().toLowerCase();
+      const mb = q.teamBName?.trim().toLowerCase();
+      const sameTeams = (ma === qa && mb === qb) || (ma === qb && mb === qa);
+      if (sameTeams) {
+        if (!s || !q.stage || q.stage.toLowerCase() === s) {
+          matchesItem = true;
+        }
+      }
+    }
+    if (matchesItem && q.status !== "completed") {
       modified = true;
       return {
         ...q,
@@ -1946,8 +2174,9 @@ export function isMatchInCategory(
   },
   category: {
     id: string;
+    label?: string | undefined;
     category_slug?: string | undefined;
-    teams?: Array<{ id?: string | undefined; name: string }> | undefined;
+    teams?: Array<{ id?: string | undefined; name: string; players?: string[] | undefined }> | undefined;
   },
   tournamentSlug?: string | undefined,
 ): boolean {
@@ -1958,18 +2187,49 @@ export function isMatchInCategory(
     return false;
   }
 
-  // 2. Reject self-play (same team playing against itself)
+  // 2. Reject true self-play (same team and players playing against itself)
   const nameA = match.teamAName?.trim().toLowerCase();
   const nameB = match.teamBName?.trim().toLowerCase();
   if (nameA && nameB && nameA === nameB) {
-    return false;
+    const playersA = (match.teamAPlayers || []).map((p) => p.trim().toLowerCase()).sort().join(",");
+    const playersB = (match.teamBPlayers || []).map((p) => p.trim().toLowerCase()).sort().join(",");
+    if (playersA && playersB && playersA === playersB) {
+      return false;
+    }
+    if (!playersA && !playersB) {
+      return false;
+    }
   }
 
-  // 3. Reject if match ID explicitly belongs to another division/category
+  // 3. Reject if match categoryId explicitly belongs to another division/category
+  if (match.categoryId) {
+    const cleanMatchCat = match.categoryId.trim().toLowerCase();
+    const cleanCatId = category.id.trim().toLowerCase();
+    const cleanSlug = category.category_slug ? category.category_slug.trim().toLowerCase() : "";
+    const cleanUuid = (category as any).uuid ? (category as any).uuid.trim().toLowerCase() : "";
+
+    const isDirectMatch =
+      cleanMatchCat === cleanCatId ||
+      (cleanSlug && cleanMatchCat === cleanSlug) ||
+      (cleanUuid && cleanMatchCat === cleanUuid) ||
+      isSameCategory(match.categoryId, category.id) ||
+      ((category as any).uuid && isSameCategory(match.categoryId, (category as any).uuid)) ||
+      (category.category_slug && isSameCategory(match.categoryId, category.category_slug));
+
+    if (!isDirectMatch) {
+      return false;
+    }
+  }
+
+  // 4. Reject if match ID explicitly belongs to another division/category
   if (match.id) {
     const cleanMatchId = match.id.toLowerCase();
-    const isBegCat = category.id.toLowerCase().includes("beginner") || (category.category_slug && category.category_slug.toLowerCase().includes("beginner"));
-    const isNovCat = category.id.toLowerCase().includes("novice") || (category.category_slug && category.category_slug.toLowerCase().includes("novice"));
+    const catText = `${category.id} ${category.category_slug || ""} ${category.label || ""}`.toLowerCase();
+    const isBegCat = catText.includes("beginner");
+    const isNovCat = catText.includes("novice");
+    const isWomCat = catText.includes("women");
+    const isMenCat = catText.includes("men") && !catText.includes("women");
+    const isMixCat = catText.includes("mix");
 
     if (isBegCat && (cleanMatchId.includes("novice") || cleanMatchId.includes("womens"))) {
       return false;
@@ -1977,23 +2237,76 @@ export function isMatchInCategory(
     if (isNovCat && (cleanMatchId.includes("beginner") || cleanMatchId.includes("womens"))) {
       return false;
     }
+    if (isMenCat && (cleanMatchId.includes("womens") || cleanMatchId.includes("mixed"))) {
+      return false;
+    }
+    if (isMixCat && (cleanMatchId.includes("beginners-mens") || cleanMatchId.includes("novice-mens") || cleanMatchId.includes("womens"))) {
+      return false;
+    }
   }
 
-  // 4. Team roster membership: Both teams must belong to this category's roster!
-  if (category.teams && category.teams.length > 0 && nameA && nameB) {
-    const validTeamNames = new Set(category.teams.map((t) => t.name.trim().toLowerCase()));
+  // 5. Team roster membership: Both teams must belong to this category's roster!
+  let validTeamNames: Set<string> | null = null;
+  if (category.teams && category.teams.length > 0) {
+    validTeamNames = new Set(category.teams.map((t) => t.name.trim().toLowerCase()));
+  } else {
+    const drawn = getCachedDrawnGroups(tournamentSlug || match.tournamentSlug || "", category.id);
+    if (drawn && Array.isArray(drawn) && drawn.length > 0) {
+      validTeamNames = new Set();
+      for (const grp of drawn) {
+        for (const s of grp.slots || []) {
+          if (s.team?.name) validTeamNames.add(s.team.name.trim().toLowerCase());
+        }
+      }
+    }
+  }
+
+  if (validTeamNames && validTeamNames.size > 0 && nameA && nameB) {
     const hasA = validTeamNames.has(nameA);
     const hasB = validTeamNames.has(nameB);
     if (!hasA || !hasB) {
+      // If one team is a placeholder in a playoff bracket match
+      const isPlaceholderB = !nameB || nameB.includes("tbd") || nameB.includes("winner") || nameB.includes("bye");
+      const isPlaceholderA = !nameA || nameA.includes("tbd") || nameA.includes("winner") || nameA.includes("bye");
+      if ((hasA && isPlaceholderB) || (hasB && isPlaceholderA)) {
+        return true;
+      }
       return false;
+    }
+
+    // Disambiguate duplicate team names across categories using player rosters
+    if (category.teams && category.teams.length > 0) {
+      const checkTeamPlayers = (teamName: string, matchPlayers?: string[]) => {
+        if (!matchPlayers || matchPlayers.length === 0) return true;
+        const matchingTeams = category.teams!.filter(
+          (t) => t.name.trim().toLowerCase() === teamName,
+        );
+        if (matchingTeams.length === 0) return true;
+        const hasPlayersDefined = matchingTeams.some(
+          (t) => t.players && t.players.length > 0,
+        );
+        if (!hasPlayersDefined) return true;
+        const normMatchPlayers = new Set(
+          matchPlayers.map((p: string) => p.trim().toLowerCase()),
+        );
+        return matchingTeams.some((t) =>
+          ((t.players as string[] | undefined) || []).some((p: string) => normMatchPlayers.has(p.trim().toLowerCase())),
+        );
+      };
+
+      if (!checkTeamPlayers(nameA, match.teamAPlayers) || !checkTeamPlayers(nameB, match.teamBPlayers)) {
+        return false;
+      }
     }
 
     // 5. If it's a pool play bracket match, both teams must be in the exact same bracket
     if (match.stage && /(?:bracket|pool)\s+[a-z]/i.test(match.stage)) {
+      const idBracketLetter = match.id?.match(/[-_](?:bracket|b)[-_]?([a-h])\b/i)?.[1]?.toUpperCase();
+      const testStage = idBracketLetter ? `Bracket ${idBracketLetter} (Pool Play)` : match.stage;
       if (!isMatchInSameBracket(
         tournamentSlug || match.tournamentSlug || "",
         category.id,
-        match.stage,
+        testStage,
         match.teamAName,
         match.teamBName,
         undefined,
@@ -2012,14 +2325,33 @@ export function isMatchInCategory(
   if (match.categoryId) {
     const cleanMatchCat = match.categoryId.trim().toLowerCase();
     const cleanCatId = category.id.trim().toLowerCase();
-    if (cleanMatchCat === cleanCatId) return true;
-    if (category.category_slug && cleanMatchCat === category.category_slug.trim().toLowerCase()) return true;
+    if (cleanMatchCat === cleanCatId || (category.category_slug && cleanMatchCat === category.category_slug.trim().toLowerCase())) {
+      if (match.stage && /(?:bracket|pool)\s+[a-z]/i.test(match.stage)) {
+        if (!isMatchInSameBracket(tournamentSlug || match.tournamentSlug || "", category.id, match.stage, match.teamAName, match.teamBName, undefined, undefined, match.teamAPlayers, match.teamBPlayers)) {
+          return false;
+        }
+      }
+      return true;
+    }
   }
 
   if (match.id) {
     const cleanMatchId = match.id.toLowerCase();
-    if (cleanMatchId.includes(category.id.toLowerCase())) return true;
-    if (category.category_slug && cleanMatchId.includes(category.category_slug.toLowerCase())) return true;
+    let idMatched = false;
+    if (cleanMatchId.includes(category.id.toLowerCase())) idMatched = true;
+    if (category.category_slug && cleanMatchId.includes(category.category_slug.toLowerCase())) idMatched = true;
+    if (category.label) {
+      const slugFromLabel = category.label.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+      if (slugFromLabel && cleanMatchId.includes(slugFromLabel)) idMatched = true;
+    }
+    if (idMatched) {
+      if (match.stage && /(?:bracket|pool)\s+[a-z]/i.test(match.stage)) {
+        if (!isMatchInSameBracket(tournamentSlug || match.tournamentSlug || "", category.id, match.stage, match.teamAName, match.teamBName, undefined, undefined, match.teamAPlayers, match.teamBPlayers)) {
+          return false;
+        }
+      }
+      return true;
+    }
   }
 
   return false;
@@ -2041,6 +2373,7 @@ export function isQueueItemInCategory(
   },
   category: {
     id: string;
+    label?: string | undefined;
     category_slug?: string | undefined;
     teams?: Array<{ id?: string | undefined; name: string }> | undefined;
   },
@@ -2052,21 +2385,57 @@ export function isQueueItemInCategory(
     return false;
   }
 
+  if (item.categoryId) {
+    const cleanItemCat = item.categoryId.trim().toLowerCase();
+    const cleanCatId = category.id.trim().toLowerCase();
+    const cleanSlug = category.category_slug ? category.category_slug.trim().toLowerCase() : "";
+    const cleanUuid = (category as any).uuid ? (category as any).uuid.trim().toLowerCase() : "";
+
+    const isDirectMatch =
+      cleanItemCat === cleanCatId ||
+      (cleanSlug && cleanItemCat === cleanSlug) ||
+      (cleanUuid && cleanItemCat === cleanUuid) ||
+      isSameCategory(item.categoryId, category.id) ||
+      ((category as any).uuid && isSameCategory(item.categoryId, (category as any).uuid)) ||
+      (category.category_slug && isSameCategory(item.categoryId, category.category_slug));
+
+    if (!isDirectMatch) {
+      return false;
+    }
+  }
+
   const nameA = item.teamAName?.trim().toLowerCase();
   const nameB = item.teamBName?.trim().toLowerCase();
   if (nameA && nameB && nameA === nameB) {
-    return false;
+    const playersA = (item.teamAPlayers || []).map((p) => p.trim().toLowerCase()).sort().join(",");
+    const playersB = (item.teamBPlayers || []).map((p) => p.trim().toLowerCase()).sort().join(",");
+    if (playersA && playersB && playersA === playersB) {
+      return false;
+    }
+    if (!playersA && !playersB) {
+      return false;
+    }
   }
 
   if (item.matchId) {
     const cleanMatchId = item.matchId.toLowerCase();
-    const isBegCat = category.id.toLowerCase().includes("beginner") || (category.category_slug && category.category_slug.toLowerCase().includes("beginner"));
-    const isNovCat = category.id.toLowerCase().includes("novice") || (category.category_slug && category.category_slug.toLowerCase().includes("novice"));
+    const catText = `${category.id} ${category.category_slug || ""} ${category.label || ""}`.toLowerCase();
+    const isBegCat = catText.includes("beginner");
+    const isNovCat = catText.includes("novice");
+    const isWomCat = catText.includes("women");
+    const isMenCat = catText.includes("men") && !catText.includes("women");
+    const isMixCat = catText.includes("mix");
 
     if (isBegCat && (cleanMatchId.includes("novice") || cleanMatchId.includes("womens"))) {
       return false;
     }
     if (isNovCat && (cleanMatchId.includes("beginner") || cleanMatchId.includes("womens"))) {
+      return false;
+    }
+    if (isMenCat && (cleanMatchId.includes("womens") || cleanMatchId.includes("mixed"))) {
+      return false;
+    }
+    if (isMixCat && (cleanMatchId.includes("beginners-mens") || cleanMatchId.includes("novice-mens") || cleanMatchId.includes("womens"))) {
       return false;
     }
   }
@@ -2076,14 +2445,21 @@ export function isQueueItemInCategory(
     const hasA = validTeamNames.has(nameA);
     const hasB = validTeamNames.has(nameB);
     if (!hasA || !hasB) {
+      const isPlaceholderB = !nameB || nameB.includes("tbd") || nameB.includes("winner") || nameB.includes("bye");
+      const isPlaceholderA = !nameA || nameA.includes("tbd") || nameA.includes("winner") || nameA.includes("bye");
+      if ((hasA && isPlaceholderB) || (hasB && isPlaceholderA)) {
+        return true;
+      }
       return false;
     }
 
     if (item.stage && /(?:bracket|pool)\s+[a-z]/i.test(item.stage)) {
+      const idBracketLetter = item.matchId?.match(/[-_](?:bracket|b)[-_]?([a-h])\b/i)?.[1]?.toUpperCase();
+      const testStage = idBracketLetter ? `Bracket ${idBracketLetter} (Pool Play)` : item.stage;
       if (!isMatchInSameBracket(
         tournamentSlug || item.tournamentSlug || "",
         category.id,
-        item.stage,
+        testStage,
         item.teamAName,
         item.teamBName,
         undefined,
@@ -2101,14 +2477,33 @@ export function isQueueItemInCategory(
   if (item.categoryId) {
     const cleanItemCat = item.categoryId.trim().toLowerCase();
     const cleanCatId = category.id.trim().toLowerCase();
-    if (cleanItemCat === cleanCatId) return true;
-    if (category.category_slug && cleanItemCat === category.category_slug.trim().toLowerCase()) return true;
+    if (cleanItemCat === cleanCatId || (category.category_slug && cleanItemCat === category.category_slug.trim().toLowerCase())) {
+      if (item.stage && /(?:bracket|pool)\s+[a-z]/i.test(item.stage)) {
+        if (!isMatchInSameBracket(tournamentSlug || item.tournamentSlug || "", category.id, item.stage, item.teamAName, item.teamBName, undefined, undefined, item.teamAPlayers, item.teamBPlayers)) {
+          return false;
+        }
+      }
+      return true;
+    }
   }
 
   if (item.matchId) {
     const cleanMatchId = item.matchId.toLowerCase();
-    if (cleanMatchId.includes(category.id.toLowerCase())) return true;
-    if (category.category_slug && cleanMatchId.includes(category.category_slug.toLowerCase())) return true;
+    let idMatched = false;
+    if (cleanMatchId.includes(category.id.toLowerCase())) idMatched = true;
+    if (category.category_slug && cleanMatchId.includes(category.category_slug.toLowerCase())) idMatched = true;
+    if (category.label) {
+      const slugFromLabel = category.label.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+      if (slugFromLabel && cleanMatchId.includes(slugFromLabel)) idMatched = true;
+    }
+    if (idMatched) {
+      if (item.stage && /(?:bracket|pool)\s+[a-z]/i.test(item.stage)) {
+        if (!isMatchInSameBracket(tournamentSlug || item.tournamentSlug || "", category.id, item.stage, item.teamAName, item.teamBName, undefined, undefined, item.teamAPlayers, item.teamBPlayers)) {
+          return false;
+        }
+      }
+      return true;
+    }
   }
 
   return false;
@@ -2156,28 +2551,64 @@ export function findMatchForCourtStation(
   court: FacilityCourt,
   station: CourtStation | undefined,
   matches: LiveMatch[],
+  categoryId?: string,
 ): LiveMatch | null {
   if (!station) return null;
 
-  // 1. If station has an assigned match ID, find by exact ID or fuzzy matching
+  // Helper to ensure a match has non-empty teams and is not final
+  const isValidActiveMatch = (m: LiveMatch | undefined | null): m is LiveMatch => {
+    if (!m) return false;
+    if (m.status === "final" || Boolean(m.winnerTeam) || Boolean(m.endedAt)) return false;
+    const a = m.teamAName?.trim();
+    const b = m.teamBName?.trim();
+    if (!a || !b || a.toLowerCase() === b.toLowerCase()) return false;
+    return true;
+  };
+
+  // 1. If station is available, idle, or in maintenance, it NEVER has an active match.
+  const stStatus = station.status as string;
+  if (stStatus === "available" || stStatus === "idle" || stStatus === "maintenance") {
+    return null;
+  }
+
+  // 2. Strict Station-First Lookup:
   if (station.currentMatchId) {
-    const direct = matches.find((m) => m.id === station.currentMatchId && m.status !== "final");
-    if (direct) return direct;
+    // 2.1 First, strictly return matches.find(m => m.id === station.currentMatchId)
+    const exactMatch = matches.find((m) => m.id === station.currentMatchId && isValidActiveMatch(m));
+    if (exactMatch) return exactMatch;
 
-    const matching = matches.find(
-      (m) => m.status !== "final" && isMatchMatchingStation(m, station.currentMatchId, court),
+    // 2.2 Only if station.currentMatchId is not found by exact ID, check isMatchMatchingStation
+    const matchingStation = matches.find(
+      (m) => isValidActiveMatch(m) && isMatchMatchingStation(m, station.currentMatchId, court)
     );
-    if (matching) return matching;
+    if (matchingStation) return matchingStation;
+
+    // Never return a stale/zombie match with empty teamAName/teamBName, and never let
+    // an old match with m.court === court override the match specified by station.currentMatchId.
+    return null;
   }
 
-  // 2. If station is explicitly active (live or warmup), check for an active match assigned to this court
+  // 3. Fallback ONLY if station is explicitly active (live or warmup) and station.currentMatchId is NOT set:
   if (station.status === "live" || station.status === "warmup") {
-    const active = matches.find((m) => m.court === court && (m.status === "live" || m.status === "scheduled"));
-    if (active) return active;
+    const liveMatch = matches.find(
+      (m) =>
+        m.court === court &&
+        m.status === "live" &&
+        isValidActiveMatch(m) &&
+        (!categoryId || !m.categoryId || isSameCategory(m.categoryId, categoryId)),
+    );
+    if (liveMatch) return liveMatch;
+
+    const warmupMatch = matches.find(
+      (m) =>
+        m.court === court &&
+        m.status === "scheduled" &&
+        isValidActiveMatch(m) &&
+        (!categoryId || !m.categoryId || isSameCategory(m.categoryId, categoryId)),
+    );
+    if (warmupMatch) return warmupMatch;
   }
 
-  // 3. If station is available, maintenance, or idle, it has NO active match.
-  // Never pull a random scheduled match just because its court property matches.
   return null;
 }
 
@@ -2190,8 +2621,13 @@ export function isConfirmedDispatchedMatch(
   const currentStations = stations ?? getCourtStations();
   for (const c of FACILITY_COURTS) {
     const st = currentStations[c];
-    if (st?.currentMatchId === m.id || (st?.currentMatchId && isMatchMatchingStation(m, st.currentMatchId, c))) return true;
-    if (st?.onDeckMatchId === m.id) return true;
+    if (!st) continue;
+    // Station must be actively occupied (warmup or live) to confirm a non-final match
+    if (st.status === "warmup" || st.status === "live") {
+      if (st.currentMatchId === m.id) return true;
+      if (st.currentMatchId && isMatchMatchingStation(m, st.currentMatchId, c)) return true;
+    }
+    if (st.onDeckMatchId === m.id) return true;
   }
 
   if (
@@ -2200,12 +2636,13 @@ export function isConfirmedDispatchedMatch(
     (FACILITY_COURTS as readonly string[]).includes(m.court as FacilityCourt)
   ) {
     const st = currentStations[m.court as FacilityCourt];
-    // Reject only if station is explicitly occupied by a different active matchup
-    if (st?.currentMatchId && st.currentMatchId !== m.id && !isMatchMatchingStation(m, st.currentMatchId, m.court)) {
-      return false;
-    }
-    if (m.status === "live" || m.status === "scheduled") {
-      return true;
+    if (st && (st.status === "warmup" || st.status === "live")) {
+      if (st.currentMatchId === m.id || (st.currentMatchId && isMatchMatchingStation(m, st.currentMatchId, m.court))) {
+        return true;
+      }
+      if ((m.status === "live" || m.status === "scheduled") && !st.currentMatchId) {
+        return true;
+      }
     }
   }
 

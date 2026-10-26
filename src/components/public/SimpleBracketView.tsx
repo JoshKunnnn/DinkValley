@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Category, Team } from "@/data/tournaments";
-import { findLiveMatchForTeams, generateBalancedRoundRobinPairs, type LiveMatch } from "@/lib/match-store";
+import {
+  findLiveMatchForTeams,
+  generateBalancedRoundRobinPairs,
+  createCategoryScopedMatchId,
+  type LiveMatch,
+} from "@/lib/match-store";
 import type { BracketGroup } from "@/components/admin/BracketDraw";
 import type { KnockoutMatch } from "@/components/admin/DrawsManager";
 import { UpNextSlider } from "./UpNextSlider";
@@ -253,7 +258,12 @@ export function SimpleBracketView({
           (ct) => ct.id === b.id || ct.name.toLowerCase() === b.name.toLowerCase()
         ) || b;
 
-      const live = findLiveMatchForTeams(matches, a.name, b.name);
+      const scopedMatchId = (a.id && b.id)
+        ? createCategoryScopedMatchId(category.id, currentGroup.letter, a.id, b.id)
+        : null;
+      const live =
+        (scopedMatchId ? matches.find((m) => m.id === scopedMatchId) : null) ||
+        findLiveMatchForTeams(matches, a.name, b.name);
       const flipped = live ? live.teamAName !== a.name : false;
       const scoreA = live ? (flipped ? live.score.teamBScore : live.score.teamAScore) : 0;
       const scoreB = live ? (flipped ? live.score.teamAScore : live.score.teamBScore) : 0;
@@ -290,7 +300,7 @@ export function SimpleBracketView({
       }
 
       items.push({
-        key: `${currentGroup.letter}-${a.id}-${b.id}-${pIdx}`,
+        key: scopedMatchId || `${currentGroup.letter}-${a.id}-${b.id}-${pIdx}`,
         teamAName: a.name,
         teamBName: b.name,
         teamA: teamAModel,
@@ -306,7 +316,7 @@ export function SimpleBracketView({
 
     const sortedStandings = [...tableMap.values()].sort((x, y) => y.w - x.w || y.pd - x.pd);
     return { matchItems: items, standings: sortedStandings, roundsMap: new Map() };
-  }, [currentSection, groups, matches, mainDrawMatches]);
+  }, [currentSection, groups, matches, mainDrawMatches, category]);
 
   if (sections.length === 0 || !currentSection) {
     const teamCount = category.teams?.length ?? 0;

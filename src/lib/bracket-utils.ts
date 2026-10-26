@@ -118,8 +118,18 @@ export function isMatchInSameBracket(
   }
 
   for (const groups of allCandidateGroups) {
+    // 0. If this category has drawn groups, verify that the bracket letter exists in this draw
+    const hasGroupWithLetter = groups.some(
+      (g: any) => (g.letter || g.bracketLetter)?.toUpperCase() === bracketLetter,
+    );
+    if (!hasGroupWithLetter) {
+      return false;
+    }
+
     // 1. Check target group directly
-    const targetGroup = groups.find((g: any) => g.letter?.toUpperCase() === bracketLetter);
+    const targetGroup = groups.find(
+      (g: any) => (g.letter || g.bracketLetter)?.toUpperCase() === bracketLetter,
+    );
     if (targetGroup && Array.isArray(targetGroup.slots)) {
       const hasA = targetGroup.slots.some((s: any) => isSlotMatch(s, cleanA, teamAId, teamAPlayers));
       const hasB = targetGroup.slots.some((s: any) => isSlotMatch(s, cleanB, teamBId, teamBPlayers));
@@ -129,26 +139,8 @@ export function isMatchInSameBracket(
         return true;
       }
 
-      // If one team is definitely in target bracket, but other is in a different bracket of this draw
-      if (hasA && !hasB) {
-        const bInOther = groups.some(
-          (g: any) =>
-            g.letter?.toUpperCase() !== bracketLetter &&
-            Array.isArray(g.slots) &&
-            g.slots.some((s: any) => isSlotMatch(s, cleanB, teamBId, teamBPlayers))
-        );
-        if (bInOther) return false;
-      }
-
-      if (hasB && !hasA) {
-        const aInOther = groups.some(
-          (g: any) =>
-            g.letter?.toUpperCase() !== bracketLetter &&
-            Array.isArray(g.slots) &&
-            g.slots.some((s: any) => isSlotMatch(s, cleanA, teamAId, teamAPlayers))
-        );
-        if (aInOther) return false;
-      }
+      // If either team is not in this bracket of the active draw, this is not a valid match for this bracket
+      return false;
     }
 
     // 2. Check if both teams belong together in a different bracket of this draw

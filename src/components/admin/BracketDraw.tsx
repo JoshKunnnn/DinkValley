@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import type { Team, Tournament, Category } from "@/data/tournaments";
-import { syncDrawnBracketsToLiveMatches, purgeMatchesForCategory, createPairMatchId } from "@/lib/match-store";
+import { syncDrawnBracketsToLiveMatches, purgeMatchesForCategory, createPairMatchId, createCategoryScopedMatchId } from "@/lib/match-store";
 import { bulkSetTeamsInCategory, deleteAllTeamsInCategory, getTournaments } from "@/lib/tournament-store";
 import { generateMockTeams, generate32Teams } from "@/lib/team-generator";
 import { addMatchesToQueue, purgeQueueForCategory, getDispatchQueue } from "@/lib/court-dispatch";
@@ -122,17 +122,19 @@ export function saveDrawnGroups(
           const isDupA = (nameCounts.get(teamA.name.trim().toLowerCase()) || 0) > 1;
           const isDupB = (nameCounts.get(teamB.name.trim().toLowerCase()) || 0) > 1;
 
-          const matchId = createPairMatchId(
-            tournamentSlug,
-            categoryId,
-            `Bracket ${group.letter}`,
-            teamA.name,
-            teamB.name,
-            teamA.players,
-            teamB.players,
-            isDupA,
-            isDupB,
-          );
+          const matchId = (teamA.id && teamB.id)
+            ? createCategoryScopedMatchId(categoryId, group.letter, teamA.id, teamB.id)
+            : createPairMatchId(
+                tournamentSlug,
+                categoryId,
+                `Bracket ${group.letter}`,
+                teamA.name,
+                teamB.name,
+                teamA.players,
+                teamB.players,
+                isDupA,
+                isDupB,
+              );
           const aKey = teamA.id || `${teamA.name}-${(teamA.players || []).join(",")}`.toLowerCase();
           const bKey = teamB.id || `${teamB.name}-${(teamB.players || []).join(",")}`.toLowerCase();
 

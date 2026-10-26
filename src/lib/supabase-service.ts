@@ -129,7 +129,19 @@ export async function dbGetDrawnGroups(tournamentSlug: string, categoryId: strin
 }
 
 export function getCachedMainDraw(tournamentSlug: string, categoryId: string): any[] | null {
-  return _mainDrawCache.get(`${tournamentSlug}_${categoryId}`) || null;
+  const direct = _mainDrawCache.get(`${tournamentSlug}_${categoryId}`);
+  if (direct && Array.isArray(direct) && direct.length > 0) return direct;
+
+  for (const [key, val] of _mainDrawCache.entries()) {
+    if (key.startsWith(`${tournamentSlug}_`) && Array.isArray(val) && val.length > 0) {
+      const suffix = key.replace(`${tournamentSlug}_`, "").toLowerCase();
+      const target = (categoryId || "").toLowerCase();
+      if (suffix === target || target.includes(suffix) || suffix.includes(target)) {
+        return val;
+      }
+    }
+  }
+  return null;
 }
 
 export function getCachedDispatchQueue(): any[] {
@@ -262,6 +274,17 @@ export async function dbGetTournaments(): Promise<Tournament[] | null> {
           paymentStatus: (tm.paymentStatus as Team["paymentStatus"]) || "Verified",
         }));
 
+        if (c.id) {
+          const catSlug = c.category_slug || c.id;
+          _categorySlugByUuid.set(c.id, catSlug);
+          _categoryUuidBySlug.set(c.id, c.id);
+          _categoryUuidBySlug.set(catSlug, c.id);
+          _categoryUuidBySlug.set(catSlug.toLowerCase(), c.id);
+          const teamNames = new Set(allTeams.map((tm) => tm.name.trim().toLowerCase()));
+          _categoryTeamsMap.set(c.id, teamNames);
+          _categoryTeamsMap.set(catSlug.toLowerCase(), teamNames);
+        }
+
         const savedMaxEntries =
           c.max_entries ||
           c.max_teams ||
@@ -271,6 +294,8 @@ export async function dbGetTournaments(): Promise<Tournament[] | null> {
 
         return {
           id: c.category_slug || c.id,
+          uuid: c.id,
+          category_slug: c.category_slug || c.id,
           label: c.label,
           level: c.level as Category["level"],
           division: c.division as Category["division"],
@@ -566,29 +591,38 @@ export async function dbDeleteTeam(teamId: string): Promise<boolean> {
  */
 export async function dbDeleteMatchesForCategory(
   tournamentSlug: string,
-  categoryId: string
+  categoryId: string,
+  purgeFinalMatches = false,
 ): Promise<boolean> {
   try {
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     let targetCatUuid = isUuid.test(categoryId) ? categoryId : null;
+    let targetCatSlug = isUuid.test(categoryId) ? null : categoryId;
 
-    if (!targetCatUuid) {
+    if (!targetCatUuid || !targetCatSlug) {
       const { data: catRow } = await supabase
         .from("categories")
-        .select("id")
-        .eq("category_slug", categoryId)
+        .select("id, category_slug")
+        .or(`id.eq.${categoryId},category_slug.eq.${categoryId}`)
         .maybeSingle();
-      if (catRow?.id) {
+      if (catRow) {
         targetCatUuid = catRow.id;
+        targetCatSlug = catRow.category_slug;
       }
     }
 
-    let query = supabase.from("matches").delete().neq("status", "final");
+    let query = supabase.from("matches").delete();
+    if (!purgeFinalMatches) {
+      query = query.neq("status", "final");
+    }
     if (tournamentSlug) {
       query = query.eq("tournament_slug", tournamentSlug);
     }
     if (targetCatUuid) {
       query = query.eq("category_id", targetCatUuid);
+    } else {
+      console.warn("[Supabase] Could not resolve category UUID for:", categoryId);
+      return false;
     }
 
     const { error } = await query;
@@ -651,6 +685,24 @@ export async function dbGetMatches(tournamentSlug?: string): Promise<LiveMatch[]
           rallies: Array.isArray(m.rallies) ? (m.rallies as any) : [],
         };
 
+        const resolvedCat =
+          m.category_id ||
+          resolveCategoryUuidForMatch(
+            {
+              id: m.id,
+              categoryId: undefined,
+              teamAName: m.team_a_name,
+              teamBName: m.team_b_name,
+            },
+            m.tournament_id
+          );
+
+        // Normalize categoryId to frontend category slug if available, otherwise keep resolvedCat
+        const catSlug = (resolvedCat && _categorySlugByUuid.get(resolvedCat)) || resolvedCat;
+
+        const isFinal = m.status === "final" || Boolean(m.winner_team) || Boolean(m.ended_at);
+        const status: LiveMatch["status"] = isFinal ? "final" : (m.status as LiveMatch["status"]);
+
         return {
           id: m.id,
           court: m.court,
@@ -658,14 +710,14 @@ export async function dbGetMatches(tournamentSlug?: string): Promise<LiveMatch[]
           teamAPlayers: m.team_a_players || [],
           teamBName: m.team_b_name,
           teamBPlayers: m.team_b_players || [],
-          status: m.status as LiveMatch["status"],
+          status,
           score,
           winnerTeam: m.winner_team || undefined,
           startedAt: m.started_at ? new Date(m.started_at).getTime() : undefined,
           endedAt: m.ended_at ? new Date(m.ended_at).getTime() : undefined,
           officiatedBy: m.officiated_by || undefined,
           tournamentSlug: m.tournament_slug || tournamentSlug || undefined,
-          categoryId: m.category_id || undefined,
+          categoryId: catSlug || undefined,
           stage: m.stage || undefined,
         };
       });
@@ -682,9 +734,15 @@ export async function dbGetMatches(tournamentSlug?: string): Promise<LiveMatch[]
           byPair.set(m.id, m);
           continue;
         }
-        const pair = [m.teamAName.trim().toLowerCase(), m.teamBName.trim().toLowerCase()].sort().join("::");
-        const bracket = (m.stage || "").match(/(?:bracket|pool)\s*([a-z])/i)?.[1]?.toLowerCase() || "pool";
-        const key = `${m.tournamentSlug || "event"}::${m.categoryId || "division"}::${bracket}::${pair}`;
+        const pA = (m.teamAPlayers || []).map((p) => p.trim().toLowerCase().replace(/[^a-z0-9]/g, "")).filter(Boolean).sort().join(",");
+        const pB = (m.teamBPlayers || []).map((p) => p.trim().toLowerCase().replace(/[^a-z0-9]/g, "")).filter(Boolean).sort().join(",");
+        const nameA = pA ? `${m.teamAName.trim().toLowerCase()}[${pA}]` : m.teamAName.trim().toLowerCase();
+        const nameB = pB ? `${m.teamBName.trim().toLowerCase()}[${pB}]` : m.teamBName.trim().toLowerCase();
+        const pair = [nameA, nameB].sort().join("::");
+        const bracket = (m.stage || "").match(/(?:bracket|pool)\s*([a-z])/i)?.[1]?.toLowerCase() || (m.bracketLetter ? m.bracketLetter.toLowerCase() : "pool");
+        const key = m.id.startsWith("match_")
+          ? m.id
+          : `${m.tournamentSlug || "event"}::${m.categoryId || "division"}::${bracket}::${pair}`;
 
         if (!byPair.has(key)) {
           byPair.set(key, m);
@@ -740,13 +798,119 @@ const _tourneyIdBySlug = new Map<string, string>();
 const _lastSavedMatchHash = new Map<string, string>();
 const _inFlightMatchSaves = new Map<string, Promise<boolean>>();
 
+export const _categoryUuidBySlug = new Map<string, string>();
+export const _categorySlugByUuid = new Map<string, string>();
+export const _categoryTeamsMap = new Map<string, Set<string>>();
+
+export function ensureCategoryMapsInitialized(): void {
+  if (_categorySlugByUuid.size > 0 || typeof localStorage === "undefined") return;
+  try {
+    const raw = localStorage.getItem("dv_tournaments");
+    if (!raw) return;
+    const tourneys = JSON.parse(raw);
+    if (!Array.isArray(tourneys)) return;
+    for (const t of tourneys) {
+      if (!t?.categories || !Array.isArray(t.categories)) continue;
+      for (const c of t.categories) {
+        if (!c) continue;
+        const catUuid = c.uuid || (c.id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(c.id) ? c.id : undefined);
+        const catSlug = c.category_slug || c.id;
+        if (catUuid && catSlug) {
+          _categorySlugByUuid.set(catUuid, catSlug);
+          _categorySlugByUuid.set(catUuid.toLowerCase(), catSlug);
+          _categoryUuidBySlug.set(catUuid, catUuid);
+          _categoryUuidBySlug.set(catSlug, catUuid);
+          _categoryUuidBySlug.set(catSlug.toLowerCase(), catUuid);
+        }
+        if (c.teams && Array.isArray(c.teams)) {
+          const names = new Set<string>(c.teams.map((tm: any) => tm?.name?.trim().toLowerCase()).filter(Boolean));
+          if (catUuid) _categoryTeamsMap.set(catUuid, names);
+          if (catSlug) _categoryTeamsMap.set(catSlug.toLowerCase(), names);
+        }
+      }
+    }
+  } catch {}
+}
+
+export function resolveCategoryUuidForMatch(
+  match: { categoryId?: string | null | undefined; id?: string | undefined; teamAName?: string | undefined; teamBName?: string | undefined },
+  _tourneyId?: string | null | undefined
+): string | null {
+  ensureCategoryMapsInitialized();
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (match.categoryId && isUuid.test(match.categoryId)) {
+    return match.categoryId;
+  }
+  if (match.categoryId) {
+    const fromSlug = _categoryUuidBySlug.get(match.categoryId.trim().toLowerCase());
+    if (fromSlug) return fromSlug;
+  }
+  // Check match ID substrings
+  if (match.id) {
+    const idLower = match.id.toLowerCase();
+    for (const [slug, uuid] of _categoryUuidBySlug.entries()) {
+      if (slug && idLower.includes(slug.toLowerCase())) {
+        return uuid;
+      }
+    }
+  }
+  // Check team names against category rosters
+  if (match.teamAName && match.teamBName) {
+    const ta = match.teamAName.trim().toLowerCase();
+    const tb = match.teamBName.trim().toLowerCase();
+    for (const [catUuid, teamSet] of _categoryTeamsMap.entries()) {
+      if (teamSet.has(ta) && teamSet.has(tb)) {
+        return catUuid;
+      }
+    }
+  }
+  return null;
+}
+
+export function isSameCategory(catA?: string | null, catB?: string | null): boolean {
+  if (!catA || !catB) return false;
+  ensureCategoryMapsInitialized();
+  const a = catA.trim().toLowerCase();
+  const b = catB.trim().toLowerCase();
+  if (a === b) return true;
+
+  const slugFromA = _categorySlugByUuid.get(catA) || _categorySlugByUuid.get(a);
+  if (slugFromA && slugFromA.toLowerCase() === b) return true;
+
+  const slugFromB = _categorySlugByUuid.get(catB) || _categorySlugByUuid.get(b);
+  if (slugFromB && slugFromB.toLowerCase() === a) return true;
+
+  const uuidFromA = _categoryUuidBySlug.get(catA) || _categoryUuidBySlug.get(a);
+  if (uuidFromA && uuidFromA.toLowerCase() === b) return true;
+
+  const uuidFromB = _categoryUuidBySlug.get(catB) || _categoryUuidBySlug.get(b);
+  if (uuidFromB && uuidFromB.toLowerCase() === a) return true;
+
+  if (uuidFromA && uuidFromB && uuidFromA.toLowerCase() === uuidFromB.toLowerCase()) return true;
+  if (slugFromA && slugFromB && slugFromA.toLowerCase() === slugFromB.toLowerCase()) return true;
+
+  // Prefix matching for duplicated slugs (e.g. novice-mixed vs novice-mixed-novice-mixed-doubles)
+  const isUuidA = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(a);
+  const isUuidB = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(b);
+  if (!isUuidA && !isUuidB) {
+    const normA = a.replace(/[^a-z0-9]/g, "");
+    const normB = b.replace(/[^a-z0-9]/g, "");
+    if (normA.startsWith(normB) || normB.startsWith(normA)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function getMatchFingerprint(m: LiveMatch, slug?: string): string {
   return `${m.id}|${slug || m.tournamentSlug || ""}|${m.categoryId || ""}|${m.court || ""}|${m.status}|${m.score?.teamAScore}|${m.score?.teamBScore}|${m.score?.servingTeam}|${m.score?.serverNumber}|${m.winnerTeam || ""}|${m.startedAt || 0}|${m.endedAt || 0}|${m.officiatedBy || ""}`;
 }
 
 function formatMatchRow(match: LiveMatch, tourneyId: string | null, slug: string | null) {
-  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  const catId = match.categoryId && isUuid.test(match.categoryId) ? match.categoryId : null;
+  const catId = resolveCategoryUuidForMatch(match, tourneyId);
+  const isFinal = match.status === "final" || Boolean(match.winnerTeam) || Boolean(match.endedAt);
+  const effectiveStatus = isFinal ? "final" : match.status;
 
   return {
     id: match.id,
@@ -759,7 +923,7 @@ function formatMatchRow(match: LiveMatch, tourneyId: string | null, slug: string
     team_a_players: match.teamAPlayers,
     team_b_name: match.teamBName,
     team_b_players: match.teamBPlayers,
-    status: match.status,
+    status: effectiveStatus,
     team_a_score: match.score.teamAScore,
     team_b_score: match.score.teamBScore,
     serving_team: match.score.servingTeam,
@@ -889,6 +1053,8 @@ if (typeof window !== "undefined") {
 
 const _pendingMatchSaves = new Map<string, { match: LiveMatch; tournamentSlug?: string | undefined }>();
 
+export const dbUpsertMatch = (match: LiveMatch, tournamentSlug?: string) => dbSaveMatch(match, tournamentSlug);
+
 export async function dbSaveMatch(
   match: LiveMatch,
   tournamentSlug?: string
@@ -988,6 +1154,60 @@ export async function dbDeleteMatch(matchId: string): Promise<boolean> {
     const { error } = await supabase.from("matches").delete().eq("id", matchId);
     return !error;
   } catch {
+    return false;
+  }
+}
+
+/**
+ * Delete a batch of matches from Supabase by ID.
+ * Batched in chunks to prevent URL limit issues.
+ */
+export async function dbDeleteMatchesBatch(matchIds: string[]): Promise<boolean> {
+  if (!matchIds || matchIds.length === 0) return true;
+  try {
+    const cleanIds = Array.from(new Set(matchIds.filter(Boolean)));
+    const chunkSize = 50;
+    for (let i = 0; i < cleanIds.length; i += chunkSize) {
+      const chunk = cleanIds.slice(i, i + chunkSize);
+      const { error } = await supabase.from("matches").delete().in("id", chunk);
+      if (error) {
+        console.warn("[Supabase] Batch delete matches error:", error.message);
+      }
+    }
+    return true;
+  } catch (err) {
+    console.warn("[Supabase] Unexpected error in batch delete matches:", err);
+    return false;
+  }
+}
+
+/**
+ * Delete all matches for a specific team matchup in a tournament from Supabase.
+ * Checks both team order directions (Team A vs Team B, and Team B vs Team A).
+ */
+export async function dbDeleteMatchesForPair(
+  tournamentSlug: string,
+  teamAName: string,
+  teamBName: string,
+): Promise<boolean> {
+  try {
+    const ta = teamAName.trim();
+    const tb = teamBName.trim();
+    if (!ta || !tb) return false;
+
+    // Delete forward order (team_a = ta AND team_b = tb)
+    let q1 = supabase.from("matches").delete().eq("team_a_name", ta).eq("team_b_name", tb);
+    if (tournamentSlug) q1 = q1.eq("tournament_slug", tournamentSlug);
+    await q1;
+
+    // Delete reverse order (team_a = tb AND team_b = ta)
+    let q2 = supabase.from("matches").delete().eq("team_a_name", tb).eq("team_b_name", ta);
+    if (tournamentSlug) q2 = q2.eq("tournament_slug", tournamentSlug);
+    await q2;
+
+    return true;
+  } catch (err) {
+    console.warn("[Supabase] Failed to delete match pair from cloud:", err);
     return false;
   }
 }
@@ -1185,26 +1405,30 @@ export async function dbUpdateCourtStation(
     dispatchedAt?: number | null;
     maintenanceNote?: string | null;
   }
-): Promise<void> {
+): Promise<{ success: boolean; error?: any }> {
   const fp = JSON.stringify(updates);
   const prev = _stationWriteFingerprint.get(courtName);
   const now = Date.now();
   if (prev && prev.fp === fp && now - prev.at < 1500) {
-    return;
+    return { success: true };
   }
   _stationWriteFingerprint.set(courtName, { fp, at: now });
   _stationWriteAt.set(courtName, now);
 
   try {
-    // Map UI status to DB status to satisfy database constraint CHECK (status IN ('idle', 'in-match', 'warmup', 'maintenance'))
+    // Normalize UI status to DB status to strictly satisfy Postgres CHECK (status IN ('idle', 'in-match', 'warmup', 'maintenance'))
     let dbStatus: string | undefined = undefined;
     if (updates.status !== undefined) {
-      if (updates.status === "live") {
+      if (updates.status === "live" || updates.status === "in-match") {
         dbStatus = "in-match";
-      } else if (updates.status === "available") {
+      } else if (updates.status === "available" || updates.status === "idle" || (updates.status as string) === "completed") {
         dbStatus = "idle";
+      } else if (updates.status === "warmup") {
+        dbStatus = "warmup";
+      } else if (updates.status === "maintenance") {
+        dbStatus = "maintenance";
       } else {
-        dbStatus = updates.status;
+        dbStatus = "idle";
       }
     }
 
@@ -1224,13 +1448,15 @@ export async function dbUpdateCourtStation(
       }, { onConflict: "court_name" });
 
     if (error) {
-      // Allow an immediate retry on the next call
       _stationWriteFingerprint.delete(courtName);
       console.warn("[Supabase] Court station update rejected:", error.message);
+      return { success: false, error };
     }
+    return { success: true };
   } catch (err) {
     _stationWriteFingerprint.delete(courtName);
     console.warn("[Supabase] Failed to update court station:", err);
+    return { success: false, error: err };
   }
 }
 

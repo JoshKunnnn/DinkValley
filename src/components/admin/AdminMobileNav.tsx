@@ -32,13 +32,13 @@ const ADMIN_TABS: {
   label: string;
   icon: React.ElementType;
 }[] = [
-  { key: "draw", label: "Draw", icon: Layers },
-  { key: "dispatch", label: "Dispatch", icon: Radio },
-  { key: "setup", label: "Setup", icon: Settings },
-  { key: "teams", label: "Teams", icon: Users },
-  { key: "masterlist", label: "Users", icon: UserCheck },
-  { key: "access-codes", label: "Codes", icon: KeyRound },
-];
+    { key: "draw", label: "Draw", icon: Layers },
+    { key: "dispatch", label: "Dispatch", icon: Radio },
+    { key: "setup", label: "Setup", icon: Settings },
+    { key: "teams", label: "Teams", icon: Users },
+    { key: "masterlist", label: "Users", icon: UserCheck },
+    { key: "access-codes", label: "Codes", icon: KeyRound },
+  ];
 
 export function AdminMobileNav({
   activeTab,
@@ -98,9 +98,8 @@ export function AdminMobileNav({
                 }
               />
               <span
-                className={`text-[0.6rem] font-bold uppercase tracking-wider leading-none transition-colors ${
-                  isActive ? "text-brick" : "text-sand/50"
-                }`}
+                className={`text-[0.6rem] font-bold uppercase tracking-wider leading-none transition-colors ${isActive ? "text-brick" : "text-sand/50"
+                  }`}
               >
                 {label}
               </span>

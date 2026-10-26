@@ -45,6 +45,8 @@ export type PlayoffMatch = {
 
 export type Category = {
   id: CategoryId;
+  uuid?: string | undefined;
+  category_slug?: string | undefined;
   label: string;
   level: "Beginners" | "Novice" | "Intermediate" | "Advance" | "Open";
   division: "Men's" | "Women's" | "Mixed" | "Open";

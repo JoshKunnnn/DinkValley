@@ -27,7 +27,7 @@ export function LiveCourtsBoard({
   currentCategoryId,
   onTeamClick,
 }: LiveCourtsBoardProps) {
-  const { matches } = useMatchStore(tournamentSlug || undefined);
+  const { matches, refreshFromCloud } = useMatchStore(tournamentSlug || undefined);
   const [stations, setStations] = useState<Record<FacilityCourt, CourtStation>>(() => getCourtStations());
   const [revision, setRevision] = useState(0);
   const [expandedCourt, setExpandedCourt] = useState<FacilityCourt | null>(null);
@@ -53,7 +53,12 @@ export function LiveCourtsBoard({
 
     // Listen to shared Realtime channel for court station changes
     const unsubRealtime = dbSubscribeToLive(
-      () => {},
+      () => {
+        refreshFromCloud().catch(() => {});
+        hydrateCourtStationsFromCloud().then((cloud) => {
+          if (mounted) setStations(cloud);
+        });
+      },
       () => {
         hydrateCourtStationsFromCloud().then((cloud) => {
           if (mounted) setStations(cloud);
