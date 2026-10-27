@@ -1,6 +1,6 @@
 import { createFileRoute, redirect, useNavigate } from "@tanstack/react-router";
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { X, Trophy, AlertTriangle, Lock } from "lucide-react";
+import { X, Trophy, AlertTriangle, Lock, LayoutList, Columns, LayoutGrid } from "lucide-react";
 import { UmpireMobileNav } from "@/components/admin/UmpireMobileNav";
 
 import {
@@ -1702,6 +1702,26 @@ function UmpireConsole({
   const [showChangeCourtModal, setShowChangeCourtModal] = useState(false);
   const [showCourtSideModal, setShowCourtSideModal] = useState(false);
 
+  // View mode for court selection: "grid-2x2" (default: all 4 courts on 1 mobile screen), "horizontal-rows", or "horizontal-cards"
+  const [courtViewLayout, setCourtViewLayout] = useState<"grid-2x2" | "horizontal-rows" | "horizontal-cards">(() => {
+    if (typeof localStorage !== "undefined") {
+      const saved = localStorage.getItem("dv_umpire_court_layout");
+      if (saved === "grid-2x2" || saved === "horizontal-rows" || saved === "horizontal-cards") return saved;
+    }
+    return "grid-2x2";
+  });
+
+  const handleSetCourtViewLayout = (mode: "grid-2x2" | "horizontal-rows" | "horizontal-cards") => {
+    setCourtViewLayout(mode);
+    if (typeof localStorage !== "undefined") {
+      try {
+        localStorage.setItem("dv_umpire_court_layout", mode);
+      } catch {
+        // ignore
+      }
+    }
+  };
+
   const handleToggleCourtSides = () => {
     setTeamASide((prev) => {
       const next = prev === "left" ? "right" : "left";
@@ -1880,49 +1900,107 @@ function UmpireConsole({
       .sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0));
 
     return (
-      <div className="space-y-8 max-w-6xl mx-auto">
-        {/* Header */}
-        <div className="border-b border-border pb-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+      <div className="space-y-4 sm:space-y-6 max-w-6xl mx-auto">
+        {/* Header - Compact on mobile to maximize viewport for all 4 courts */}
+        <div className="border-b border-border pb-3 sm:pb-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 sm:gap-4">
           <div>
-            <span className="text-xs font-bold uppercase tracking-[0.28em] text-pickle">
-              Official Console
-            </span>
-            <h2 className="font-display text-3xl sm:text-4xl text-foreground mt-1">
+            <div className="flex items-center gap-2">
+              <span className="text-[0.68rem] font-bold uppercase tracking-[0.28em] text-pickle">
+                Official Console
+              </span>
+              {activeTournament && (
+                <span className="inline-flex sm:hidden items-center gap-1.5 px-2 py-0.5 bg-charcoal border border-border text-[0.62rem] text-sand/80 font-mono">
+                  <span className="h-1.5 w-1.5 rounded-full bg-pickle animate-pulse" />
+                  <strong className="text-sand truncate max-w-[140px]">{activeTournament.name}</strong>
+                </span>
+              )}
+            </div>
+            <h2 className="font-display text-2xl sm:text-4xl text-foreground mt-0.5 sm:mt-1">
               Select Your Court
             </h2>
-            <p className="text-sm text-foreground/80 mt-1">
+            <p className="text-xs sm:text-sm text-foreground/80 mt-1 hidden sm:block">
               Choose the court you are supervising. Matches are dispatched exclusively by the Tournament Director.
             </p>
           </div>
           {activeTournament && (
-            <div className="inline-flex items-center gap-2 px-3 py-1.5 bg-charcoal border border-border text-xs text-sand/80 font-mono w-fit">
+            <div className="hidden sm:inline-flex items-center gap-2 px-3 py-1.5 bg-charcoal border border-border text-xs text-sand/80 font-mono w-fit">
               <span className="h-2 w-2 rounded-full bg-pickle animate-pulse" />
               <span>Active Event: <strong className="text-sand">{activeTournament.name}</strong></span>
             </div>
           )}
         </div>
 
-        {/* 4 Prominent Court Cards */}
-        <div>
-          <div className="flex items-center justify-between mb-3">
-            <span className="text-xs font-bold uppercase tracking-widest text-foreground/80">
-              Facility Courts (1 - 4)
-            </span>
-            <span className="text-xs font-bold text-foreground/80 uppercase font-sans">
-              Admin Dispatched Station Monitor
-            </span>
+        {/* Facility Courts Section with All-on-One-Screen Support */}
+        <div className="space-y-2.5 sm:space-y-3">
+          {/* Section Sub-header & View Mode Toggle */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <span className="text-xs font-bold uppercase tracking-widest text-foreground/80 block">
+                Facility Courts (1 - 4)
+              </span>
+              <span className="text-[0.68rem] font-bold text-foreground/60 uppercase font-sans">
+                Admin Dispatched Station Monitor
+              </span>
+            </div>
+
+            {/* Layout Switcher (2x2 Screen, Rows, Swipe) */}
+            <div className="flex items-center gap-1 self-start sm:self-auto bg-card border-2 border-border p-1">
+              <span className="text-[0.62rem] font-bold uppercase tracking-wider text-foreground/60 px-1 font-mono hidden xs:inline">
+                View:
+              </span>
+              <button
+                type="button"
+                onClick={() => handleSetCourtViewLayout("grid-2x2")}
+                className={`flex items-center gap-1 px-2 py-1 text-xs font-bold uppercase tracking-wider transition-all cursor-pointer font-sans ${
+                  courtViewLayout === "grid-2x2"
+                    ? "bg-pickle text-sand shadow-sm"
+                    : "text-foreground/70 hover:text-foreground hover:bg-muted/40"
+                }`}
+                title="View all 4 courts on 1 mobile screen in a 2x2 grid"
+              >
+                <LayoutGrid size={13} />
+                <span>2x2 Screen</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleSetCourtViewLayout("horizontal-rows")}
+                className={`flex items-center gap-1 px-2 py-1 text-xs font-bold uppercase tracking-wider transition-all cursor-pointer font-sans ${
+                  courtViewLayout === "horizontal-rows"
+                    ? "bg-pickle text-sand shadow-sm"
+                    : "text-foreground/70 hover:text-foreground hover:bg-muted/40"
+                }`}
+                title="View courts as wide horizontal compact rows"
+              >
+                <LayoutList size={13} />
+                <span>Rows</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleSetCourtViewLayout("horizontal-cards")}
+                className={`flex items-center gap-1 px-2 py-1 text-xs font-bold uppercase tracking-wider transition-all cursor-pointer font-sans ${
+                  courtViewLayout === "horizontal-cards"
+                    ? "bg-pickle text-sand shadow-sm"
+                    : "text-foreground/70 hover:text-foreground hover:bg-muted/40"
+                }`}
+                title="View courts as side-by-side swipeable cards"
+              >
+                <Columns size={13} />
+                <span>Swipe</span>
+              </button>
+            </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          {/* Quick Court Jump Bar (Horizontal Pills) */}
+          <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar -mx-1 px-1">
+            <span className="text-[0.62rem] font-bold uppercase tracking-widest text-foreground/60 shrink-0 font-mono">
+              Quick Jump:
+            </span>
             {FACILITY_COURTS.map((court) => {
               const st = currentStations[court];
-              // Find dispatched match for this court
               const courtMatch = findMatchForCourtStation(court, st, matches);
-
               const isLive = courtMatch?.status === "live";
               const isScheduled = courtMatch?.status === "scheduled";
               const operatingOfficial = courtMatch?.officiatedBy || (st?.assignedUmpire && (st.status === "live" || st.status === "warmup") ? st.assignedUmpire : null);
-              const isAssignedToMe = Boolean(courtMatch?.officiatedBy === currentUmpire || (!courtMatch?.officiatedBy && st?.assignedUmpire === currentUmpire));
               const isOperatedByOther = Boolean(
                 courtMatch &&
                 courtMatch.status !== "final" &&
@@ -1931,137 +2009,322 @@ function UmpireConsole({
               );
 
               return (
-                <div
-                  key={court}
-                  className={`p-0 overflow-hidden flex flex-col justify-between border-2 transition-all font-sans ${isOperatedByOther
-                      ? "border-brick/50 bg-charcoal text-sand"
-                      : isLive
-                        ? "border-pickle/80 shadow-lg shadow-pickle/15 bg-charcoal text-sand"
-                        : courtMatch
-                          ? "border-border hover:border-pickle/50 bg-charcoal text-sand"
-                          : "border-border border-dashed bg-card text-foreground"
-                    }`}
+                <button
+                  key={`pill-${court}`}
+                  type="button"
+                  onClick={() => {
+                    const el = document.getElementById(`court-card-${court.replace(/\s+/g, "-").toLowerCase()}`);
+                    if (el) {
+                      el.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+                    }
+                  }}
+                  className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-bold uppercase tracking-wider border transition-all cursor-pointer shrink-0 font-sans ${
+                    isLive
+                      ? "border-pickle bg-pickle/15 text-pickle"
+                      : isOperatedByOther
+                      ? "border-brick/50 bg-brick/10 text-brick"
+                      : courtMatch
+                      ? "border-sand/40 bg-charcoal text-sand hover:border-pickle/50"
+                      : "border-border bg-card text-foreground/70 hover:border-sand/40 hover:text-foreground"
+                  }`}
                 >
-                  {/* Card Header */}
-                  <div
-                    className={`px-4 py-3 flex items-center justify-between border-b-2 ${courtMatch ? "bg-charcoal border-white/10" : "bg-muted/40 border-border"
-                      }`}
-                  >
-                    <span
-                      className={`font-display text-2xl tracking-wide ${courtMatch ? "text-sand" : "text-foreground"
-                        }`}
-                    >
-                      {court}
+                  <span
+                    className={`h-1.5 w-1.5 rounded-full ${
+                      isLive
+                        ? "bg-pickle animate-pulse"
+                        : isOperatedByOther
+                        ? "bg-brick"
+                        : isScheduled
+                        ? "bg-sand"
+                        : "bg-foreground/40"
+                    }`}
+                  />
+                  <span>{court}</span>
+                  {isLive && courtMatch && (
+                    <span className="font-mono text-[0.65rem] text-pickle font-bold">
+                      {courtMatch.score.teamAScore}-{courtMatch.score.teamBScore}
                     </span>
-                    {isOperatedByOther && (
-                      <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-bold uppercase tracking-wider bg-brick/20 border border-brick/50 text-brick">
-                        <Lock size={11} />
-                        In Use
-                      </span>
-                    )}
-                    {!isOperatedByOther && isLive && (
-                      <span className="inline-flex items-center gap-1.5 px-2 py-0.5 text-xs font-bold uppercase tracking-wider bg-pickle/20 border border-pickle/50 text-pickle">
-                        <span className="h-1.5 w-1.5 rounded-full bg-pickle animate-pulse" />
-                        Live: {courtMatch.score.teamAScore} - {courtMatch.score.teamBScore}
-                      </span>
-                    )}
-                    {!isOperatedByOther && isScheduled && (
-                      <span className="inline-flex items-center px-2 py-0.5 text-xs font-bold uppercase tracking-wider bg-sand/15 border border-border text-sand">
-                        Ready
-                      </span>
-                    )}
-                    {!courtMatch && (
-                      <span className="text-xs font-bold uppercase tracking-wider text-foreground/70 bg-card border border-border px-2 py-0.5">
-                        Standby
-                      </span>
-                    )}
-                  </div>
+                  )}
+                  {!courtMatch && (
+                    <span className="text-[0.6rem] text-foreground/60 uppercase">
+                      Standby
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
 
-                  {/* Card Body */}
-                  <div className="p-4 flex-1 flex flex-col justify-between space-y-4">
-                    {courtMatch ? (
-                      <div className="space-y-3">
-                        {courtMatch.stage && (
-                          <span className="inline-block text-xs font-bold uppercase tracking-wider text-pickle bg-pickle/15 px-2 py-0.5 border border-pickle/30 truncate max-w-full font-sans">
-                            {courtMatch.stage}
-                          </span>
-                        )}
+          {/* Render Courts based on chosen Layout */}
+          {courtViewLayout === "grid-2x2" ? (
+            /* Layout: 2x2 Court Grid Matrix (All 4 Courts visible on 1 phone screen!) */
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3">
+              {FACILITY_COURTS.map((court) => {
+                const st = currentStations[court];
+                const courtMatch = findMatchForCourtStation(court, st, matches);
+                const isLive = courtMatch?.status === "live";
+                const isScheduled = courtMatch?.status === "scheduled";
+                const operatingOfficial = courtMatch?.officiatedBy || (st?.assignedUmpire && (st.status === "live" || st.status === "warmup") ? st.assignedUmpire : null);
+                const isAssignedToMe = Boolean(courtMatch?.officiatedBy === currentUmpire || (!courtMatch?.officiatedBy && st?.assignedUmpire === currentUmpire));
+                const isOperatedByOther = Boolean(
+                  courtMatch &&
+                  courtMatch.status !== "final" &&
+                  operatingOfficial &&
+                  operatingOfficial !== currentUmpire
+                );
 
-                        {/* Matchup */}
-                        <div className="space-y-2.5">
-                          {/* Team A */}
-                          <div className="bg-charcoal/80 p-2.5 border border-white/10">
-                            <span className="block text-sm font-bold text-sand truncate">
-                              {courtMatch.teamAName}
-                            </span>
-                            <span className="block text-xs text-sand/80 font-medium truncate mt-0.5">
-                              {courtMatch.teamAPlayers.join(" / ")}
-                            </span>
-                            {courtMatch.teamAClub && (
-                              <span className="inline-block mt-1 text-[0.6rem] px-1.5 py-0.2 bg-pickle/20 text-pickle border border-pickle/40 uppercase tracking-wider font-bold font-sans">
-                                {courtMatch.teamAClub}
-                              </span>
-                            )}
+                return (
+                  <div
+                    key={court}
+                    id={`court-card-${court.replace(/\s+/g, "-").toLowerCase()}`}
+                    onClick={() => {
+                      if (courtMatch && !isOperatedByOther) {
+                        if (!courtMatch.officiatedBy) {
+                          onUpdate(courtMatch.id, (m) => ({
+                            ...m,
+                            officiatedBy: currentUmpire,
+                          }));
+                          dbUpdateCourtStation(court, {
+                            currentMatchId: courtMatch.id,
+                            assignedUmpire: currentUmpire,
+                          }).catch(() => { });
+                          claimCourtStation(court, currentUmpire);
+                        }
+                        onSelectMatch(courtMatch.id);
+                      }
+                    }}
+                    className={`p-2.5 sm:p-3 border-2 transition-all font-sans flex flex-col justify-between ${
+                      isOperatedByOther
+                        ? "border-brick/50 bg-charcoal text-sand cursor-not-allowed"
+                        : isLive
+                        ? "border-pickle/80 shadow-md shadow-pickle/20 bg-charcoal text-sand active:scale-[0.98] cursor-pointer"
+                        : courtMatch
+                        ? "border-border hover:border-pickle/50 bg-charcoal text-sand active:scale-[0.98] cursor-pointer"
+                        : "border-border border-dashed bg-card text-foreground cursor-default"
+                    }`}
+                  >
+                    {/* Tile Header: Court name + Status */}
+                    <div className="flex items-center justify-between gap-1 border-b border-border/50 pb-1.5">
+                      <span className={`font-display text-lg sm:text-xl tracking-wide ${courtMatch ? "text-sand" : "text-foreground"}`}>
+                        {court}
+                      </span>
+                      {isOperatedByOther && (
+                        <span className="text-[0.58rem] font-bold uppercase tracking-wider text-brick bg-brick/20 border border-brick/40 px-1.5 py-0.2">
+                          In Use
+                        </span>
+                      )}
+                      {!isOperatedByOther && isLive && (
+                        <span className="inline-flex items-center gap-1 text-[0.62rem] font-bold uppercase tracking-wider text-pickle bg-pickle/20 border border-pickle/40 px-1.5 py-0.2">
+                          <span className="h-1.5 w-1.5 rounded-full bg-pickle animate-pulse" />
+                          {courtMatch.score.teamAScore}-{courtMatch.score.teamBScore}
+                        </span>
+                      )}
+                      {!isOperatedByOther && isScheduled && (
+                        <span className="text-[0.58rem] font-bold uppercase tracking-wider text-sand bg-sand/15 border border-border px-1.5 py-0.2">
+                          Ready
+                        </span>
+                      )}
+                      {!courtMatch && (
+                        <span className="text-[0.58rem] font-bold uppercase tracking-wider text-foreground/60 bg-muted/40 border border-border px-1.5 py-0.2">
+                          Standby
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Tile Body: Matchup or Waiting */}
+                    <div className="py-2 min-w-0">
+                      {courtMatch ? (
+                        <div className="space-y-0.5 min-w-0">
+                          <div className="text-xs font-bold text-sand truncate">
+                            {courtMatch.teamAName}
                           </div>
-
-                          <div className="text-xs font-bold uppercase tracking-widest text-center text-sand/60">
+                          <div className="text-[0.6rem] font-bold uppercase tracking-widest text-sand/50">
                             vs
                           </div>
-
-                          {/* Team B */}
-                          <div className="bg-charcoal/80 p-2.5 border border-white/10">
-                            <span className="block text-sm font-bold text-sand truncate">
-                              {courtMatch.teamBName}
-                            </span>
-                            <span className="block text-xs text-sand/80 font-medium truncate mt-0.5">
-                              {courtMatch.teamBPlayers.join(" / ")}
-                            </span>
-                            {courtMatch.teamBClub && (
-                              <span className="inline-block mt-1 text-[0.6rem] px-1.5 py-0.2 bg-pickle/20 text-pickle border border-pickle/40 uppercase tracking-wider font-bold font-sans">
-                                {courtMatch.teamBClub}
-                              </span>
-                            )}
+                          <div className="text-xs font-bold text-sand truncate">
+                            {courtMatch.teamBName}
                           </div>
                         </div>
-
-                        {/* Official Info */}
-                        <div className="text-xs uppercase tracking-wider text-sand/80 flex items-center justify-between pt-1">
-                          <span className="text-sand/70 font-semibold">Official:</span>
-                          <span className={`font-bold truncate max-w-[140px] font-sans ${isOperatedByOther ? "text-brick" : (courtMatch.officiatedBy || st?.assignedUmpire) ? "text-pickle" : "text-sand/60"}`}>
-                            {operatingOfficial
-                              ? isAssignedToMe
-                                ? `${operatingOfficial} (You)`
-                                : operatingOfficial
-                              : "Unassigned"}
+                      ) : (
+                        <div className="text-center py-1">
+                          <span className="text-[0.68rem] uppercase tracking-wider font-bold text-foreground/70 block">
+                            Empty Station
+                          </span>
+                          <span className="text-[0.6rem] text-foreground/50 block">
+                            Waiting for dispatch
                           </span>
                         </div>
-                      </div>
-                    ) : (
-                      <div className="py-8 text-center space-y-2">
-                        <span className="text-sm uppercase tracking-wider font-bold text-foreground block">
-                          Waiting for Admin Dispatch
-                        </span>
-                        <p className="text-xs text-foreground/70 font-medium max-w-[220px] mx-auto leading-relaxed">
-                          The Tournament Director will assign the next scheduled match here.
-                        </p>
-                      </div>
-                    )}
+                      )}
+                    </div>
 
-                    {/* Action button */}
-                    <div className="pt-2">
+                    {/* Tile Bottom Action */}
+                    <div className="pt-1.5 border-t border-border/50">
                       {courtMatch ? (
                         isOperatedByOther ? (
-                          <div className="space-y-1.5">
-                            <div className="w-full py-2.5 px-3 border border-brick/40 bg-brick/10 text-brick font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-1.5 select-none text-center font-sans">
-                              <Lock size={13} />
+                          <span className="text-[0.6rem] font-semibold text-brick truncate block text-center">
+                            In Use: {operatingOfficial}
+                          </span>
+                        ) : (
+                          <div className="w-full py-1 text-center bg-pickle text-sand font-bold text-[0.65rem] uppercase tracking-wider shadow-sm transition-opacity hover:opacity-90">
+                            {isLive ? "Score Match" : "Supervise Court"}
+                          </div>
+                        )
+                      ) : (
+                        <div className="w-full py-1 text-center bg-muted/30 border border-border text-foreground/50 font-bold text-[0.6rem] uppercase tracking-wider">
+                          Standby
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : courtViewLayout === "horizontal-rows" ? (
+            /* Layout 1: Horizontal Rows (Compact, wide, mobile-optimized strips) */
+            <div className="flex flex-col gap-3">
+              {FACILITY_COURTS.map((court) => {
+                const st = currentStations[court];
+                const courtMatch = findMatchForCourtStation(court, st, matches);
+                const isLive = courtMatch?.status === "live";
+                const isScheduled = courtMatch?.status === "scheduled";
+                const operatingOfficial = courtMatch?.officiatedBy || (st?.assignedUmpire && (st.status === "live" || st.status === "warmup") ? st.assignedUmpire : null);
+                const isAssignedToMe = Boolean(courtMatch?.officiatedBy === currentUmpire || (!courtMatch?.officiatedBy && st?.assignedUmpire === currentUmpire));
+                const isOperatedByOther = Boolean(
+                  courtMatch &&
+                  courtMatch.status !== "final" &&
+                  operatingOfficial &&
+                  operatingOfficial !== currentUmpire
+                );
+
+                return (
+                  <div
+                    key={court}
+                    id={`court-card-${court.replace(/\s+/g, "-").toLowerCase()}`}
+                    className={`p-3.5 sm:p-4 border-2 transition-all font-sans flex flex-col md:flex-row md:items-center justify-between gap-3 sm:gap-4 ${
+                      isOperatedByOther
+                        ? "border-brick/50 bg-charcoal text-sand"
+                        : isLive
+                        ? "border-pickle/80 shadow-md shadow-pickle/15 bg-charcoal text-sand"
+                        : courtMatch
+                        ? "border-border hover:border-pickle/50 bg-charcoal text-sand"
+                        : "border-border border-dashed bg-card text-foreground"
+                    }`}
+                  >
+                    {/* Left: Court identity & status tag */}
+                    <div className="flex md:flex-col items-center md:items-start justify-between md:justify-center gap-1.5 md:w-36 shrink-0 border-b md:border-b-0 md:border-r border-border/60 pb-2 md:pb-0 md:pr-3">
+                      <span className={`font-display text-2xl tracking-wide ${courtMatch ? "text-sand" : "text-foreground"}`}>
+                        {court}
+                      </span>
+                      <div>
+                        {isOperatedByOther && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-bold uppercase tracking-wider bg-brick/20 border border-brick/50 text-brick">
+                            <Lock size={11} />
+                            In Use
+                          </span>
+                        )}
+                        {!isOperatedByOther && isLive && (
+                          <span className="inline-flex items-center gap-1.5 px-2 py-0.5 text-xs font-bold uppercase tracking-wider bg-pickle/20 border border-pickle/50 text-pickle">
+                            <span className="h-1.5 w-1.5 rounded-full bg-pickle animate-pulse" />
+                            Live: {courtMatch.score.teamAScore} - {courtMatch.score.teamBScore}
+                          </span>
+                        )}
+                        {!isOperatedByOther && isScheduled && (
+                          <span className="inline-flex items-center px-2 py-0.5 text-xs font-bold uppercase tracking-wider bg-sand/15 border border-border text-sand">
+                            Ready
+                          </span>
+                        )}
+                        {!courtMatch && (
+                          <span className="text-xs font-bold uppercase tracking-wider text-foreground/70 bg-card border border-border px-2 py-0.5">
+                            Standby
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Middle: Match details or standby notice */}
+                    <div className="flex-1 min-w-0">
+                      {courtMatch ? (
+                        <div className="space-y-2">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            {courtMatch.stage && (
+                              <span className="inline-block text-[0.68rem] font-bold uppercase tracking-wider text-pickle bg-pickle/15 px-2 py-0.5 border border-pickle/30 truncate font-sans">
+                                {courtMatch.stage}
+                              </span>
+                            )}
+                            <span className="text-xs text-sand/70 font-semibold uppercase tracking-wider">
+                              Official:{" "}
+                              <span className={`font-bold font-sans ${isOperatedByOther ? "text-brick" : (courtMatch.officiatedBy || st?.assignedUmpire) ? "text-pickle" : "text-sand/60"}`}>
+                                {operatingOfficial
+                                  ? isAssignedToMe
+                                    ? `${operatingOfficial} (You)`
+                                    : operatingOfficial
+                                  : "Unassigned"}
+                              </span>
+                            </span>
+                          </div>
+
+                          {/* Horizontal Team Matchup */}
+                          <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto_1fr] items-center gap-2 bg-charcoal/80 p-2 sm:p-2.5 border border-white/10">
+                            <div className="min-w-0">
+                              <span className="block text-sm font-bold text-sand truncate">
+                                {courtMatch.teamAName}
+                              </span>
+                              <span className="block text-xs text-sand/80 font-medium truncate">
+                                {courtMatch.teamAPlayers.join(" / ")}
+                              </span>
+                              {courtMatch.teamAClub && (
+                                <span className="inline-block mt-0.5 text-[0.6rem] px-1.5 py-0.2 bg-pickle/20 text-pickle border border-pickle/40 uppercase tracking-wider font-bold">
+                                  {courtMatch.teamAClub}
+                                </span>
+                              )}
+                            </div>
+
+                            <div className="text-xs font-bold uppercase tracking-widest text-center text-sand/60 px-2 py-0.5 sm:border-x sm:border-white/10">
+                              vs
+                            </div>
+
+                            <div className="min-w-0 sm:text-right">
+                              <span className="block text-sm font-bold text-sand truncate">
+                                {courtMatch.teamBName}
+                              </span>
+                              <span className="block text-xs text-sand/80 font-medium truncate">
+                                {courtMatch.teamBPlayers.join(" / ")}
+                              </span>
+                              {courtMatch.teamBClub && (
+                                <span className="inline-block mt-0.5 text-[0.6rem] px-1.5 py-0.2 bg-pickle/20 text-pickle border border-pickle/40 uppercase tracking-wider font-bold">
+                                  {courtMatch.teamBClub}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="py-2 space-y-1">
+                          <span className="text-sm uppercase tracking-wider font-bold text-foreground block">
+                            Waiting for Admin Dispatch
+                          </span>
+                          <p className="text-xs text-foreground/70 font-medium leading-relaxed">
+                            The Tournament Director will assign the next scheduled match here.
+                          </p>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Right: Actions */}
+                    <div className="md:w-56 shrink-0 flex flex-col justify-center pt-1 md:pt-0">
+                      {courtMatch ? (
+                        isOperatedByOther ? (
+                          <div className="space-y-1">
+                            <div className="w-full py-2 px-3 border border-brick/40 bg-brick/10 text-brick font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-1.5 select-none text-center font-sans">
+                              <Lock size={12} />
                               <span>In Use: {operatingOfficial}</span>
                             </div>
-                            <p className="text-[0.65rem] text-center text-sand/60 font-medium">
-                              Official actively scoring. Access restricted.
+                            <p className="text-[0.62rem] text-center text-sand/60 font-medium">
+                              Official actively scoring.
                             </p>
                           </div>
                         ) : (
-                          <div className="space-y-2">
+                          <div className="space-y-1.5">
                             <button
                               type="button"
                               onClick={() => {
@@ -2115,16 +2378,232 @@ function UmpireConsole({
                           </div>
                         )
                       ) : (
-                        <div className="w-full py-2.5 px-3 border-2 border-border text-foreground/60 font-bold text-xs uppercase tracking-wider text-center select-none bg-muted/30">
-                          Standby: No Dispatched Match
+                        <div className="w-full py-2 px-3 border-2 border-border text-foreground/60 font-bold text-xs uppercase tracking-wider text-center select-none bg-muted/30">
+                          Standby: No Match
                         </div>
                       )}
                     </div>
                   </div>
-                </div>
-              );
-            })}
-          </div>
+                );
+              })}
+            </div>
+          ) : (
+            /* Layout 2: Horizontal Cards (Side-by-side swipeable carousel track) */
+            <div className="flex flex-row overflow-x-auto snap-x snap-mandatory gap-4 pb-3 no-scrollbar scroll-smooth -mx-4 px-4 sm:mx-0 sm:px-0">
+              {FACILITY_COURTS.map((court) => {
+                const st = currentStations[court];
+                const courtMatch = findMatchForCourtStation(court, st, matches);
+                const isLive = courtMatch?.status === "live";
+                const isScheduled = courtMatch?.status === "scheduled";
+                const operatingOfficial = courtMatch?.officiatedBy || (st?.assignedUmpire && (st.status === "live" || st.status === "warmup") ? st.assignedUmpire : null);
+                const isAssignedToMe = Boolean(courtMatch?.officiatedBy === currentUmpire || (!courtMatch?.officiatedBy && st?.assignedUmpire === currentUmpire));
+                const isOperatedByOther = Boolean(
+                  courtMatch &&
+                  courtMatch.status !== "final" &&
+                  operatingOfficial &&
+                  operatingOfficial !== currentUmpire
+                );
+
+                return (
+                  <div
+                    key={court}
+                    id={`court-card-${court.replace(/\s+/g, "-").toLowerCase()}`}
+                    className={`w-[85vw] max-w-[340px] sm:w-[320px] shrink-0 snap-center p-0 overflow-hidden flex flex-col justify-between border-2 transition-all font-sans ${
+                      isOperatedByOther
+                        ? "border-brick/50 bg-charcoal text-sand"
+                        : isLive
+                        ? "border-pickle/80 shadow-lg shadow-pickle/15 bg-charcoal text-sand"
+                        : courtMatch
+                        ? "border-border hover:border-pickle/50 bg-charcoal text-sand"
+                        : "border-border border-dashed bg-card text-foreground"
+                    }`}
+                  >
+                    {/* Card Header */}
+                    <div
+                      className={`px-4 py-3 flex items-center justify-between border-b-2 ${
+                        courtMatch ? "bg-charcoal border-white/10" : "bg-muted/40 border-border"
+                      }`}
+                    >
+                      <span
+                        className={`font-display text-2xl tracking-wide ${
+                          courtMatch ? "text-sand" : "text-foreground"
+                        }`}
+                      >
+                        {court}
+                      </span>
+                      {isOperatedByOther && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-bold uppercase tracking-wider bg-brick/20 border border-brick/50 text-brick">
+                          <Lock size={11} />
+                          In Use
+                        </span>
+                      )}
+                      {!isOperatedByOther && isLive && (
+                        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 text-xs font-bold uppercase tracking-wider bg-pickle/20 border border-pickle/50 text-pickle">
+                          <span className="h-1.5 w-1.5 rounded-full bg-pickle animate-pulse" />
+                          Live: {courtMatch.score.teamAScore} - {courtMatch.score.teamBScore}
+                        </span>
+                      )}
+                      {!isOperatedByOther && isScheduled && (
+                        <span className="inline-flex items-center px-2 py-0.5 text-xs font-bold uppercase tracking-wider bg-sand/15 border border-border text-sand">
+                          Ready
+                        </span>
+                      )}
+                      {!courtMatch && (
+                        <span className="text-xs font-bold uppercase tracking-wider text-foreground/70 bg-card border border-border px-2 py-0.5">
+                          Standby
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Card Body */}
+                    <div className="p-4 flex-1 flex flex-col justify-between space-y-4">
+                      {courtMatch ? (
+                        <div className="space-y-3">
+                          {courtMatch.stage && (
+                            <span className="inline-block text-xs font-bold uppercase tracking-wider text-pickle bg-pickle/15 px-2 py-0.5 border border-pickle/30 truncate max-w-full font-sans">
+                              {courtMatch.stage}
+                            </span>
+                          )}
+
+                          {/* Matchup */}
+                          <div className="space-y-2.5">
+                            {/* Team A */}
+                            <div className="bg-charcoal/80 p-2.5 border border-white/10">
+                              <span className="block text-sm font-bold text-sand truncate">
+                                {courtMatch.teamAName}
+                              </span>
+                              <span className="block text-xs text-sand/80 font-medium truncate mt-0.5">
+                                {courtMatch.teamAPlayers.join(" / ")}
+                              </span>
+                              {courtMatch.teamAClub && (
+                                <span className="inline-block mt-1 text-[0.6rem] px-1.5 py-0.2 bg-pickle/20 text-pickle border border-pickle/40 uppercase tracking-wider font-bold font-sans">
+                                  {courtMatch.teamAClub}
+                                </span>
+                              )}
+                            </div>
+
+                            <div className="text-xs font-bold uppercase tracking-widest text-center text-sand/60">
+                              vs
+                            </div>
+
+                            {/* Team B */}
+                            <div className="bg-charcoal/80 p-2.5 border border-white/10">
+                              <span className="block text-sm font-bold text-sand truncate">
+                                {courtMatch.teamBName}
+                              </span>
+                              <span className="block text-xs text-sand/80 font-medium truncate mt-0.5">
+                                {courtMatch.teamBPlayers.join(" / ")}
+                              </span>
+                              {courtMatch.teamBClub && (
+                                <span className="inline-block mt-1 text-[0.6rem] px-1.5 py-0.2 bg-pickle/20 text-pickle border border-pickle/40 uppercase tracking-wider font-bold font-sans">
+                                  {courtMatch.teamBClub}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Official Info */}
+                          <div className="text-xs uppercase tracking-wider text-sand/80 flex items-center justify-between pt-1">
+                            <span className="text-sand/70 font-semibold">Official:</span>
+                            <span className={`font-bold truncate max-w-[140px] font-sans ${isOperatedByOther ? "text-brick" : (courtMatch.officiatedBy || st?.assignedUmpire) ? "text-pickle" : "text-sand/60"}`}>
+                              {operatingOfficial
+                                ? isAssignedToMe
+                                  ? `${operatingOfficial} (You)`
+                                  : operatingOfficial
+                                : "Unassigned"}
+                            </span>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="py-6 text-center space-y-2">
+                          <span className="text-sm uppercase tracking-wider font-bold text-foreground block">
+                            Waiting for Admin Dispatch
+                          </span>
+                          <p className="text-xs text-foreground/70 font-medium max-w-[220px] mx-auto leading-relaxed">
+                            The Tournament Director will assign the next scheduled match here.
+                          </p>
+                        </div>
+                      )}
+
+                      {/* Action button */}
+                      <div className="pt-2">
+                        {courtMatch ? (
+                          isOperatedByOther ? (
+                            <div className="space-y-1.5">
+                              <div className="w-full py-2.5 px-3 border border-brick/40 bg-brick/10 text-brick font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-1.5 select-none text-center font-sans">
+                                <Lock size={13} />
+                                <span>In Use: {operatingOfficial}</span>
+                              </div>
+                              <p className="text-[0.65rem] text-center text-sand/60 font-medium">
+                                Official actively scoring. Access restricted.
+                              </p>
+                            </div>
+                          ) : (
+                            <div className="space-y-2">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (!courtMatch.officiatedBy) {
+                                    onUpdate(courtMatch.id, (m) => ({
+                                      ...m,
+                                      officiatedBy: currentUmpire,
+                                    }));
+                                    dbUpdateCourtStation(court, {
+                                      currentMatchId: courtMatch.id,
+                                      assignedUmpire: currentUmpire,
+                                    }).catch(() => { });
+                                    claimCourtStation(court, currentUmpire);
+                                  }
+                                  onSelectMatch(courtMatch.id);
+                                }}
+                                className="w-full py-2.5 px-3 bg-pickle text-sand font-bold text-xs uppercase tracking-widest hover:opacity-90 active:scale-[0.99] transition-all text-center cursor-pointer shadow-md font-sans"
+                              >
+                                {isLive ? `Continue Scoring ${court}` : `Supervise & Score ${court}`}
+                              </button>
+                              {!isMatchTossDone(courtMatch) && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (typeof localStorage !== "undefined") {
+                                      try {
+                                        localStorage.removeItem(`dv_toss_done_${courtMatch.id}`);
+                                      } catch { }
+                                    }
+                                    if (!courtMatch.officiatedBy) {
+                                      onUpdate(courtMatch.id, (m) => ({
+                                        ...resetMatch(m),
+                                        officiatedBy: currentUmpire,
+                                      }));
+                                      dbUpdateCourtStation(court, {
+                                        currentMatchId: courtMatch.id,
+                                        assignedUmpire: currentUmpire,
+                                      }).catch(() => { });
+                                      claimCourtStation(court, currentUmpire);
+                                    } else {
+                                      onUpdate(courtMatch.id, resetMatch);
+                                    }
+                                    onSelectMatch(courtMatch.id);
+                                  }}
+                                  className="w-full py-1.5 px-2 bg-charcoal border border-pickle/40 text-sand hover:bg-pickle hover:text-sand text-xs font-bold uppercase tracking-wider transition-colors cursor-pointer text-center font-sans"
+                                >
+                                  Coin Toss (Reset)
+                                </button>
+                              )}
+                            </div>
+                          )
+                        ) : (
+                          <div className="w-full py-2.5 px-3 border-2 border-border text-foreground/60 font-bold text-xs uppercase tracking-wider text-center select-none bg-muted/30">
+                            Standby: No Dispatched Match
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
 
         {/* Match Results Banner linking to dedicated Match Results tab */}
