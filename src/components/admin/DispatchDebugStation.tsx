@@ -269,20 +269,23 @@ export function DispatchDebugStation({
 
       const locScoreA = localMatch?.score?.teamAScore ?? 0;
       const locScoreB = localMatch?.score?.teamBScore ?? 0;
-      const locServer = localMatch?.score?.serverNumber ?? 1;
+      const locServer = localMatch?.score?.serverNumber ?? 2;
       const locServing = localMatch?.score?.servingTeam ?? "A";
       const locRallies = localMatch?.score?.rallies?.length ?? 0;
 
       const cldScoreA = cloudMatch?.score?.teamAScore ?? 0;
       const cldScoreB = cloudMatch?.score?.teamBScore ?? 0;
-      const cldServer = cloudMatch?.score?.serverNumber ?? 1;
+      const cldServer = cloudMatch?.score?.serverNumber ?? 2;
       const cldServing = cloudMatch?.score?.servingTeam ?? "A";
       const cldRallies = cloudMatch?.score?.rallies?.length ?? 0;
 
-      const scoreDiffers = Boolean(hasActiveMatch && (locScoreA !== cldScoreA || locScoreB !== cldScoreB));
-      const serverDiffers = Boolean(hasActiveMatch && (locServer !== cldServer || locServing !== cldServing));
-      const statusDiffers = Boolean(hasActiveMatch && localMatch?.status !== cloudMatch?.status);
-      const ralliesDiffers = Boolean(hasActiveMatch && Math.abs(locRallies - cldRallies) > 0);
+      const bothMatchesPresent = Boolean(localMatch && cloudMatch);
+      const isActivelyScored = locRallies > 0 || cldRallies > 0 || localMatch?.status === "live" || cloudMatch?.status === "live";
+
+      const scoreDiffers = Boolean(bothMatchesPresent && (locScoreA !== cldScoreA || locScoreB !== cldScoreB));
+      const serverDiffers = Boolean(bothMatchesPresent && isActivelyScored && (locServer !== cldServer || locServing !== cldServing));
+      const statusDiffers = Boolean(bothMatchesPresent && localMatch?.status !== cloudMatch?.status && (localMatch?.status === "final" || cloudMatch?.status === "final"));
+      const ralliesDiffers = Boolean(bothMatchesPresent && Math.abs(locRallies - cldRallies) > 0);
 
       const isDesynced = scoreDiffers || serverDiffers || statusDiffers;
 

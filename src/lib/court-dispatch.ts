@@ -687,7 +687,9 @@ export async function dispatchMatchToCourt(
         teamBPlayers: finalTeamBPlayers,
         teamBClub: match.teamBClub ?? m.teamBClub,
         status: startImmediately ? ("live" as const) : ("scheduled" as const),
-        score: isConcluded ? createInitialScore() : m.score,
+        score: isConcluded || (!m.score?.rallies?.length && m.score?.teamAScore === 0 && m.score?.teamBScore === 0)
+          ? createInitialScore()
+          : m.score,
         winnerTeam: undefined,
         startedAt: startImmediately ? (isConcluded ? now : (m.startedAt ?? now)) : undefined,
         endedAt: undefined,

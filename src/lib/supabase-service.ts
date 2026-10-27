@@ -686,7 +686,7 @@ export async function dbGetMatches(tournamentSlug?: string): Promise<LiveMatch[]
           teamAScore: m.team_a_score,
           teamBScore: m.team_b_score,
           servingTeam: (m.serving_team as "A" | "B") || "A",
-          serverNumber: (m.server_number as 1 | 2) || 1,
+          serverNumber: (m.server_number as 1 | 2) || 2,
           rallies: Array.isArray(m.rallies) ? (m.rallies as any) : [],
         };
 
@@ -1580,7 +1580,7 @@ function ensureSharedLiveChannel() {
               teams: `${row.team_a_name || "Team A"} vs ${row.team_b_name || "Team B"}`,
               scoreA: row.team_a_score ?? 0,
               scoreB: row.team_b_score ?? 0,
-              serverNumber: row.server_number ?? 1,
+              serverNumber: row.server_number ?? 2,
               servingTeam: row.serving_team ?? "A",
               source: "realtime",
               status: row.status || "live",
