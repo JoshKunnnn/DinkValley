@@ -60,10 +60,11 @@ import {
   findMatchForCourtStation,
   isMatchInCategory,
   isQueueItemInCategory,
+  releaseCourtStation,
 } from "@/lib/court-dispatch";
 import { getDrawnGroups } from "@/components/admin/BracketDraw";
 import { getMainDrawMatches, syncMainDrawWithLiveMatches } from "@/components/admin/DrawsManager";
-import { dbUpdateCourtStation, dbSubscribeToLive, isSameCategory } from "@/lib/supabase-service";
+import { dbUpdateCourtStation, dbSubscribeToLive, isSameCategory, dbSaveMatch } from "@/lib/supabase-service";
 import { DispatchDebugStation, type DebugTab } from "@/components/admin/DispatchDebugStation";
 import { MatchHistory } from "@/components/admin/MatchHistory";
 import { Search, X, Filter, Clock, Award, CheckCircle2, RotateCcw, History } from "lucide-react";
@@ -1957,6 +1958,35 @@ export function CourtDispatch({
     setResetConfirmMatch(null);
   };
 
+  const handleRemoveUmpireFromCourt = async (court: FacilityCourt, m: LiveMatch) => {
+    updateMatchStore(m.id, (prev) => {
+      const updated = { ...prev, officiatedBy: undefined };
+      return updated;
+    });
+    try {
+      const updatedMatch = { ...m, officiatedBy: undefined };
+      await dbSaveMatch(updatedMatch);
+    } catch {
+      // network fallback
+    }
+    releaseCourtStation(court);
+    try {
+      await dbUpdateCourtStation(court, { assignedUmpire: null });
+    } catch {
+      // network fallback
+    }
+    if (typeof localStorage !== "undefined") {
+      try {
+        localStorage.removeItem(`dv_court_station_claim_${court}`);
+      } catch {}
+    }
+    const freshStations = getCourtStations();
+    setStations(freshStations);
+    reloadData();
+    setCopyNotice(`Official removed from ${court}. Station unlocked.`);
+    setTimeout(() => setCopyNotice(null), 3500);
+  };
+
   const handleQueueUnassignedAll = useCallback(() => {
     // Queue all matches currently visible in groupedUnassigned
     const visibleMatches = groupedUnassigned.flatMap(([, stageMatches]) => stageMatches);
@@ -2663,6 +2693,28 @@ export function CourtDispatch({
                           </span>
                         )}
                       </div>
+
+                      {/* Operating Umpire / Station Official */}
+                      {(activeMatch.officiatedBy || station.assignedUmpire) && (
+                        <div className="flex items-center justify-between p-2 rounded bg-card border-2 border-border text-foreground text-xs">
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            <span className="text-[0.65rem] text-muted-foreground uppercase tracking-wider font-semibold">
+                              Official:
+                            </span>
+                            <span className="font-semibold text-pickle truncate">
+                              {activeMatch.officiatedBy || station.assignedUmpire}
+                            </span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveUmpireFromCourt(courtName, activeMatch)}
+                            className="px-2.5 py-1 text-[0.62rem] font-bold uppercase tracking-wider bg-brick/20 border border-brick/40 text-brick hover:bg-brick hover:text-sand transition-colors cursor-pointer shrink-0"
+                            title={`Remove ${activeMatch.officiatedBy || station.assignedUmpire} from ${courtName}`}
+                          >
+                            Remove Umpire
+                          </button>
+                        </div>
+                      )}
 
                       {/* Teams & Scores */}
                       <div className="space-y-3">

@@ -1,5 +1,5 @@
 import React from "react";
-import type { LiveScore } from "@/lib/match-store";
+import { type LiveScore, deriveActiveServerBase } from "@/lib/match-store";
 
 interface MiniCourtVisualizerProps {
   score: LiveScore;
@@ -16,8 +16,13 @@ export function MiniCourtVisualizer({
 }: MiniCourtVisualizerProps) {
   const isTeamAServing = score.servingTeam === "A";
   const servingScore = isTeamAServing ? score.teamAScore : score.teamBScore;
-  // In pickleball doubles, even score serves from right court, odd from left
-  const isRightCourt = servingScore % 2 === 0;
+  const scoreEven = servingScore % 2 === 0;
+  // In pickleball doubles:
+  // Base 1 is on Right court when score is even, Left court when odd.
+  // Base 2 is on Right court when score is odd, Left court when even.
+  // Active server is determined by activeServerBase:
+  const activeServerBase = deriveActiveServerBase(score);
+  const isRightCourt = activeServerBase === 1 ? scoreEven : !scoreEven;
 
   return (
     <div className={`w-full overflow-hidden rounded border border-pickle/40 bg-[#16221D] ${compact ? "p-2" : "p-3 sm:p-4"}`}>
@@ -31,7 +36,7 @@ export function MiniCourtVisualizer({
           Serving: {isTeamAServing ? teamAName : teamBName}
         </span>
         <span className="px-2 py-0.5 rounded bg-black/80 border border-emerald-500/40 text-[0.62rem] font-black text-emerald-300">
-          Server {score.serverNumber} &middot; {isRightCourt ? "Right (Even)" : "Left (Odd)"}
+          Server {score.serverNumber} &middot; {isRightCourt ? "Right Court" : "Left Court"}
         </span>
       </div>
 

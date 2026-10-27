@@ -110,42 +110,42 @@ export function LiveCourtsBoard({
   }, [queue, tournamentSlug]);
 
   return (
-    <div className="surface-card p-4 sm:p-5 border-2 border-border rounded-2xl space-y-4 bg-card">
+    <div className="surface-card p-3 sm:p-5 border-2 border-border rounded-2xl space-y-3 sm:space-y-4 bg-card">
       {/* ── Header ── */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-b-2 border-border/80 pb-4">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5 sm:gap-3 border-b-2 border-border/80 pb-3 sm:pb-4">
         <div>
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-xs font-bold uppercase tracking-[0.24em] text-emerald-700 dark:text-emerald-400 font-mono">
+          <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
+            <span className="text-[0.65rem] sm:text-xs font-bold uppercase tracking-[0.2em] sm:tracking-[0.24em] text-emerald-700 dark:text-emerald-400 font-mono">
               Facility Courts 1–4 &middot; Live Action
             </span>
             {liveCourtsCount > 0 ? (
-              <span className="inline-flex items-center gap-1.5 px-3 py-1 text-xs font-extrabold uppercase tracking-wider bg-emerald-600 text-white rounded-full shadow-sm">
-                <span className="h-2 w-2 rounded-full bg-white animate-ping" />
+              <span className="inline-flex items-center gap-1 sm:gap-1.5 px-2 sm:px-3 py-0.5 sm:py-1 text-[0.65rem] sm:text-xs font-extrabold uppercase tracking-wider bg-emerald-600 text-white rounded-full shadow-sm">
+                <span className="h-1.5 w-1.5 sm:h-2 sm:w-2 rounded-full bg-white animate-ping" />
                 {liveCourtsCount} {liveCourtsCount === 1 ? "Court" : "Courts"} Live Now
               </span>
             ) : (
-              <span className="px-3 py-1 text-xs font-bold uppercase tracking-wider bg-stone-200 dark:bg-stone-800 text-stone-800 dark:text-stone-200 border border-border rounded-full">
+              <span className="px-2 sm:px-3 py-0.5 sm:py-1 text-[0.65rem] sm:text-xs font-bold uppercase tracking-wider bg-stone-200 dark:bg-stone-800 text-stone-800 dark:text-stone-200 border border-border rounded-full">
                 All Courts Standby
               </span>
             )}
           </div>
-          <h3 className="font-display text-3xl sm:text-4xl text-foreground font-black mt-1 tracking-wide">
+          <h3 className="font-display text-2xl sm:text-4xl text-foreground font-black mt-1 tracking-wide">
             Courts Live View
           </h3>
-          <p className="text-xs sm:text-sm text-foreground/80 font-medium mt-1">
+          <p className="text-xs sm:text-sm text-foreground/80 font-medium mt-0.5 sm:mt-1">
             Real-time score counters, serving indicators, and match progress streamed directly from umpire terminals.
           </p>
         </div>
 
         <div className="flex items-center gap-2 self-start sm:self-auto">
-          <span className="text-xs font-mono font-bold uppercase tracking-wider border-2 border-border px-3 py-1 rounded-lg bg-stone-100 dark:bg-stone-800 text-stone-800 dark:text-stone-200 shadow-xs">
+          <span className="text-[0.65rem] sm:text-xs font-mono font-bold uppercase tracking-wider border-2 border-border px-2.5 sm:px-3 py-0.5 sm:py-1 rounded-lg bg-stone-100 dark:bg-stone-800 text-stone-800 dark:text-stone-200 shadow-xs">
             Auto-Sync Active
           </span>
         </div>
       </div>
 
-      {/* ── 4 Dedicated Facility Courts Grid ── */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+      {/* ── 4 Dedicated Facility Courts Grid (2x2 Matrix on Mobile) ── */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3.5">
         {FACILITY_COURTS.map((courtName, courtIdx) => {
           const station = stations[courtName];
 
@@ -183,7 +183,7 @@ export function LiveCourtsBoard({
           return (
             <div
               key={courtName}
-              className={`p-4 rounded-xl border-2 flex flex-col justify-between transition-all ${
+              className={`p-2.5 sm:p-4 rounded-xl border-2 flex flex-col justify-between transition-all ${
                 liveMatch
                   ? isCurrentCategoryMatch
                     ? "bg-card border-emerald-600 shadow-md ring-2 ring-emerald-600/30"
@@ -195,47 +195,50 @@ export function LiveCourtsBoard({
                       : "bg-card border-border hover:border-emerald-600/50"
               }`}
             >
-              <div className="space-y-3">
+              <div className="space-y-2 sm:space-y-3">
                 {/* Court Top Bar */}
-                <div className="flex items-center justify-between border-b-2 border-border/80 pb-2.5">
-                  <div className="flex items-center gap-1.5 flex-wrap">
-                    <span className="font-display text-2xl text-foreground font-black tracking-wide">
+                <div className="flex items-center justify-between border-b-2 border-border/80 pb-2 sm:pb-2.5 gap-1">
+                  <div className="flex items-center gap-1 sm:gap-1.5 flex-wrap min-w-0">
+                    <span className="font-display text-sm sm:text-2xl text-foreground font-black tracking-wide truncate">
                       {courtName}
                     </span>
                     {isCurrentCategoryMatch && (
-                      <span className="px-2 py-0.5 text-[0.62rem] font-bold uppercase tracking-wider bg-emerald-700 text-white rounded font-mono shadow-xs">
+                      <span className="px-1.5 py-0.5 text-[0.55rem] sm:text-[0.62rem] font-bold uppercase tracking-wider bg-emerald-700 text-white rounded font-mono shadow-xs shrink-0">
                         This Division
                       </span>
                     )}
                   </div>
 
                   {liveMatch ? (
-                    <span className="px-2.5 py-1 text-xs font-black uppercase tracking-wider bg-emerald-600 text-white rounded-md shadow-xs flex items-center gap-1.5">
-                      <span className="h-2 w-2 rounded-full bg-white animate-ping" />
-                      Live Now
+                    <span className="px-1.5 sm:px-2.5 py-0.5 sm:py-1 text-[0.6rem] sm:text-xs font-black uppercase tracking-wider bg-emerald-600 text-white rounded-md shadow-xs flex items-center gap-1 sm:gap-1.5 shrink-0">
+                      <span className="h-1.5 w-1.5 sm:h-2 sm:w-2 rounded-full bg-white animate-ping" />
+                      <span className="sm:hidden">Live</span>
+                      <span className="hidden sm:inline">Live Now</span>
                     </span>
                   ) : station?.status === "warmup" ? (
-                    <span className="px-2.5 py-1 text-xs font-black uppercase tracking-wider bg-amber-500 text-white rounded-md shadow-xs">
+                    <span className="px-1.5 sm:px-2.5 py-0.5 sm:py-1 text-[0.6rem] sm:text-xs font-black uppercase tracking-wider bg-amber-500 text-white rounded-md shadow-xs shrink-0">
                       Warm-up
                     </span>
                   ) : station?.status === "maintenance" ? (
-                    <span className="px-2.5 py-1 text-xs font-black uppercase tracking-wider bg-red-600 text-white rounded-md shadow-xs">
-                      Maintenance
+                    <span className="px-1.5 sm:px-2.5 py-0.5 sm:py-1 text-[0.6rem] sm:text-xs font-black uppercase tracking-wider bg-red-600 text-white rounded-md shadow-xs shrink-0">
+                      <span className="sm:hidden">Maint</span>
+                      <span className="hidden sm:inline">Maintenance</span>
                     </span>
                   ) : (
-                    <span className="px-2.5 py-1 text-xs font-bold uppercase tracking-wider bg-stone-200 dark:bg-stone-800 text-stone-800 dark:text-stone-200 border border-stone-300 dark:border-stone-700 rounded-md">
-                      Open / Ready
+                    <span className="px-1.5 sm:px-2.5 py-0.5 sm:py-1 text-[0.6rem] sm:text-xs font-bold uppercase tracking-wider bg-stone-200 dark:bg-stone-800 text-stone-800 dark:text-stone-200 border border-stone-300 dark:border-stone-700 rounded-md shrink-0">
+                      <span className="sm:hidden">Ready</span>
+                      <span className="hidden sm:inline">Open / Ready</span>
                     </span>
                   )}
                 </div>
 
                 {/* Division & Stage Header */}
                 {activeMatch && (
-                  <div className="flex items-center justify-between gap-1.5">
-                    <span className="font-extrabold text-foreground text-xs sm:text-sm truncate">
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="font-extrabold text-foreground text-[0.65rem] sm:text-sm truncate">
                       {activeCategory?.label || "Tournament Match"}
                     </span>
-                    <span className="text-emerald-800 dark:text-emerald-300 font-mono font-bold text-xs px-2 py-0.5 bg-emerald-100 dark:bg-emerald-950/60 rounded border border-emerald-300 dark:border-emerald-800/60 shrink-0">
+                    <span className="text-emerald-800 dark:text-emerald-300 font-mono font-bold text-[0.58rem] sm:text-xs px-1.5 sm:px-2 py-0.5 bg-emerald-100 dark:bg-emerald-950/60 rounded border border-emerald-300 dark:border-emerald-800/60 shrink-0">
                       {activeMatch.stage || "Pool Play"}
                     </span>
                   </div>
@@ -243,41 +246,41 @@ export function LiveCourtsBoard({
 
                 {/* ── High-Contrast Broadcast Digital Scoreboard ── */}
                 {activeMatch ? (
-                  <div className="space-y-2 bg-[#0c1410] border-2 border-emerald-500/70 p-3 rounded-xl shadow-lg text-white">
+                  <div className="space-y-1.5 sm:space-y-2 bg-[#0c1410] border-2 border-emerald-500/70 p-1.5 sm:p-3 rounded-lg sm:rounded-xl shadow-lg text-white">
                     {/* Team A */}
                     {(() => {
                       const isServing = activeMatch.score.servingTeam === "A" && Boolean(liveMatch);
                       return (
                         <div
                           onClick={() => onTeamClick?.(activeMatch.teamAName)}
-                          className={`p-2.5 rounded-lg flex items-center justify-between transition-all ${
+                          className={`p-1.5 sm:p-2.5 rounded-lg flex items-center justify-between transition-all ${
                             isServing
                               ? "bg-[#182920] border-2 border-emerald-400 shadow-sm"
                               : "bg-[#121c17] border border-white/10"
                           } ${onTeamClick ? "cursor-pointer hover:ring-1 hover:ring-white/40" : ""}`}
                         >
-                          <div className="min-w-0 pr-2 space-y-0.5">
-                            <div className="flex items-center gap-2">
+                          <div className="min-w-0 pr-1 sm:pr-2 space-y-0.5">
+                            <div className="flex items-center gap-1 sm:gap-2">
                               {isServing && (
-                                <span className="h-2.5 w-2.5 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_8px_#34d399] shrink-0" />
+                                <span className="h-1.5 w-1.5 sm:h-2.5 sm:w-2.5 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_8px_#34d399] shrink-0" />
                               )}
                               <span
-                                className={`truncate font-black text-base sm:text-lg tracking-wide ${
+                                className={`truncate font-black text-xs sm:text-base lg:text-lg tracking-tight sm:tracking-wide ${
                                   isServing ? "text-white" : "text-white/95"
                                 }`}
                               >
                                 {activeMatch.teamAName}
                               </span>
                               {isServing && (
-                                <span className="bg-emerald-400 text-black text-[0.6rem] font-black px-1.5 py-0.2 rounded font-mono uppercase shrink-0">
+                                <span className="bg-emerald-400 text-black text-[0.5rem] sm:text-[0.6rem] font-black px-1 sm:px-1.5 py-0.2 rounded font-mono uppercase shrink-0">
                                   Serve
                                 </span>
                               )}
                             </div>
                             {activeMatch.teamAPlayers && activeMatch.teamAPlayers.length > 0 && (
                               <div
-                                className={`text-xs font-mono truncate ${
-                                  isServing ? "text-emerald-200 font-semibold pl-4" : "text-stone-300 font-medium"
+                                className={`text-[0.6rem] sm:text-xs font-mono truncate ${
+                                  isServing ? "text-emerald-200 font-semibold" : "text-stone-300 font-medium"
                                 }`}
                               >
                                 {activeMatch.teamAPlayers.join(" & ")}
@@ -285,7 +288,7 @@ export function LiveCourtsBoard({
                             )}
                           </div>
                           <span
-                            className={`font-display text-4xl sm:text-5xl font-black tabular-nums shrink-0 ml-3 ${
+                            className={`font-display text-xl sm:text-4xl lg:text-5xl font-black tabular-nums shrink-0 ml-1.5 sm:ml-3 ${
                               isServing
                                 ? "text-emerald-400 drop-shadow-[0_2px_8px_rgba(52,211,153,0.35)]"
                                 : "text-white"
@@ -297,7 +300,7 @@ export function LiveCourtsBoard({
                       );
                     })()}
 
-                    <div className="h-px bg-white/15 my-1" />
+                    <div className="h-px bg-white/15 my-0.5 sm:my-1" />
 
                     {/* Team B */}
                     {(() => {
@@ -305,34 +308,34 @@ export function LiveCourtsBoard({
                       return (
                         <div
                           onClick={() => onTeamClick?.(activeMatch.teamBName)}
-                          className={`p-2.5 rounded-lg flex items-center justify-between transition-all ${
+                          className={`p-1.5 sm:p-2.5 rounded-lg flex items-center justify-between transition-all ${
                             isServing
                               ? "bg-[#182920] border-2 border-emerald-400 shadow-sm"
                               : "bg-[#121c17] border border-white/10"
                           } ${onTeamClick ? "cursor-pointer hover:ring-1 hover:ring-white/40" : ""}`}
                         >
-                          <div className="min-w-0 pr-2 space-y-0.5">
-                            <div className="flex items-center gap-2">
+                          <div className="min-w-0 pr-1 sm:pr-2 space-y-0.5">
+                            <div className="flex items-center gap-1 sm:gap-2">
                               {isServing && (
-                                <span className="h-2.5 w-2.5 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_8px_#34d399] shrink-0" />
+                                <span className="h-1.5 w-1.5 sm:h-2.5 sm:w-2.5 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_8px_#34d399] shrink-0" />
                               )}
                               <span
-                                className={`truncate font-black text-base sm:text-lg tracking-wide ${
+                                className={`truncate font-black text-xs sm:text-base lg:text-lg tracking-tight sm:tracking-wide ${
                                   isServing ? "text-white" : "text-white/95"
                                 }`}
                               >
                                 {activeMatch.teamBName}
                               </span>
                               {isServing && (
-                                <span className="bg-emerald-400 text-black text-[0.6rem] font-black px-1.5 py-0.2 rounded font-mono uppercase shrink-0">
+                                <span className="bg-emerald-400 text-black text-[0.5rem] sm:text-[0.6rem] font-black px-1 sm:px-1.5 py-0.2 rounded font-mono uppercase shrink-0">
                                   Serve
                                 </span>
                               )}
                             </div>
                             {activeMatch.teamBPlayers && activeMatch.teamBPlayers.length > 0 && (
                               <div
-                                className={`text-xs font-mono truncate ${
-                                  isServing ? "text-emerald-200 font-semibold pl-4" : "text-stone-300 font-medium"
+                                className={`text-[0.6rem] sm:text-xs font-mono truncate ${
+                                  isServing ? "text-emerald-200 font-semibold" : "text-stone-300 font-medium"
                                 }`}
                               >
                                 {activeMatch.teamBPlayers.join(" & ")}
@@ -340,7 +343,7 @@ export function LiveCourtsBoard({
                             )}
                           </div>
                           <span
-                            className={`font-display text-4xl sm:text-5xl font-black tabular-nums shrink-0 ml-3 ${
+                            className={`font-display text-xl sm:text-4xl lg:text-5xl font-black tabular-nums shrink-0 ml-1.5 sm:ml-3 ${
                               isServing
                                 ? "text-emerald-400 drop-shadow-[0_2px_8px_rgba(52,211,153,0.35)]"
                                 : "text-white"
@@ -354,10 +357,10 @@ export function LiveCourtsBoard({
 
                     {/* Service Call Readout & 2D Court Toggle */}
                     {liveMatch && (
-                      <div className="mt-2.5 pt-2 border-t border-white/15 flex items-center justify-between text-xs font-mono">
-                        <span className="text-emerald-400 font-black tracking-wider flex items-center gap-1.5">
-                          <span>CALL:</span>
-                          <span className="text-white bg-black/60 px-2 py-0.5 rounded border border-emerald-500/40 text-xs">
+                      <div className="mt-1.5 sm:mt-2.5 pt-1.5 sm:pt-2 border-t border-white/15 flex flex-wrap items-center justify-between gap-1 text-[0.6rem] sm:text-xs font-mono">
+                        <span className="text-emerald-400 font-black tracking-wider flex items-center gap-1">
+                          <span className="hidden sm:inline">CALL:</span>
+                          <span className="text-white bg-black/60 px-1.5 sm:px-2 py-0.5 rounded border border-emerald-500/40 text-[0.6rem] sm:text-xs">
                             {activeMatch.score.servingTeam === "A"
                               ? activeMatch.score.teamAScore
                               : activeMatch.score.teamBScore}
@@ -373,9 +376,10 @@ export function LiveCourtsBoard({
                           onClick={() =>
                             setExpandedCourt((curr) => (curr === courtName ? null : courtName))
                           }
-                          className="bg-emerald-950/90 hover:bg-emerald-900 text-emerald-200 hover:text-white border border-emerald-700/60 px-2.5 py-1 rounded text-[0.65rem] font-mono font-bold uppercase tracking-wider transition-colors cursor-pointer"
+                          className="bg-emerald-950/90 hover:bg-emerald-900 text-emerald-200 hover:text-white border border-emerald-700/60 px-1.5 sm:px-2.5 py-0.5 sm:py-1 rounded text-[0.55rem] sm:text-[0.65rem] font-mono font-bold uppercase tracking-wider transition-colors cursor-pointer"
                         >
-                          {isExpanded ? "Hide 2D Court" : "View 2D Court"}
+                          <span className="sm:hidden">{isExpanded ? "Hide" : "2D"}</span>
+                          <span className="hidden sm:inline">{isExpanded ? "Hide 2D Court" : "View 2D Court"}</span>
                         </button>
                       </div>
                     )}
@@ -393,28 +397,28 @@ export function LiveCourtsBoard({
                     )}
                   </div>
                 ) : (
-                  <div className="py-6 px-4 text-center space-y-2 bg-stone-100/90 dark:bg-stone-900/60 rounded-xl border-2 border-dashed border-stone-300 dark:border-stone-700">
-                    <span className="text-xs font-mono uppercase tracking-widest text-foreground/60 font-bold block">
+                  <div className="py-3 sm:py-6 px-2 sm:px-4 text-center space-y-1.5 sm:space-y-2 bg-stone-100/90 dark:bg-stone-900/60 rounded-lg sm:rounded-xl border-2 border-dashed border-stone-300 dark:border-stone-700">
+                    <span className="text-[0.58rem] sm:text-xs font-mono uppercase tracking-widest text-foreground/60 font-bold block">
                       Court Available
                     </span>
-                    <h4 className="text-foreground font-display text-2xl font-bold tracking-wide">
+                    <h4 className="text-foreground font-display text-sm sm:text-2xl font-bold tracking-wide">
                       Ready for Play
                     </h4>
                     {standbyNext ? (
-                      <div className="p-3 bg-white dark:bg-stone-800 border-2 border-emerald-600/40 rounded-lg text-left space-y-1 shadow-xs">
-                        <span className="text-[0.65rem] text-emerald-800 dark:text-emerald-400 block uppercase font-mono font-black tracking-wider">
+                      <div className="p-1.5 sm:p-3 bg-white dark:bg-stone-800 border-2 border-emerald-600/40 rounded-md sm:rounded-lg text-left space-y-0.5 sm:space-y-1 shadow-xs">
+                        <span className="text-[0.55rem] sm:text-[0.65rem] text-emerald-800 dark:text-emerald-400 block uppercase font-mono font-black tracking-wider">
                           Next in Queue:
                         </span>
-                        <span className="font-extrabold text-foreground text-sm block truncate">
+                        <span className="font-extrabold text-foreground text-xs sm:text-sm block truncate">
                           {standbyNext.teamAName} vs {standbyNext.teamBName}
                         </span>
-                        <span className="text-[0.7rem] text-foreground/70 font-mono block">
+                        <span className="text-[0.58rem] sm:text-[0.7rem] text-foreground/70 font-mono block truncate">
                           {standbyNext.stage}
                         </span>
                       </div>
                     ) : (
-                      <span className="text-xs text-foreground/70 font-medium block">
-                        Awaiting next match dispatch from desk
+                      <span className="text-[0.65rem] sm:text-xs text-foreground/70 font-medium block">
+                        Awaiting match dispatch
                       </span>
                     )}
                   </div>
@@ -423,12 +427,12 @@ export function LiveCourtsBoard({
 
               {/* On-Deck Footer */}
               {onDeckMatch && (
-                <div className="mt-3.5 pt-2.5 border-t-2 border-border/80 text-xs">
+                <div className="mt-2 sm:mt-3.5 pt-1.5 sm:pt-2.5 border-t-2 border-border/80 text-xs">
                   <div className="flex items-center justify-between gap-1">
-                    <span className="font-black text-emerald-800 dark:text-emerald-400 uppercase font-mono tracking-wider text-[0.68rem] shrink-0">
+                    <span className="font-black text-emerald-800 dark:text-emerald-400 uppercase font-mono tracking-wider text-[0.58rem] sm:text-[0.68rem] shrink-0">
                       ON DECK:
                     </span>
-                    <span className="truncate text-foreground font-bold text-xs text-right">
+                    <span className="truncate text-foreground font-bold text-[0.65rem] sm:text-xs text-right">
                       {"teamAName" in onDeckMatch
                         ? `${onDeckMatch.teamAName} vs ${onDeckMatch.teamBName}`
                         : "Next Match"}

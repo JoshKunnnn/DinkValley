@@ -48,8 +48,18 @@ export function MatchHistory({
 
   // Deduplicate and filter completed matches belonging to this tournament
   const allCompletedMatches = useMemo(() => {
+    const isMatchingSlug = (slugA?: string, slugB?: string) => {
+      if (!slugA || !slugB) return true;
+      if (slugA === slugB) return true;
+      const a = slugA.toLowerCase();
+      const b = slugB.toLowerCase();
+      const isDvA = a === "dink-valley" || a === "dink-valley-tournament" || a === "dv";
+      const isDvB = b === "dink-valley" || b === "dink-valley-tournament" || b === "dv";
+      return isDvA && isDvB;
+    };
+
     const filtered = matches.filter((m) => {
-      if (tournamentSlug && m.tournamentSlug && m.tournamentSlug !== tournamentSlug) {
+      if (tournamentSlug && m.tournamentSlug && !isMatchingSlug(m.tournamentSlug, tournamentSlug)) {
         return false;
       }
       return m.status === "final" || Boolean(m.winnerTeam);

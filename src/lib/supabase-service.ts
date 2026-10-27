@@ -661,13 +661,18 @@ export async function dbGetMatches(tournamentSlug?: string): Promise<LiveMatch[]
           .eq("slug", tournamentSlug)
           .maybeSingle();
 
+        const isDinkValley = tournamentSlug === "dink-valley" || tournamentSlug === "dink-valley-tournament" || tournamentSlug === "dv";
+        const slugFilter = isDinkValley
+          ? `tournament_slug.eq.dink-valley,tournament_slug.eq.dink-valley-tournament,tournament_slug.eq.dv`
+          : `tournament_slug.eq.${tournamentSlug}`;
+
         if (tourney?.id) {
           query = query.or(
-            `tournament_id.eq.${tourney.id},tournament_slug.eq.${tournamentSlug},court.eq.Court 1,court.eq.Court 2,court.eq.Court 3,court.eq.Court 4`
+            `tournament_id.eq.${tourney.id},${slugFilter},and(court.in.("Court 1","Court 2","Court 3","Court 4"),status.neq.final)`
           );
         } else {
           query = query.or(
-            `tournament_slug.eq.${tournamentSlug},court.eq.Court 1,court.eq.Court 2,court.eq.Court 3,court.eq.Court 4`
+            `${slugFilter},and(court.in.("Court 1","Court 2","Court 3","Court 4"),status.neq.final)`
           );
         }
       }
@@ -1178,6 +1183,61 @@ export async function dbDeleteMatchesBatch(matchIds: string[]): Promise<boolean>
   } catch (err) {
     console.warn("[Supabase] Unexpected error in batch delete matches:", err);
     return false;
+  }
+}
+
+/**
+ * Permanently purge all completed/final matches for a tournament from Supabase.
+ * Scoped to tournament and optionally categoryId. Also purges null-slug ghost matches.
+ */
+export async function dbPurgeCompletedMatches(
+  tournamentSlug: string,
+  categoryId?: string,
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const { data: tourney } = await supabase
+      .from("tournaments")
+      .select("id")
+      .eq("slug", tournamentSlug)
+      .maybeSingle();
+
+    const tourneyId = tourney?.id ?? null;
+
+    let targetCatUuid: string | null = null;
+    if (categoryId) {
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (isUuid.test(categoryId)) {
+        targetCatUuid = categoryId;
+      } else {
+        const { data: catRow } = await supabase
+          .from("categories")
+          .select("id")
+          .or(`id.eq.${categoryId},category_slug.eq.${categoryId}`)
+          .maybeSingle();
+        targetCatUuid = catRow?.id ?? null;
+      }
+    }
+
+    let q = supabase.from("matches").delete().eq("status", "final");
+    if (tourneyId && tournamentSlug) {
+      q = q.or(`tournament_slug.eq.${tournamentSlug},tournament_id.eq.${tourneyId},tournament_slug.eq.dink-valley-tournament,tournament_slug.is.null`);
+    } else if (tournamentSlug) {
+      q = q.or(`tournament_slug.eq.${tournamentSlug},tournament_slug.eq.dink-valley-tournament,tournament_slug.is.null`);
+    }
+
+    if (targetCatUuid) {
+      q = q.eq("category_id", targetCatUuid);
+    }
+
+    const { error } = await q;
+    if (error) {
+      console.warn("[Supabase] Purge completed matches error:", error.message);
+      return { success: false, error: error.message };
+    }
+    return { success: true };
+  } catch (err: any) {
+    console.warn("[Supabase] Unexpected error purging completed matches:", err);
+    return { success: false, error: err?.message || String(err) };
   }
 }
 

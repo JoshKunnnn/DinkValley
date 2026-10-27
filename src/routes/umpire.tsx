@@ -1,6 +1,6 @@
 import { createFileRoute, redirect, useNavigate } from "@tanstack/react-router";
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { X, Trophy, AlertTriangle, Lock, LayoutList, Columns, LayoutGrid } from "lucide-react";
+import { X, Trophy, AlertTriangle, Lock, LayoutList, Columns, LayoutGrid, UserX } from "lucide-react";
 import { UmpireMobileNav } from "@/components/admin/UmpireMobileNav";
 
 import {
@@ -12,6 +12,7 @@ import {
   endGame,
   undoLastRally,
   resetMatch,
+  deriveActiveServerBase,
   isMatchMatchingStation,
   getLocalMatchMutationAt,
   type LiveMatch,
@@ -32,7 +33,7 @@ import {
   findMatchForCourtStation,
 } from "@/lib/court-dispatch";
 import { useTournamentStore, getTournaments } from "@/lib/tournament-store";
-import { dbUpdateCourtStation, dbSubscribeToLive } from "@/lib/supabase-service";
+import { dbUpdateCourtStation, dbSubscribeToLive, dbSaveMatch } from "@/lib/supabase-service";
 import { DispatchDebugStation } from "@/components/admin/DispatchDebugStation";
 import { syncMainDrawWithLiveMatches } from "@/components/admin/DrawsManager";
 
@@ -149,14 +150,18 @@ function Umpire() {
       if (m.tournamentSlug) {
         return m.tournamentSlug === activeTournamentSlug;
       }
-      return true;
+      return m.id.includes(activeTournamentSlug);
     });
   }, [matches, activeTournamentSlug, stations]);
 
   // Load umpire identity
   useEffect(() => {
     if (typeof localStorage !== "undefined") {
-      setUmpireName(localStorage.getItem("mock_umpire_name") ?? "Official");
+      setUmpireName(
+        localStorage.getItem("mock_umpire_name") ||
+        localStorage.getItem("mock_admin_name") ||
+        "Official"
+      );
     }
   }, []);
 
@@ -498,6 +503,7 @@ function Umpire() {
             onBack={() => setSelectedMatchId(null)}
             onViewResults={() => setActiveTab("results")}
             onOpenDebug={() => setIsDebugOpen(true)}
+            onRefreshStations={() => setStations(getCourtStations())}
           />
         )}
         {activeTab === "results" && (
@@ -585,6 +591,57 @@ function TournamentDesk({
     onUpdate(m.id, resetMatch);
     onSelectMatch(m.id);
     setMatchToReset(null);
+  };
+
+  const handleDeskRemoveUmpire = async (court: FacilityCourt, m: LiveMatch) => {
+    onUpdate(m.id, (prev) => {
+      const updated = { ...prev, officiatedBy: undefined };
+      return updated;
+    });
+    try {
+      const updatedMatch = { ...m, officiatedBy: undefined };
+      await dbSaveMatch(updatedMatch);
+    } catch {
+      // network fallback
+    }
+    releaseCourtStation(court);
+    try {
+      await dbUpdateCourtStation(court, { assignedUmpire: null });
+    } catch {
+      // network fallback
+    }
+    if (typeof localStorage !== "undefined") {
+      try {
+        localStorage.removeItem(`dv_court_station_claim_${court}`);
+      } catch {}
+    }
+    window.dispatchEvent(new CustomEvent("dv_court_stations_updated"));
+    window.dispatchEvent(new CustomEvent("dv_matches_updated"));
+    window.dispatchEvent(new CustomEvent("dv_live_matches_updated"));
+  };
+
+  const handleDeskTakeover = async (court: FacilityCourt, m: LiveMatch) => {
+    onUpdate(m.id, (prev) => ({
+      ...prev,
+      officiatedBy: currentUmpire,
+    }));
+    claimCourtStation(court, currentUmpire);
+    try {
+      await dbUpdateCourtStation(court, {
+        currentMatchId: m.id,
+        assignedUmpire: currentUmpire,
+      });
+      await dbSaveMatch({
+        ...m,
+        officiatedBy: currentUmpire,
+      });
+    } catch {
+      // network fallback
+    }
+    window.dispatchEvent(new CustomEvent("dv_court_stations_updated"));
+    window.dispatchEvent(new CustomEvent("dv_matches_updated"));
+    window.dispatchEvent(new CustomEvent("dv_live_matches_updated"));
+    onSelectMatch(m.id);
   };
 
   const confirmedMatches = useMemo(() => {
@@ -758,9 +815,29 @@ function TournamentDesk({
                     <div className="flex items-center gap-1.5 pt-1">
                       {courtMatch ? (
                         isOperatedByOther ? (
-                          <div className="flex items-center gap-1.5 w-full py-2 px-2.5 bg-brick/10 border border-brick/40 text-brick text-[0.65rem] font-bold uppercase tracking-wider justify-center">
-                            <Lock size={12} />
-                            <span>In Use: {operatingOfficial}</span>
+                          <div className="flex flex-col gap-1 w-full">
+                            <div className="flex items-center gap-1.5 w-full py-1.5 px-2 bg-brick/10 border border-brick/40 text-brick text-[0.62rem] font-bold uppercase tracking-wider justify-center">
+                              <Lock size={11} />
+                              <span className="truncate">In Use: {operatingOfficial}</span>
+                            </div>
+                            <div className="flex items-center gap-1 w-full">
+                              <button
+                                type="button"
+                                onClick={() => handleDeskRemoveUmpire(court, courtMatch)}
+                                className="flex-1 py-1 text-[0.6rem] font-bold uppercase tracking-wider bg-brick/20 border border-brick/40 text-brick hover:bg-brick hover:text-sand transition-colors cursor-pointer text-center"
+                                title={`Remove ${operatingOfficial} from ${court}`}
+                              >
+                                Remove
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDeskTakeover(court, courtMatch)}
+                                className="flex-1 py-1 text-[0.6rem] font-bold uppercase tracking-wider bg-pickle/20 border border-pickle/40 text-pickle hover:bg-pickle hover:text-sand transition-colors cursor-pointer text-center"
+                                title={`Take over officiating on ${court}`}
+                              >
+                                Take Over
+                              </button>
+                            </div>
                           </div>
                         ) : (
                           <div className="flex items-center gap-1 w-full flex-1">
@@ -1172,19 +1249,13 @@ export function computeCourtPositions(
     rawBPlayers.find((p) => p !== bBase1) || rawBPlayers[1] || bBase1;
   const teamBScoreEven = s.teamBScore % 2 === 0;
 
-  // Serving court (Right if serving team score is even, Left if odd)
-  const servingCourt: "right" | "left" =
-    s.servingTeam === "A"
-      ? teamAScoreEven
-        ? "right"
-        : "left"
-      : teamBScoreEven
-        ? "right"
-        : "left";
-
   if (isSinglesA && isSinglesB) {
     const aOnRight = teamAScoreEven;
     const bOnRight = teamBScoreEven;
+    const singlesServingCourt: "right" | "left" =
+      s.servingTeam === "A"
+        ? (teamAScoreEven ? "right" : "left")
+        : (teamBScoreEven ? "right" : "left");
     return {
       teamA: {
         isSingles: true,
@@ -1192,13 +1263,13 @@ export function computeCourtPositions(
           name: aOnRight ? aBase1 : "-",
           base: 1,
           isServing: !isFinal && s.servingTeam === "A" && aOnRight,
-          isReceiver: !isFinal && s.servingTeam === "B" && servingCourt === "right",
+          isReceiver: !isFinal && s.servingTeam === "B" && singlesServingCourt === "right",
         },
         left: {
           name: !aOnRight ? aBase1 : "-",
           base: 1,
           isServing: !isFinal && s.servingTeam === "A" && !aOnRight,
-          isReceiver: !isFinal && s.servingTeam === "B" && servingCourt === "left",
+          isReceiver: !isFinal && s.servingTeam === "B" && singlesServingCourt === "left",
         },
       },
       teamB: {
@@ -1207,13 +1278,13 @@ export function computeCourtPositions(
           name: bOnRight ? bBase1 : "-",
           base: 1,
           isServing: !isFinal && s.servingTeam === "B" && bOnRight,
-          isReceiver: !isFinal && s.servingTeam === "A" && servingCourt === "right",
+          isReceiver: !isFinal && s.servingTeam === "A" && singlesServingCourt === "right",
         },
         left: {
           name: !bOnRight ? bBase1 : "-",
           base: 1,
           isServing: !isFinal && s.servingTeam === "B" && !bOnRight,
-          isReceiver: !isFinal && s.servingTeam === "A" && servingCourt === "left",
+          isReceiver: !isFinal && s.servingTeam === "A" && singlesServingCourt === "left",
         },
       },
     };
@@ -1232,19 +1303,28 @@ export function computeCourtPositions(
   const bLeftPlayerName = teamBScoreEven ? bBase2 : bBase1;
   const bLeftBase: 1 | 2 = teamBScoreEven ? 2 : 1;
 
+  // Active Server in doubles:
+  const activeServerBase: 1 | 2 = deriveActiveServerBase(s);
+
+  // Serving court is whichever court the active server is currently standing on:
+  const servingCourt: "right" | "left" =
+    s.servingTeam === "A"
+      ? (aRightBase === activeServerBase ? "right" : "left")
+      : (bRightBase === activeServerBase ? "right" : "left");
+
   return {
     teamA: {
       isSingles: false,
       right: {
         name: aRightPlayerName,
         base: aRightBase,
-        isServing: !isFinal && s.servingTeam === "A" && servingCourt === "right",
+        isServing: !isFinal && s.servingTeam === "A" && aRightBase === activeServerBase,
         isReceiver: !isFinal && s.servingTeam === "B" && servingCourt === "right",
       },
       left: {
         name: aLeftPlayerName,
         base: aLeftBase,
-        isServing: !isFinal && s.servingTeam === "A" && servingCourt === "left",
+        isServing: !isFinal && s.servingTeam === "A" && aLeftBase === activeServerBase,
         isReceiver: !isFinal && s.servingTeam === "B" && servingCourt === "left",
       },
     },
@@ -1253,13 +1333,13 @@ export function computeCourtPositions(
       right: {
         name: bRightPlayerName,
         base: bRightBase,
-        isServing: !isFinal && s.servingTeam === "B" && servingCourt === "right",
+        isServing: !isFinal && s.servingTeam === "B" && bRightBase === activeServerBase,
         isReceiver: !isFinal && s.servingTeam === "A" && servingCourt === "right",
       },
       left: {
         name: bLeftPlayerName,
         base: bLeftBase,
-        isServing: !isFinal && s.servingTeam === "B" && servingCourt === "left",
+        isServing: !isFinal && s.servingTeam === "B" && bLeftBase === activeServerBase,
         isReceiver: !isFinal && s.servingTeam === "A" && servingCourt === "left",
       },
     },
@@ -1660,6 +1740,7 @@ function UmpireConsole({
   onOpenQuickMatch,
   onViewResults,
   onOpenDebug,
+  onRefreshStations,
 }: {
   match: LiveMatch | null;
   matches: LiveMatch[];
@@ -1672,6 +1753,7 @@ function UmpireConsole({
   onOpenQuickMatch?: () => void;
   onViewResults?: () => void;
   onOpenDebug?: () => void;
+  onRefreshStations?: () => void;
 }) {
   const [showEndConfirm, setShowEndConfirm] = useState(false);
   const [showResetTossConfirm, setShowResetTossConfirm] = useState(false);
@@ -1822,6 +1904,87 @@ function UmpireConsole({
 
   // Filter for officially dispatched matches (active on court stations or live on facility courts)
   const currentStations = stations ?? getCourtStations();
+
+  const [umpireToRemoveModal, setUmpireToRemoveModal] = useState<{
+    court: FacilityCourt;
+    match: LiveMatch;
+    official: string;
+  } | null>(null);
+  const [removeNotice, setRemoveNotice] = useState<string | null>(null);
+
+  const handleRemoveUmpire = async (court: FacilityCourt, targetMatch?: LiveMatch | null) => {
+    const courtMatch = targetMatch || findMatchForCourtStation(court, currentStations[court], matches);
+    const removedName = courtMatch?.officiatedBy || currentStations[court]?.assignedUmpire || "Official";
+
+    if (courtMatch) {
+      onUpdate(courtMatch.id, (m) => {
+        const updated = { ...m, officiatedBy: undefined };
+        return updated;
+      });
+      try {
+        const updatedMatch = { ...courtMatch, officiatedBy: undefined };
+        await dbSaveMatch(updatedMatch);
+      } catch {
+        // network fallback
+      }
+    }
+
+    releaseCourtStation(court);
+    try {
+      await dbUpdateCourtStation(court, { assignedUmpire: null });
+    } catch {
+      // network fallback
+    }
+
+    if (typeof localStorage !== "undefined") {
+      try {
+        localStorage.removeItem(`dv_court_station_claim_${court}`);
+      } catch {}
+    }
+
+    if (onRefreshStations) {
+      onRefreshStations();
+    }
+    window.dispatchEvent(new CustomEvent("dv_court_stations_updated"));
+    window.dispatchEvent(new CustomEvent("dv_matches_updated"));
+    window.dispatchEvent(new CustomEvent("dv_live_matches_updated"));
+
+    setRemoveNotice(`Official ${removedName} removed from ${court}. Station unlocked.`);
+    setTimeout(() => setRemoveNotice(null), 5000);
+  };
+
+  const handleTakeoverCourt = async (court: FacilityCourt, targetMatch?: LiveMatch | null) => {
+    const courtMatch = targetMatch || findMatchForCourtStation(court, currentStations[court], matches);
+    if (!courtMatch) return;
+
+    onUpdate(courtMatch.id, (m) => ({
+      ...m,
+      officiatedBy: currentUmpire,
+    }));
+
+    claimCourtStation(court, currentUmpire);
+    try {
+      await dbUpdateCourtStation(court, {
+        currentMatchId: courtMatch.id,
+        assignedUmpire: currentUmpire,
+      });
+      await dbSaveMatch({
+        ...courtMatch,
+        officiatedBy: currentUmpire,
+      });
+    } catch {
+      // network fallback
+    }
+
+    if (onRefreshStations) {
+      onRefreshStations();
+    }
+    window.dispatchEvent(new CustomEvent("dv_court_stations_updated"));
+    window.dispatchEvent(new CustomEvent("dv_matches_updated"));
+    window.dispatchEvent(new CustomEvent("dv_live_matches_updated"));
+
+    onSelectMatch(courtMatch.id);
+  };
   const dispatchedStationMatchIds = useMemo(() => {
     const ids = new Set<string>();
     for (const c of FACILITY_COURTS) {
@@ -1932,6 +2095,18 @@ function UmpireConsole({
 
         {/* Facility Courts Section with All-on-One-Screen Support */}
         <div className="space-y-2.5 sm:space-y-3">
+          {removeNotice && (
+            <div className="p-2.5 bg-pickle/20 border border-pickle text-pickle text-xs font-bold uppercase tracking-wider flex items-center justify-between font-sans">
+              <span className="flex-1 text-center">{removeNotice}</span>
+              <button
+                type="button"
+                onClick={() => setRemoveNotice(null)}
+                className="text-pickle hover:text-pickle/70 p-1 cursor-pointer"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          )}
           {/* Section Sub-header & View Mode Toggle */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
             <div>
@@ -2078,7 +2253,15 @@ function UmpireConsole({
                     key={court}
                     id={`court-card-${court.replace(/\s+/g, "-").toLowerCase()}`}
                     onClick={() => {
-                      if (courtMatch && !isOperatedByOther) {
+                      if (courtMatch) {
+                        if (isOperatedByOther) {
+                          setUmpireToRemoveModal({
+                            court,
+                            match: courtMatch,
+                            official: operatingOfficial || "Official",
+                          });
+                          return;
+                        }
                         if (!courtMatch.officiatedBy) {
                           onUpdate(courtMatch.id, (m) => ({
                             ...m,
@@ -2095,7 +2278,7 @@ function UmpireConsole({
                     }}
                     className={`p-2.5 sm:p-3 border-2 transition-all font-sans flex flex-col justify-between ${
                       isOperatedByOther
-                        ? "border-brick/50 bg-charcoal text-sand cursor-not-allowed"
+                        ? "border-brick/50 bg-charcoal text-sand active:scale-[0.98] cursor-pointer hover:border-brick"
                         : isLive
                         ? "border-pickle/80 shadow-md shadow-pickle/20 bg-charcoal text-sand active:scale-[0.98] cursor-pointer"
                         : courtMatch
@@ -2161,9 +2344,39 @@ function UmpireConsole({
                     <div className="pt-1.5 border-t border-border/50">
                       {courtMatch ? (
                         isOperatedByOther ? (
-                          <span className="text-[0.6rem] font-semibold text-brick truncate block text-center">
-                            In Use: {operatingOfficial}
-                          </span>
+                          <div className="space-y-1">
+                            <span className="text-[0.6rem] font-semibold text-brick truncate block text-center">
+                              In Use: {operatingOfficial}
+                            </span>
+                            <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setUmpireToRemoveModal({
+                                    court,
+                                    match: courtMatch,
+                                    official: operatingOfficial || "Official",
+                                  });
+                                }}
+                                className="flex-1 py-1 text-[0.58rem] font-bold uppercase tracking-wider bg-brick/20 border border-brick/40 text-brick hover:bg-brick hover:text-sand transition-colors cursor-pointer text-center"
+                                title={`Remove ${operatingOfficial} from ${court}`}
+                              >
+                                Remove
+                              </button>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleTakeoverCourt(court, courtMatch);
+                                }}
+                                className="flex-1 py-1 text-[0.58rem] font-bold uppercase tracking-wider bg-pickle/20 border border-pickle/40 text-pickle hover:bg-pickle hover:text-sand transition-colors cursor-pointer text-center"
+                                title={`Take over officiating on ${court}`}
+                              >
+                                Take Over
+                              </button>
+                            </div>
+                          </div>
                         ) : (
                           <div className="w-full py-1 text-center bg-pickle text-sand font-bold text-[0.65rem] uppercase tracking-wider shadow-sm transition-opacity hover:opacity-90">
                             {isLive ? "Score Match" : "Supervise Court"}
@@ -2314,14 +2527,33 @@ function UmpireConsole({
                     <div className="md:w-56 shrink-0 flex flex-col justify-center pt-1 md:pt-0">
                       {courtMatch ? (
                         isOperatedByOther ? (
-                          <div className="space-y-1">
-                            <div className="w-full py-2 px-3 border border-brick/40 bg-brick/10 text-brick font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-1.5 select-none text-center font-sans">
+                          <div className="space-y-1.5">
+                            <div className="w-full py-1.5 px-3 border border-brick/40 bg-brick/10 text-brick font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-1.5 select-none text-center font-sans">
                               <Lock size={12} />
-                              <span>In Use: {operatingOfficial}</span>
+                              <span className="truncate">In Use: {operatingOfficial}</span>
                             </div>
-                            <p className="text-[0.62rem] text-center text-sand/60 font-medium">
-                              Official actively scoring.
-                            </p>
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setUmpireToRemoveModal({
+                                    court,
+                                    match: courtMatch,
+                                    official: operatingOfficial || "Official",
+                                  });
+                                }}
+                                className="flex-1 py-1.5 px-2 text-[0.68rem] font-bold uppercase tracking-wider bg-brick/20 border border-brick/40 text-brick hover:bg-brick hover:text-sand transition-colors cursor-pointer text-center font-sans"
+                              >
+                                Remove Umpire
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleTakeoverCourt(court, courtMatch)}
+                                className="flex-1 py-1.5 px-2 text-[0.68rem] font-bold uppercase tracking-wider bg-pickle/20 border border-pickle/40 text-pickle hover:bg-pickle hover:text-sand transition-colors cursor-pointer text-center font-sans"
+                              >
+                                Take Over
+                              </button>
+                            </div>
                           </div>
                         ) : (
                           <div className="space-y-1.5">
@@ -2529,14 +2761,33 @@ function UmpireConsole({
                       <div className="pt-2">
                         {courtMatch ? (
                           isOperatedByOther ? (
-                            <div className="space-y-1.5">
-                              <div className="w-full py-2.5 px-3 border border-brick/40 bg-brick/10 text-brick font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-1.5 select-none text-center font-sans">
+                            <div className="space-y-2">
+                              <div className="w-full py-2 px-3 border border-brick/40 bg-brick/10 text-brick font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-1.5 select-none text-center font-sans">
                                 <Lock size={13} />
-                                <span>In Use: {operatingOfficial}</span>
+                                <span className="truncate">In Use: {operatingOfficial}</span>
                               </div>
-                              <p className="text-[0.65rem] text-center text-sand/60 font-medium">
-                                Official actively scoring. Access restricted.
-                              </p>
+                              <div className="flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setUmpireToRemoveModal({
+                                      court,
+                                      match: courtMatch,
+                                      official: operatingOfficial || "Official",
+                                    });
+                                  }}
+                                  className="flex-1 py-2 px-2 text-xs font-bold uppercase tracking-wider bg-brick/20 border border-brick/40 text-brick hover:bg-brick hover:text-sand transition-colors cursor-pointer text-center font-sans"
+                                >
+                                  Remove Umpire
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleTakeoverCourt(court, courtMatch)}
+                                  className="flex-1 py-2 px-2 text-xs font-bold uppercase tracking-wider bg-pickle/20 border border-pickle/40 text-pickle hover:bg-pickle hover:text-sand transition-colors cursor-pointer text-center font-sans"
+                                >
+                                  Take Over
+                                </button>
+                              </div>
                             </div>
                           ) : (
                             <div className="space-y-2">
@@ -2628,6 +2879,97 @@ function UmpireConsole({
             </button>
           )}
         </div>
+
+        {/* Remove / Take Over Umpire Confirmation Modal */}
+        {umpireToRemoveModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
+            <div className="w-full max-w-md bg-charcoal border-2 border-brick/70 p-6 space-y-5 shadow-2xl text-sand font-sans">
+              <div className="flex items-start justify-between border-b border-border/80 pb-3">
+                <div className="flex items-center gap-2.5">
+                  <div className="h-9 w-9 rounded-full bg-brick/20 border border-brick/40 flex items-center justify-center text-brick">
+                    <UserX size={18} />
+                  </div>
+                  <div>
+                    <span className="text-[0.62rem] font-bold uppercase tracking-[0.24em] text-brick block">
+                      Admin Station Control
+                    </span>
+                    <h3 className="font-display text-xl text-sand">
+                      Manage {umpireToRemoveModal.court} Official
+                    </h3>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setUmpireToRemoveModal(null)}
+                  className="text-sand/60 hover:text-sand p-1 transition-colors cursor-pointer"
+                  title="Close modal"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              <div className="space-y-3 text-xs leading-relaxed">
+                <p className="text-sand/90">
+                  This station is currently assigned to official{" "}
+                  <strong className="text-pickle font-bold font-sans">{umpireToRemoveModal.official}</strong>.
+                </p>
+
+                <div className="p-3 bg-card/60 border border-border space-y-1.5">
+                  <div className="flex items-center justify-between text-[0.65rem] text-sand/60 uppercase tracking-wider">
+                    <span>{umpireToRemoveModal.court}</span>
+                    <span>{umpireToRemoveModal.match.stage || "Tournament Match"}</span>
+                  </div>
+                  <div className="font-bold text-sm text-sand">
+                    {umpireToRemoveModal.match.teamAName} vs {umpireToRemoveModal.match.teamBName}
+                  </div>
+                  <div className="font-mono text-xs text-pickle font-bold">
+                    Score: {umpireToRemoveModal.match.score.teamAScore} - {umpireToRemoveModal.match.score.teamBScore}
+                  </div>
+                </div>
+
+                <p className="text-sand/70 text-[0.7rem]">
+                  Choose an action below to relieve the assigned umpire or take over scoring for this match.
+                </p>
+              </div>
+
+              <div className="space-y-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const m = umpireToRemoveModal.match;
+                    const c = umpireToRemoveModal.court;
+                    setUmpireToRemoveModal(null);
+                    handleTakeoverCourt(c, m);
+                  }}
+                  className="w-full py-2.5 px-4 bg-pickle text-sand font-bold text-xs uppercase tracking-widest hover:opacity-90 active:scale-[0.99] transition-all cursor-pointer text-center"
+                >
+                  Take Over Officiating
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const m = umpireToRemoveModal.match;
+                    const c = umpireToRemoveModal.court;
+                    setUmpireToRemoveModal(null);
+                    handleRemoveUmpire(c, m);
+                  }}
+                  className="w-full py-2.5 px-4 bg-brick/20 border border-brick/50 text-brick hover:bg-brick hover:text-sand font-bold text-xs uppercase tracking-widest transition-all cursor-pointer text-center"
+                >
+                  Remove Official ({umpireToRemoveModal.official})
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setUmpireToRemoveModal(null)}
+                  className="w-full py-2 px-4 bg-charcoal border border-border text-sand/70 hover:text-sand font-semibold text-xs uppercase tracking-wider transition-all cursor-pointer text-center"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -2681,13 +3023,36 @@ function UmpireConsole({
             </div>
           </div>
 
-          <div className="pt-2">
+          <div className="pt-2 space-y-2">
+            <div className="flex flex-col sm:flex-row items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  const c = (match.court as FacilityCourt) || "Court 1";
+                  handleTakeoverCourt(c, match);
+                }}
+                className="w-full sm:flex-1 py-3 px-4 bg-pickle text-sand font-bold text-xs uppercase tracking-widest hover:opacity-90 active:scale-[0.99] transition-all cursor-pointer text-center font-sans"
+              >
+                Take Over Officiating
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const c = (match.court as FacilityCourt) || "Court 1";
+                  handleRemoveUmpire(c, match);
+                  onSelectMatch("");
+                }}
+                className="w-full sm:flex-1 py-3 px-4 bg-brick/20 border border-brick/50 text-brick hover:bg-brick hover:text-sand font-bold text-xs uppercase tracking-widest transition-all cursor-pointer text-center font-sans"
+              >
+                Remove Umpire
+              </button>
+            </div>
             <button
               type="button"
               onClick={() => onSelectMatch("")}
-              className="w-full py-3 px-4 bg-pickle text-sand font-bold text-xs uppercase tracking-widest hover:opacity-90 active:scale-[0.99] transition-all cursor-pointer text-center font-sans"
+              className="w-full py-2.5 px-4 bg-charcoal border border-border text-sand/80 hover:text-sand font-bold text-xs uppercase tracking-widest transition-all cursor-pointer text-center font-sans"
             >
-              &larr; Return to Court Selection
+              Return to Court Selection
             </button>
           </div>
         </div>
@@ -2777,23 +3142,32 @@ function UmpireConsole({
   };
 
   const handleSwapServerNumber = () => {
-    onUpdate(match.id, (m) => ({
-      ...m,
-      score: {
-        ...m.score,
-        serverNumber: m.score.serverNumber === 1 ? 2 : 1,
-      },
-    }));
+    onUpdate(match.id, (m) => {
+      const curActive = m.score.activeServerBase ?? deriveActiveServerBase(m.score);
+      return {
+        ...m,
+        score: {
+          ...m.score,
+          serverNumber: m.score.serverNumber === 1 ? 2 : 1,
+          activeServerBase: curActive === 1 ? 2 : 1,
+        },
+      };
+    });
   };
 
   const handleSwapServingTeam = () => {
-    onUpdate(match.id, (m) => ({
-      ...m,
-      score: {
-        ...m.score,
-        servingTeam: m.score.servingTeam === "A" ? "B" : "A",
-      },
-    }));
+    onUpdate(match.id, (m) => {
+      const nextServing = m.score.servingTeam === "A" ? "B" : "A";
+      const nextScore = nextServing === "A" ? m.score.teamAScore : m.score.teamBScore;
+      return {
+        ...m,
+        score: {
+          ...m.score,
+          servingTeam: nextServing,
+          activeServerBase: nextScore % 2 === 0 ? 1 : 2,
+        },
+      };
+    });
   };
 
   const handleSwapTeamABase = () => {
@@ -2916,7 +3290,7 @@ function UmpireConsole({
       teamABase1Player: bases?.teamABase1 ?? m.teamABase1Player ?? m.teamAPlayers?.[0],
       teamBBase1Player: bases?.teamBBase1 ?? m.teamBBase1Player ?? m.teamBPlayers?.[0],
       officiatedBy: m.officiatedBy ?? currentUmpire,
-      score: { ...m.score, servingTeam: serving, serverNumber: 2, teamAScore: 0, teamBScore: 0 },
+      score: { ...m.score, servingTeam: serving, serverNumber: 2, teamAScore: 0, teamBScore: 0, activeServerBase: 1 },
     }));
   };
 

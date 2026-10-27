@@ -7,6 +7,7 @@ import {
   dbDeleteMatchesBatch,
   dbDeleteMatchesForCategory,
   dbDeleteMatchesForPair,
+  dbPurgeCompletedMatches,
   dbSaveMainDraw,
   dbClearAllMatches,
   dbSubscribeToLive,
@@ -35,6 +36,7 @@ export type LiveScore = {
   teamBScore: number;
   servingTeam: ServingTeam;
   serverNumber: 1 | 2;
+  activeServerBase?: 1 | 2 | undefined;
   rallies: RallyEvent[];
 };
 
@@ -598,15 +600,32 @@ function mergeMatchesSafely(cloudMatches: LiveMatch[], localMatches: LiveMatch[]
       };
     }
     if (isLocalFinal) {
-      return {
-        ...cm,
-        id: lm.id,
-        status: "final",
-        score: lm.score,
-        winnerTeam: lm.winnerTeam,
-        endedAt: lm.endedAt,
-        court: sanitizeCourtAssignment(lm.court, lm, "final"),
-      };
+      // Only preserve local final status if it is an offline score pending sync to cloud.
+      // If the cloud already reports this match as scheduled (e.g. after history was cleared or reset by Admin),
+      // the cloud ground truth prevails and resets the local match to scheduled.
+      let isPendingOfflineSync = false;
+      if (typeof localStorage !== "undefined") {
+        try {
+          const rawJournal = localStorage.getItem("dv_offline_score_journal");
+          if (rawJournal) {
+            const parsedJournal = JSON.parse(rawJournal);
+            isPendingOfflineSync = Boolean(parsedJournal[lm.id] || parsedJournal[cm.id]);
+          }
+        } catch {}
+      }
+
+      if (isPendingOfflineSync) {
+        return {
+          ...cm,
+          id: lm.id,
+          status: "final",
+          score: lm.score,
+          winnerTeam: lm.winnerTeam,
+          endedAt: lm.endedAt,
+          court: sanitizeCourtAssignment(lm.court, lm, "final"),
+        };
+      }
+      // Otherwise, match history was cleared/reset in cloud: adopt cloud's clean scheduled status
     }
 
     // 2. Score & Rally Conflict Resolution:
@@ -669,7 +688,28 @@ function mergeMatchesSafely(cloudMatches: LiveMatch[], localMatches: LiveMatch[]
   // 3. Preserve locally dispatched, active, or in-flight matches not yet acknowledged by cloud
   for (const lm of localMatches) {
     if (!matchedLocalIds.has(lm.id)) {
-      const isActivelyOnCourt = (lm.court && lm.court !== "Queue" && sanitizeCourtAssignment(lm.court, lm, lm.status) !== "Queue");
+      // Completed / final matches must NEVER be resurrected if they don't exist in cloud (unless pending offline score sync)
+      if (lm.status === "final") {
+        let isPendingOffline = false;
+        if (typeof localStorage !== "undefined") {
+          try {
+            const rawJournal = localStorage.getItem("dv_offline_score_journal");
+            if (rawJournal) {
+              const journal = JSON.parse(rawJournal);
+              isPendingOffline = Boolean(journal[lm.id]);
+            }
+          } catch {}
+        }
+        if (isPendingOffline) {
+          mergedCloud.push(lm);
+        }
+        continue;
+      }
+
+      const isActivelyOnCourt =
+        Boolean(lm.court &&
+        lm.court !== "Queue" &&
+        sanitizeCourtAssignment(lm.court, lm, lm.status) !== "Queue");
       const isRecentlyMutated = Date.now() - getLocalMatchMutationAt(lm.id) < 15000;
 
       // Only preserve unacknowledged local matches if they are actively occupying a court or were mutated in the last 15s
@@ -939,12 +979,70 @@ export function createInitialScore(): LiveScore {
     teamBScore: 0,
     servingTeam: "A",
     serverNumber: 2,
+    activeServerBase: 1,
     rallies: [],
   };
 }
 
 export function generateMockMatches(): LiveMatch[] {
   return [];
+}
+
+/* ─────────────────────────────────────────────
+   Pickleball doubles active server base derivation
+   (B1 vs B2 court & server rotation rules)
+───────────────────────────────────────────── */
+
+/**
+ * Deterministically derives the active server base (1 or 2) in pickleball doubles.
+ * - Score is EVEN -> B1 is on Right court, B2 is on Left court.
+ * - Score is ODD -> B2 is on Right court, B1 is on Left court.
+ * - At match start (0-0-2): activeServerBase = 1 (B1 on Right).
+ * - After a Side-Out: whoever is on the Right court becomes Server #1.
+ * - On 1st fault (serverNumber 1 -> 2): activeServerBase flips to partner.
+ * - Points scored: activeServerBase continues serving.
+ */
+export function deriveActiveServerBase(score: LiveScore): 1 | 2 {
+  if (score.activeServerBase === 1 || score.activeServerBase === 2) {
+    return score.activeServerBase;
+  }
+
+  // If rallies are available, replay from initial 0-0-2 state
+  if (score.rallies && score.rallies.length > 0) {
+    let curServingTeam: ServingTeam = "A";
+    let curServerNumber: 1 | 2 = 2;
+    let curActiveBase: 1 | 2 = 1;
+    let teamAScore = 0;
+    let teamBScore = 0;
+
+    for (const rally of score.rallies) {
+      if (rally.type === "point") {
+        if (curServingTeam === "A") teamAScore++;
+        else teamBScore++;
+      } else if (rally.type === "side_out" || rally.type === "fault") {
+        const isGameStart =
+          teamAScore === 0 && teamBScore === 0 && curServingTeam === "A" && curServerNumber === 1;
+        if (isGameStart || curServerNumber === 2) {
+          curServingTeam = curServingTeam === "A" ? "B" : "A";
+          curServerNumber = 1;
+          const newTeamScore = curServingTeam === "A" ? teamAScore : teamBScore;
+          curActiveBase = newTeamScore % 2 === 0 ? 1 : 2;
+        } else {
+          curServerNumber = 2;
+          curActiveBase = curActiveBase === 1 ? 2 : 1;
+        }
+      }
+    }
+    return curActiveBase;
+  }
+
+  // Fallback if no rallies are recorded:
+  const servingScore = score.servingTeam === "A" ? score.teamAScore : score.teamBScore;
+  const isScoreEven = servingScore % 2 === 0;
+  if (score.serverNumber === 2) {
+    return isScoreEven ? 2 : 1;
+  }
+  return isScoreEven ? 1 : 2;
 }
 
 /* ─────────────────────────────────────────────
@@ -966,6 +1064,9 @@ export function scorePoint(match: LiveMatch): LiveMatch {
   } else {
     s.teamBScore += 1;
   }
+
+  // Active server continues serving (swaps courts with partner on point scored)
+  s.activeServerBase = s.activeServerBase ?? deriveActiveServerBase(match.score);
 
   const event: RallyEvent = {
     id: rallyId,
@@ -998,6 +1099,8 @@ export function sideOut(match: LiveMatch): LiveMatch {
   const s = { ...match.score };
   const rallyId = `r-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
+  const currentActiveBase: 1 | 2 = s.activeServerBase ?? deriveActiveServerBase(s);
+
   const isGameStart =
     s.teamAScore === 0 && s.teamBScore === 0 && s.servingTeam === "A" && s.serverNumber === 1;
 
@@ -1005,13 +1108,17 @@ export function sideOut(match: LiveMatch): LiveMatch {
 
   if (isGameStart || s.serverNumber === 2) {
     // Side out -- serve goes to other team
-    const prevTeam = s.servingTeam;
     s.servingTeam = s.servingTeam === "A" ? "B" : "A";
     s.serverNumber = 1;
+    const newServingScore = s.servingTeam === "A" ? s.teamAScore : s.teamBScore;
+    // Whoever is on the Right court for the new serving team serves first as Server #1:
+    s.activeServerBase = newServingScore % 2 === 0 ? 1 : 2;
     description = `Side out. Serve to ${s.servingTeam === "A" ? match.teamAName : match.teamBName}`;
   } else {
     // Server 1 -> Server 2 on same team
     s.serverNumber = 2;
+    // Serve flips to partner on opposite court:
+    s.activeServerBase = currentActiveBase === 1 ? 2 : 1;
     description = `Second server for ${s.servingTeam === "A" ? match.teamAName : match.teamBName}`;
   }
 
@@ -1125,6 +1232,7 @@ export function resetMatch(match: LiveMatch): LiveMatch {
       teamBScore: 0,
       servingTeam: "A",
       serverNumber: 2,
+      activeServerBase: 1,
       rallies: [],
     },
     winnerTeam: undefined,
@@ -1931,8 +2039,9 @@ export async function clearCompletedMatches({
   const retained = current.filter((m) => !isMatchingSameMatchup(m));
   saveMatches(retained, false);
 
-  // 2. Delete all matching match records from Supabase database in batch
+  // 2. Delete all matching match records from Supabase database in batch and direct purge
   try {
+    await dbPurgeCompletedMatches(tournamentSlug, categoryId);
     await dbDeleteMatchesBatch(allIdsToDelete);
     if (categoryId) {
       await dbDeleteMatchesForCategory(tournamentSlug, categoryId, true);
@@ -1945,6 +2054,33 @@ export async function clearCompletedMatches({
     }
   } catch (err) {
     console.warn("[MatchStore] Error deleting matches from cloud:", err);
+  }
+
+  // 2b. Clean offline score journal to prevent resurrecting deleted scores
+  if (typeof localStorage !== "undefined") {
+    try {
+      const journalRaw = localStorage.getItem("dv_offline_score_journal");
+      if (journalRaw) {
+        const journal = JSON.parse(journalRaw);
+        let journalChanged = false;
+        for (const k of Object.keys(journal)) {
+          const entry = journal[k];
+          const isTarget =
+            allIdsToDelete.includes(k) ||
+            (entry?.match?.status === "final" &&
+              (!categoryId || entry?.match?.categoryId === categoryId));
+          if (isTarget) {
+            delete journal[k];
+            journalChanged = true;
+          }
+        }
+        if (journalChanged) {
+          localStorage.setItem("dv_offline_score_journal", JSON.stringify(journal));
+        }
+      }
+    } catch {
+      // ignore
+    }
   }
 
   // 3. Clear/Reset corresponding entries in Main Draw Knockout storage
