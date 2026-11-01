@@ -64,7 +64,7 @@ import {
   releaseCourtStation,
 } from "@/lib/court-dispatch";
 import { getDrawnGroups } from "@/components/admin/BracketDraw";
-import { getMainDrawMatches, syncMainDrawWithLiveMatches } from "@/components/admin/DrawsManager";
+import { getMainDrawMatches, syncMainDrawWithLiveMatches, resetMainDrawMatches } from "@/components/admin/DrawsManager";
 import { dbUpdateCourtStation, dbSubscribeToLive, isSameCategory, dbSaveMatch } from "@/lib/supabase-service";
 import { DispatchDebugStation, type DebugTab } from "@/components/admin/DispatchDebugStation";
 import { MatchHistory } from "@/components/admin/MatchHistory";
@@ -160,6 +160,7 @@ function computeCategoryUnassignedMatches(
       ),
     );
 
+  let hasCompletedPoolBracket = !hasDrawnSlots;
   if (hasDrawnSlots && poolGroups) {
     for (const group of poolGroups) {
       if (!group.isDrawn) continue;
@@ -178,6 +179,8 @@ function computeCategoryUnassignedMatches(
       }
 
       const pairs = generateBalancedRoundRobinPairs(teams);
+      let groupTotal = 0;
+      let groupCompleted = 0;
       pairs.forEach(([teamA, teamB], pIdx) => {
         const isSameTeam =
           (teamA.id && teamB.id && teamA.id === teamB.id) ||
@@ -189,6 +192,7 @@ function computeCategoryUnassignedMatches(
             teamA.players.slice().sort().join(",").toLowerCase() ===
               teamB.players.slice().sort().join(",").toLowerCase());
         if (isSameTeam) return;
+        groupTotal++;
 
         const isDupA = (nameCounts.get(teamA.name.trim().toLowerCase()) || 0) > 1;
         const isDupB = (nameCounts.get(teamB.name.trim().toLowerCase()) || 0) > 1;
@@ -221,7 +225,13 @@ function computeCategoryUnassignedMatches(
           );
         const effectiveMatchId = existingLive ? existingLive.id : (scopedMatchId || canonicalId);
 
-        if (existingLive?.status === "final" || existingLive?.winnerTeam || existingLive?.endedAt) return;
+        if (existingLive?.status === "final" || existingLive?.winnerTeam || existingLive?.endedAt) {
+          groupCompleted++;
+          if (groupCompleted > 0 && groupCompleted === pairs.length) {
+            hasCompletedPoolBracket = true;
+          }
+          return;
+        }
         const isQueued = queuedIds.has(effectiveMatchId) || queuedIds.has(canonicalId);
         const isOnCourt = activeCourtMatchIds.has(effectiveMatchId) || activeCourtMatchIds.has(canonicalId);
         if (isQueued || isOnCourt) return;
@@ -239,7 +249,10 @@ function computeCategoryUnassignedMatches(
   }
 
   // 3. From Playoff Knockout Matches (only if both teams are registered in this category)
-  if (playoffMatches) {
+  if (!hasCompletedPoolBracket && playoffMatches && playoffMatches.length > 0) {
+    resetMainDrawMatches(tournamentSlug, cat.id);
+  }
+  if (hasCompletedPoolBracket && playoffMatches) {
     for (const km of playoffMatches) {
       if (!km.teamA || !km.teamB) continue;
       if (
@@ -1062,7 +1075,13 @@ export function CourtDispatch({
       }
     }
 
-    if (playoffMatches && playoffMatches.length > 0) {
+    const hasCompletedPoolBracket =
+      groupsList.length === 0 ||
+      groupsList.some((g) => g.totalCount > 0 && g.completedCount === g.totalCount);
+    if (!hasCompletedPoolBracket && playoffMatches && playoffMatches.length > 0) {
+      resetMainDrawMatches(tournamentSlug, activeCat.id);
+    }
+    if (hasCompletedPoolBracket && playoffMatches && playoffMatches.length > 0) {
       const koMatches: typeof groupsList[number]["matches"] = [];
       for (const km of playoffMatches) {
         if (!km.teamA || !km.teamB) continue;

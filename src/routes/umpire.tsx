@@ -62,6 +62,32 @@ export const Route = createFileRoute("/umpire")({
 
 type UmpireTab = "console" | "results" | "scoreboard" | "desk";
 
+let _lastHapticTime = 0;
+let _lastHapticWasPriority = false;
+
+export function triggerUmpireHaptic(
+  pattern: number | number[] = 35,
+  priority = false
+): void {
+  if (typeof navigator === "undefined" || typeof navigator.vibrate !== "function") {
+    return;
+  }
+  const now = Date.now();
+  if (!priority && now - _lastHapticTime < 25) {
+    return;
+  }
+  if (_lastHapticWasPriority && !priority && now - _lastHapticTime < 60) {
+    return;
+  }
+  _lastHapticTime = now;
+  _lastHapticWasPriority = priority;
+  try {
+    navigator.vibrate(pattern);
+  } catch {
+    // Ignore vibration errors on unsupported devices or browser contexts
+  }
+}
+
 function Umpire() {
   const navigate = useNavigate();
   const { tournaments } = useTournamentStore();
@@ -375,7 +401,10 @@ function Umpire() {
   ];
 
   return (
-    <div className="min-h-[calc(100vh-4rem)] bg-background pb-20 sm:pb-0">
+    <div
+      className="min-h-[calc(100vh-4rem)] bg-background pb-20 sm:pb-0"
+      onClickCapture={() => triggerUmpireHaptic(35)}
+    >
       {/* Top bar (Hidden on mobile when actively scoring a match to maximize court visibility) */}
       <div className={`${selectedMatch ? "hidden sm:block" : "block"} sm:sticky sm:top-16 z-30 border-b border-border bg-charcoal/95 backdrop-blur`}>
         <div className="mx-auto max-w-6xl px-4 py-3">
@@ -1832,6 +1861,7 @@ function UmpireConsole({
   };
 
   const handleToggleCourtSides = () => {
+    triggerUmpireHaptic(45, true);
     setTeamASide((prev) => {
       const next = prev === "left" ? "right" : "left";
       if (typeof localStorage !== "undefined" && match) {
@@ -1862,6 +1892,7 @@ function UmpireConsole({
 
   const executeResetToss = () => {
     if (!match) return;
+    triggerUmpireHaptic([50, 35, 50], true);
     if (typeof localStorage !== "undefined") {
       try {
         localStorage.removeItem(`dv_toss_done_${match.id}`);
@@ -1926,12 +1957,14 @@ function UmpireConsole({
   }, [timeoutActive]);
 
   const handleStartTimeout = (team: "A" | "B") => {
+    triggerUmpireHaptic([60, 40, 60], true);
     setTimeoutTeam(team);
     setTimeoutSeconds(60);
     setTimeoutActive(true);
   };
 
   const handleCancelTimeout = () => {
+    triggerUmpireHaptic([45, 30, 45], true);
     setTimeoutActive(false);
     if (timerRef.current) clearInterval(timerRef.current);
   };
@@ -3138,6 +3171,8 @@ function UmpireConsole({
 
   const handlePoint = () => {
     if (!isLiveOrScheduled || needsToss) return;
+    triggerUmpireHaptic(50, true);
+    if (!isLiveOrScheduled || needsToss) return;
     onUpdate(match.id, (m) => {
       const updated = scorePoint(m);
       return {
@@ -3157,6 +3192,7 @@ function UmpireConsole({
   };
 
   const handleSideOut = () => {
+    triggerUmpireHaptic([40, 30, 45], true);
     if (!isLiveOrScheduled || needsToss) return;
     onUpdate(match.id, (m) => {
       const updated = sideOut(m);
@@ -3176,6 +3212,7 @@ function UmpireConsole({
   };
 
   const handleSwapServerNumber = () => {
+    triggerUmpireHaptic(40, true);
     onUpdate(match.id, (m) => {
       const curActive = m.score.activeServerBase ?? deriveActiveServerBase(m.score);
       return {
@@ -3190,6 +3227,7 @@ function UmpireConsole({
   };
 
   const handleSwapServingTeam = () => {
+    triggerUmpireHaptic(40, true);
     onUpdate(match.id, (m) => {
       const nextServing = m.score.servingTeam === "A" ? "B" : "A";
       const nextScore = nextServing === "A" ? m.score.teamAScore : m.score.teamBScore;
@@ -3205,6 +3243,7 @@ function UmpireConsole({
   };
 
   const handleSwapTeamABase = () => {
+    triggerUmpireHaptic(40, true);
     if (!match) return;
     const raw =
       match.teamAPlayers && match.teamAPlayers.length > 0
@@ -3227,6 +3266,7 @@ function UmpireConsole({
   };
 
   const handleSwapTeamBBase = () => {
+    triggerUmpireHaptic(40, true);
     if (!match) return;
     const raw =
       match.teamBPlayers && match.teamBPlayers.length > 0
@@ -3249,6 +3289,7 @@ function UmpireConsole({
   };
 
   const handleEndGame = async () => {
+    triggerUmpireHaptic([80, 50, 120], true);
     onUpdate(match.id, (m) => {
       const updated = endGame(m);
       return {
@@ -3292,6 +3333,8 @@ function UmpireConsole({
 
   const handleUndo = () => {
     if (s.rallies.length === 0) return;
+    triggerUmpireHaptic([30, 25, 30], true);
+    if (s.rallies.length === 0) return;
     onUpdate(match.id, undoLastRally);
   };
 
@@ -3329,7 +3372,10 @@ function UmpireConsole({
   };
 
   return (
-    <div className="space-y-2.5 sm:space-y-5 max-w-2xl mx-auto">
+    <div
+      className="space-y-2.5 sm:space-y-5 max-w-2xl mx-auto"
+      onClickCapture={() => triggerUmpireHaptic(35)}
+    >
       {/* Coin Toss Overlay */}
       {showToss && (
         <CoinTossOverlay
@@ -4671,6 +4717,7 @@ function CoinTossOverlay({
   const otherChoice = callingChoice === "heads" ? "tails" : "heads";
 
   const startToss = () => {
+    triggerUmpireHaptic([45, 35, 45, 35, 60], true);
     setPhase("flipping");
     setFace("heads");
     let count = 0;
@@ -4690,12 +4737,14 @@ function CoinTossOverlay({
               : "A";
         setWinnerTeam(winner);
         setChoosingTeam(winner);
+        triggerUmpireHaptic([60, 40, 80], true);
         setPhase("result");
       }
     }, 90);
   };
 
   const handleChoice = (choice: "serve" | "receive") => {
+    triggerUmpireHaptic(45, true);
     const serving: "A" | "B" =
       choice === "serve" ? (choosingTeam ?? "A") : choosingTeam === "A" ? "B" : "A";
     setChosenServingTeam(serving);
@@ -4703,6 +4752,7 @@ function CoinTossOverlay({
   };
 
   const handleConfirmPositions = () => {
+    triggerUmpireHaptic([50, 35, 70], true);
     setPhase("done");
     setTimeout(() => {
       onDone(chosenServingTeam, winnerTeam ?? undefined, {

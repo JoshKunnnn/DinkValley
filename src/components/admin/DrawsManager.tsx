@@ -1,13 +1,15 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
 import type { Team, Tournament, Category } from "@/data/tournaments";
 import { getDrawnGroups } from "./BracketDraw";
-import { getMatches, saveMatches, sanitizeCourtName, type LiveMatch, createPairMatchId, createCategoryScopedMatchId, findMatchForPair } from "@/lib/match-store";
+import { getMatches, saveMatches, sanitizeCourtName, type LiveMatch, createPairMatchId, createCategoryScopedMatchId, findMatchForPair, markLocalMatchDeleted } from "@/lib/match-store";
 import {
   dbSaveMainDraw,
   dbDeleteMainDraw,
   getCachedMainDraw,
   clearMainDrawCache,
   isSameCategory,
+  isDrawResetMarked,
+  dbDeleteMatchesBatch,
 } from "@/lib/supabase-service";
 
 export type BracketMatch = {
@@ -103,6 +105,35 @@ export function resetMainDrawMatches(slug: string, catId: string) {
     dbDeleteMainDraw(slug, catId).catch(() => {});
     try {
       localStorage.removeItem(MAIN_DRAW_KEY(slug, catId));
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith(`dv_main_draw_${slug}_`)) {
+          const suffix = k.substring(`dv_main_draw_${slug}_`.length);
+          if (suffix === catId || isSameCategory(suffix, catId)) {
+            localStorage.removeItem(k);
+          }
+        }
+      }
+      const allMatches = getMatches();
+      const koIdsToDelete: string[] = [];
+      const retained = allMatches.filter((m) => {
+        const isTargetCat = m.categoryId && isSameCategory(m.categoryId, catId);
+        const isKoStage =
+          !m.stage?.includes("Pool Play") &&
+          !m.stage?.includes("Bracket ") &&
+          (m.id.startsWith("live-ko-") ||
+            /quarter|semi|final|playoff|bronze|gold|knockout|round of 16/i.test(m.stage || ""));
+        if (isTargetCat && isKoStage) {
+          koIdsToDelete.push(m.id);
+          markLocalMatchDeleted(m.id);
+          return false;
+        }
+        return true;
+      });
+      if (koIdsToDelete.length > 0) {
+        saveMatches(retained, false);
+        dbDeleteMatchesBatch(koIdsToDelete).catch(() => {});
+      }
     } catch {
       // ignore
     }
@@ -114,6 +145,7 @@ export function resetMainDrawMatches(slug: string, catId: string) {
 }
 
 export function getMainDrawMatches(slug: string, catId: string): KnockoutMatch[] | null {
+  if (!slug || !catId || isDrawResetMarked(slug, catId)) return null;
   const cached = getCachedMainDraw(slug, catId);
   if (cached && Array.isArray(cached) && cached.length > 0) {
     return cached as KnockoutMatch[];
@@ -138,7 +170,7 @@ export function getMainDrawMatches(slug: string, catId: string): KnockoutMatch[]
         if (k && k.startsWith(`dv_main_draw_${slug}_`)) {
           const suffix = k.replace(`dv_main_draw_${slug}_`, "").toLowerCase();
           const target = (catId || "").toLowerCase();
-          if (suffix === target || target.includes(suffix) || suffix.includes(target)) {
+          if (suffix === target || isSameCategory(suffix, target)) {
             const rawVal = localStorage.getItem(k);
             if (rawVal) {
               try {
@@ -721,7 +753,20 @@ export function DrawsManager({
   });
 
   const syncFromStorage = useCallback(() => {
-    setBrackets(initializeGroupsFromDrawn());
+    const nextBrackets = initializeGroupsFromDrawn();
+    setBrackets(nextBrackets);
+    const hasCompletedPoolBracket =
+      nextBrackets.length === 0 ||
+      nextBrackets.some((b) => b.matches.length > 0 && b.matches.every((m) => m.status === "completed"));
+    if (!hasCompletedPoolBracket) {
+      const stale = getMainDrawMatches(tournamentSlug, categoryId);
+      if (stale && stale.length > 0) {
+        resetMainDrawMatches(tournamentSlug, categoryId);
+      }
+      setMainDrawMatches([]);
+      setMainDrawGenerated(false);
+      return;
+    }
     const existing = getMainDrawMatches(tournamentSlug, categoryId);
     if (existing && existing.length > 0) {
       setMainDrawMatches(existing);
@@ -899,7 +944,7 @@ export function DrawsManager({
     setBrackets(next);
     setMainDrawMatches([]);
     setMainDrawGenerated(false);
-    saveMainDrawMatches(tournamentSlug, categoryId, []);
+    resetMainDrawMatches(tournamentSlug, categoryId);
   };
 
   // Update a match score in round-robin

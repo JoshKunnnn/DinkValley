@@ -24,6 +24,7 @@ import {
   clearDrawnGroupsCache,
   clearMainDrawCache,
   markDrawAsReset,
+  isSameCategory,
 } from "@/lib/supabase-service";
 
 export type BracketSlot = {
@@ -54,6 +55,16 @@ export function saveDrawnGroups(
 
     try {
       localStorage.setItem(`dv_drawn_groups_${tournamentSlug}_${categoryId}`, JSON.stringify(groups));
+      clearMainDrawCache(tournamentSlug, categoryId);
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith(`dv_main_draw_${tournamentSlug}_`)) {
+          const suffix = k.substring(`dv_main_draw_${tournamentSlug}_`.length);
+          if (suffix === categoryId || isSameCategory(suffix, categoryId)) {
+            localStorage.removeItem(k);
+          }
+        }
+      }
     } catch {
       // ignore
     }
@@ -175,6 +186,7 @@ export function saveDrawnGroups(
     }
 
     window.dispatchEvent(new Event("dv_drawn_groups_updated"));
+    window.dispatchEvent(new Event("dv_main_draw_updated"));
     window.dispatchEvent(new Event("dv_dispatch_queue_updated"));
     window.dispatchEvent(new Event("dv_live_matches_updated"));
     window.dispatchEvent(new Event("storage"));
@@ -235,7 +247,11 @@ export function resetDrawnGroups(
           (k.startsWith(`dv_drawn_groups_${tournamentSlug}_`) ||
             k.startsWith(`dv_main_draw_${tournamentSlug}_`))
         ) {
-          const matchTarget = targetIds.some((cid) => k.endsWith(`_${cid}`));
+          const prefix = k.startsWith(`dv_drawn_groups_${tournamentSlug}_`)
+            ? `dv_drawn_groups_${tournamentSlug}_`
+            : `dv_main_draw_${tournamentSlug}_`;
+          const suffix = k.substring(prefix.length);
+          const matchTarget = targetIds.some((cid) => suffix === cid || isSameCategory(suffix, cid));
           if (matchTarget) {
             keysToRemove.push(k);
           }
@@ -252,7 +268,7 @@ export function resetDrawnGroups(
   dbDeleteDrawnGroups(tournamentSlug, primaryId).catch((err) => {
     console.warn("[Supabase] Failed to delete drawn groups from cloud:", err);
   });
-  dbDeleteMainDraw(tournamentSlug, primaryId).catch(() => {});
+  // Note: dbDeleteDrawnGroups atomically deletes both drawnGroups and mainDraw in a single update
 
   // 4. Purge all matches (including final ones) for this category from live match store & database
   for (const cid of targetIds) {

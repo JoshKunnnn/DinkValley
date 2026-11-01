@@ -22,7 +22,7 @@ export function clearDrawnGroupsCache(tournamentSlug: string, categoryId?: strin
   for (const key of _drawnGroupsCache.keys()) {
     if (key.startsWith(`${tournamentSlug}_`)) {
       const storedCat = key.substring(`${tournamentSlug}_`.length).trim().toLowerCase();
-      if (storedCat === cleanCat) {
+      if (storedCat === cleanCat || isSameCategory(storedCat, cleanCat)) {
         _drawnGroupsCache.delete(key);
       }
     }
@@ -43,7 +43,7 @@ export function clearMainDrawCache(tournamentSlug: string, categoryId?: string):
   for (const key of _mainDrawCache.keys()) {
     if (key.startsWith(`${tournamentSlug}_`)) {
       const storedCat = key.substring(`${tournamentSlug}_`.length).trim().toLowerCase();
-      if (storedCat === cleanCat) {
+      if (storedCat === cleanCat || isSameCategory(storedCat, cleanCat)) {
         _mainDrawCache.delete(key);
       }
     }
@@ -58,6 +58,8 @@ export function markDrawAsReset(tournamentSlug: string, categoryId: string): voi
   const key = `${tournamentSlug}_${categoryId.trim().toLowerCase()}`;
   _pendingResetDraws.add(key);
   clearDrawnGroupsCache(tournamentSlug, categoryId);
+  clearMainDrawCache(tournamentSlug, categoryId);
+  clearDrawnGroupsCache(tournamentSlug, categoryId);
 }
 
 export function clearDrawResetMark(tournamentSlug: string, categoryId: string): void {
@@ -69,7 +71,14 @@ export function clearDrawResetMark(tournamentSlug: string, categoryId: string): 
 export function isDrawResetMarked(tournamentSlug: string, categoryId: string): boolean {
   if (!tournamentSlug || !categoryId) return false;
   const key = `${tournamentSlug}_${categoryId.trim().toLowerCase()}`;
-  return _pendingResetDraws.has(key);
+  if (_pendingResetDraws.has(key)) return true;
+  for (const entry of _pendingResetDraws) {
+    if (entry.startsWith(`${tournamentSlug}_`)) {
+      const storedCat = entry.substring(`${tournamentSlug}_`.length);
+      if (isSameCategory(storedCat, categoryId)) return true;
+    }
+  }
+  return false;
 }
 
 export function getCachedDrawnGroups(tournamentSlug: string, categoryId: string): any[] | null {
@@ -87,7 +96,7 @@ export function getCachedDrawnGroups(tournamentSlug: string, categoryId: string)
   for (const [key, val] of _drawnGroupsCache.entries()) {
     if (key.startsWith(`${tournamentSlug}_`)) {
       const storedCat = key.substring(`${tournamentSlug}_`.length).trim().toLowerCase();
-      if (storedCat === cleanCat) {
+      if (storedCat === cleanCat || isSameCategory(storedCat, cleanCat)) {
         if (Array.isArray(val) && val.length > 0) {
           return val;
         }
@@ -129,6 +138,8 @@ export async function dbGetDrawnGroups(tournamentSlug: string, categoryId: strin
 }
 
 export function getCachedMainDraw(tournamentSlug: string, categoryId: string): any[] | null {
+  if (!tournamentSlug || !categoryId) return null;
+  if (isDrawResetMarked(tournamentSlug, categoryId)) return null;
   const direct = _mainDrawCache.get(`${tournamentSlug}_${categoryId}`);
   if (direct && Array.isArray(direct) && direct.length > 0) return direct;
 
@@ -136,7 +147,7 @@ export function getCachedMainDraw(tournamentSlug: string, categoryId: string): a
     if (key.startsWith(`${tournamentSlug}_`) && Array.isArray(val) && val.length > 0) {
       const suffix = key.replace(`${tournamentSlug}_`, "").toLowerCase();
       const target = (categoryId || "").toLowerCase();
-      if (suffix === target || target.includes(suffix) || suffix.includes(target)) {
+      if (suffix === target || isSameCategory(suffix, target)) {
         return val;
       }
     }
@@ -191,7 +202,9 @@ export async function dbGetTournaments(): Promise<Tournament[] | null> {
         }
         if (metaObj.mainDraw && typeof metaObj.mainDraw === "object") {
           for (const [catId, draw] of Object.entries(metaObj.mainDraw)) {
-            _mainDrawCache.set(`${t.slug}_${catId}`, draw as any);
+            if (!isDrawResetMarked(t.slug, catId)) {
+              _mainDrawCache.set(`${t.slug}_${catId}`, draw as any);
+            }
           }
         }
         if (Array.isArray(metaObj.dispatchQueue)) {
@@ -1756,7 +1769,11 @@ export async function dbSaveDrawnGroups(
     }
 
     _drawnGroupsCache.set(`${tournamentSlug}_${catSlug}`, groups);
+    _drawnGroupsCache.set(`${tournamentSlug}_${catSlug}`, groups);
     _drawnGroupsCache.set(`${tournamentSlug}_${catUuid}`, groups);
+    clearMainDrawCache(tournamentSlug, categoryId);
+    clearMainDrawCache(tournamentSlug, catSlug);
+    clearMainDrawCache(tournamentSlug, catUuid);
 
     if (typeof window !== "undefined") {
       window.dispatchEvent(new Event("dv_drawn_groups_updated"));
@@ -1773,7 +1790,16 @@ export async function dbSaveDrawnGroups(
       [catSlug]: groups,
       [catUuid]: groups,
     };
-    const updatedMeta = { ...existing, drawnGroups };
+    const mainDraw = { ...(existing.mainDraw || {}) };
+    delete mainDraw[categoryId];
+    delete mainDraw[catSlug];
+    delete mainDraw[catUuid];
+    for (const k of Object.keys(mainDraw)) {
+      if (isSameCategory(k, categoryId) || isSameCategory(k, catSlug) || isSameCategory(k, catUuid)) {
+        delete mainDraw[k];
+      }
+    }
+    const updatedMeta = { ...existing, drawnGroups, mainDraw };
 
     const { error } = await supabase
       .from("tournaments")
@@ -1841,7 +1867,16 @@ export async function dbDeleteDrawnGroups(
       delete drawnGroups[categoryId];
       delete drawnGroups[catSlug];
       delete drawnGroups[catUuid];
-      const updatedMeta = { ...existing, drawnGroups };
+      const mainDraw = { ...(existing.mainDraw || {}) };
+    delete mainDraw[categoryId];
+    delete mainDraw[catSlug];
+    delete mainDraw[catUuid];
+    for (const k of Object.keys(mainDraw)) {
+      if (isSameCategory(k, categoryId) || isSameCategory(k, catSlug) || isSameCategory(k, catUuid)) {
+        delete mainDraw[k];
+      }
+    }
+    const updatedMeta = { ...existing, drawnGroups, mainDraw };
 
       const { error } = await supabase
         .from("tournaments")
