@@ -537,7 +537,7 @@ function mergeMatchesSafely(cloudMatches: LiveMatch[], localMatches: LiveMatch[]
     const bracket =
       m.stage && isKnockoutStageString(m.stage)
         ? `ko-${getKnockoutRoundType(m.stage)}-${m.stage.trim().toLowerCase()}`
-        : (m.stage || "").match(/(?:bracket|pool)\s*([a-z])/i)?.[1]?.toLowerCase() || (m.bracketLetter ? m.bracketLetter.toLowerCase() : "pool");
+        : (m.stage || "").match(/(?:bracket|pool)\s*([a-z])\b/i)?.[1]?.toLowerCase() || (m.bracketLetter ? m.bracketLetter.toLowerCase() : "pool");
     return m.id.startsWith("match_")
       ? m.id
       : `${m.tournamentSlug || "event"}::${m.categoryId || "division"}::${bracket}::${pair}`;
@@ -768,7 +768,7 @@ function mergeMatchesSafely(cloudMatches: LiveMatch[], localMatches: LiveMatch[]
     const bracket =
       m.stage && isKnockoutStageString(m.stage)
         ? `ko-${getKnockoutRoundType(m.stage)}-${m.stage.trim().toLowerCase()}`
-        : (m.stage || "").match(/(?:bracket|pool)\s*([a-z])/i)?.[1]?.toLowerCase() || (m.bracketLetter ? m.bracketLetter.toLowerCase() : "pool");
+        : (m.stage || "").match(/(?:bracket|pool)\s*([a-z])\b/i)?.[1]?.toLowerCase() || (m.bracketLetter ? m.bracketLetter.toLowerCase() : "pool");
     const pairKey = m.id.startsWith("match_")
       ? m.id
       : `${m.tournamentSlug || "event"}::${m.categoryId || "division"}::${bracket}::${pair}`;
@@ -1280,6 +1280,9 @@ export function resetMatch(match: LiveMatch): LiveMatch {
   if (typeof localStorage !== "undefined") {
     try {
       localStorage.removeItem(`dv_toss_done_${match.id}`);
+      localStorage.removeItem(`dv_court_side_${match.id}`);
+      localStorage.removeItem(`dv_base1_A_${match.id}`);
+      localStorage.removeItem(`dv_base1_B_${match.id}`);
     } catch {
       // ignore
     }
@@ -1348,7 +1351,7 @@ export function createPairMatchId(
   // Standardize stage: if it references a pool/bracket letter (e.g. "Bracket A", "Bracket A (Pool Play)", "Pool A - Round 1"),
   // normalize to "bracket-[letter]" so IDs never diverge between draws, unassigned lists, queues, and dispatch stations.
   let cleanStage = (stageOrBracket || "match").trim().toLowerCase();
-  const poolLetterMatch = cleanStage.match(/(?:bracket|pool)\s*([a-z])/i);
+  const poolLetterMatch = cleanStage.match(/(?:bracket|pool)\s*([a-z])\b/i);
   if (poolLetterMatch) {
     cleanStage = `bracket-${poolLetterMatch[1]!.toLowerCase()}`;
   }

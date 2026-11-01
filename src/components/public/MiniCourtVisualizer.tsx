@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState, useEffect } from "react";
 import { type LiveScore, deriveActiveServerBase } from "@/lib/match-store";
 
 interface MiniCourtVisualizerProps {
@@ -10,6 +10,7 @@ interface MiniCourtVisualizerProps {
   teamBPlayers?: string[] | undefined;
   teamABase1Player?: string | undefined;
   teamBBase1Player?: string | undefined;
+  teamASide?: "left" | "right" | undefined;
   compact?: boolean;
 }
 
@@ -36,8 +37,46 @@ export function MiniCourtVisualizer({
   teamBPlayers,
   teamABase1Player,
   teamBBase1Player,
+  teamASide: propTeamASide,
   compact = false,
 }: MiniCourtVisualizerProps) {
+  const [localSide, setLocalSide] = useState<"left" | "right">(() => {
+    if (propTeamASide === "left" || propTeamASide === "right") return propTeamASide;
+    if (matchId && typeof localStorage !== "undefined") {
+      const saved = localStorage.getItem(`dv_court_side_${matchId}`);
+      if (saved === "right" || saved === "left") return saved;
+    }
+    return "left";
+  });
+
+  useEffect(() => {
+    if (propTeamASide === "left" || propTeamASide === "right") {
+      setLocalSide(propTeamASide);
+      return;
+    }
+    if (matchId && typeof localStorage !== "undefined") {
+      const saved = localStorage.getItem(`dv_court_side_${matchId}`);
+      setLocalSide(saved === "right" ? "right" : "left");
+    } else {
+      setLocalSide("left");
+    }
+  }, [matchId, propTeamASide]);
+
+  const handleToggleSide = () => {
+    setLocalSide((prev) => {
+      const next = prev === "left" ? "right" : "left";
+      if (matchId && typeof localStorage !== "undefined") {
+        try {
+          localStorage.setItem(`dv_court_side_${matchId}`, next);
+        } catch {
+          // ignore
+        }
+      }
+      return next;
+    });
+  };
+
+  const effectiveTeamASide: "left" | "right" = propTeamASide ?? localSide;
   const isTeamAServing = score.servingTeam === "A";
   const teamAScoreEven = score.teamAScore % 2 === 0;
   const teamBScoreEven = score.teamBScore % 2 === 0;
@@ -102,6 +141,29 @@ export function MiniCourtVisualizer({
   const bRightReceiving = isTeamAServing && isRightCourt;
   const bLeftReceiving = isTeamAServing && !isRightCourt;
 
+  const teamAData = {
+    teamName: teamAName,
+    leftName: aLeftName,
+    rightName: aRightName,
+    leftServing: aLeftServing,
+    rightServing: aRightServing,
+    leftReceiving: aLeftReceiving,
+    rightReceiving: aRightReceiving,
+  };
+
+  const teamBData = {
+    teamName: teamBName,
+    leftName: bLeftName,
+    rightName: bRightName,
+    leftServing: bLeftServing,
+    rightServing: bRightServing,
+    leftReceiving: bLeftReceiving,
+    rightReceiving: bRightReceiving,
+  };
+
+  const leftSide = effectiveTeamASide === "right" ? teamBData : teamAData;
+  const rightSide = effectiveTeamASide === "right" ? teamAData : teamBData;
+
   const servingTeamName = isTeamAServing ? teamAName : teamBName;
   const activeServerPlayer = isTeamAServing
     ? isRightCourt ? aRightName : aLeftName
@@ -124,9 +186,19 @@ export function MiniCourtVisualizer({
             {showServerPlayerInBanner ? ` (${formatCourtPlayerName(activeServerPlayer, true)})` : ""}
           </span>
         </span>
-        <span className="px-2 py-0.5 rounded bg-black/80 border border-emerald-500/40 text-[0.6rem] sm:text-[0.62rem] font-black text-emerald-300 shrink-0">
-          {isSingles ? "Server" : `Server ${score.serverNumber}`} &middot; {isRightCourt ? "Right Court" : "Left Court"}
-        </span>
+        <div className="flex items-center gap-1.5 shrink-0">
+          <span className="px-2 py-0.5 rounded bg-black/80 border border-emerald-500/40 text-[0.6rem] sm:text-[0.62rem] font-black text-emerald-300">
+            {isSingles ? "Server" : `Server ${score.serverNumber}`} &middot; {isRightCourt ? "Right Court" : "Left Court"}
+          </span>
+          <button
+            type="button"
+            onClick={handleToggleSide}
+            className="px-1.5 py-0.5 rounded bg-charcoal/90 hover:bg-charcoal border border-sand/30 hover:border-pickle text-[0.55rem] sm:text-[0.6rem] font-mono font-bold text-sand/90 hover:text-pickle transition-colors cursor-pointer"
+            title="Switch 2D Court Ends"
+          >
+            Flip Side
+          </button>
+        </div>
       </div>
 
       {/* 2D Overhead Pickleball Court */}
@@ -144,22 +216,22 @@ export function MiniCourtVisualizer({
           </span>
         </div>
 
-        {/* Left Side (Team A Court Area) */}
+        {/* Left Side of 2D Court */}
         <div className="absolute top-0 bottom-0 left-0 right-[66%]">
           <div className="absolute left-0 right-0 top-1/2 h-[1.5px] -translate-y-1/2 bg-pickle/40" />
 
-          {/* Team A - Left Service Box (Top half: Odd Court) */}
+          {/* Left Team - Left Service Box (Top half: Odd Court) */}
           <div
             className={`absolute top-0 left-0 right-0 bottom-1/2 flex flex-col items-center justify-center px-1 py-0.5 text-center transition-colors ${
-              aLeftServing ? "bg-pickle/20" : aLeftReceiving ? "bg-sand/10" : ""
+              leftSide.leftServing ? "bg-pickle/20" : leftSide.leftReceiving ? "bg-sand/10" : ""
             }`}
           >
-            {aLeftName && (
+            {leftSide.leftName && (
               <span className="max-w-full truncate text-[0.5rem] sm:text-[0.6rem] font-semibold text-sand/95 leading-tight">
-                {formatCourtPlayerName(aLeftName, compact)}
+                {formatCourtPlayerName(leftSide.leftName, compact)}
               </span>
             )}
-            {aLeftServing && (
+            {leftSide.leftServing && (
               <div className="flex items-center gap-1 mt-0.5">
                 <span className="relative flex h-2.5 w-2.5 shrink-0">
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-pickle opacity-75"></span>
@@ -170,25 +242,25 @@ export function MiniCourtVisualizer({
                 </span>
               </div>
             )}
-            {aLeftReceiving && (
+            {leftSide.leftReceiving && (
               <span className="mt-0.5 px-1 rounded bg-sand/15 text-[0.46rem] sm:text-[0.5rem] font-bold text-sand/90 font-mono leading-tight">
                 RCV
               </span>
             )}
           </div>
 
-          {/* Team A - Right Service Box (Bottom half: Even Court) */}
+          {/* Left Team - Right Service Box (Bottom half: Even Court) */}
           <div
             className={`absolute bottom-0 left-0 right-0 top-1/2 flex flex-col items-center justify-center px-1 py-0.5 pb-3 text-center transition-colors ${
-              aRightServing ? "bg-pickle/20" : aRightReceiving ? "bg-sand/10" : ""
+              leftSide.rightServing ? "bg-pickle/20" : leftSide.rightReceiving ? "bg-sand/10" : ""
             }`}
           >
-            {aRightName && (
+            {leftSide.rightName && (
               <span className="max-w-full truncate text-[0.5rem] sm:text-[0.6rem] font-semibold text-sand/95 leading-tight">
-                {formatCourtPlayerName(aRightName, compact)}
+                {formatCourtPlayerName(leftSide.rightName, compact)}
               </span>
             )}
-            {aRightServing && (
+            {leftSide.rightServing && (
               <div className="flex items-center gap-1 mt-0.5">
                 <span className="relative flex h-2.5 w-2.5 shrink-0">
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-pickle opacity-75"></span>
@@ -199,7 +271,7 @@ export function MiniCourtVisualizer({
                 </span>
               </div>
             )}
-            {aRightReceiving && (
+            {leftSide.rightReceiving && (
               <span className="mt-0.5 px-1 rounded bg-sand/15 text-[0.46rem] sm:text-[0.5rem] font-bold text-sand/90 font-mono leading-tight">
                 RCV
               </span>
@@ -207,22 +279,22 @@ export function MiniCourtVisualizer({
           </div>
         </div>
 
-        {/* Right Side (Team B Court Area) */}
+        {/* Right Side of 2D Court */}
         <div className="absolute top-0 bottom-0 right-0 left-[66%]">
           <div className="absolute left-0 right-0 top-1/2 h-[1.5px] -translate-y-1/2 bg-pickle/40" />
 
-          {/* Team B - Right Service Box (Top half when viewing from Team B baseline) */}
+          {/* Right Team - Right Service Box (Top half when viewing from Right baseline) */}
           <div
             className={`absolute top-0 left-0 right-0 bottom-1/2 flex flex-col items-center justify-center px-1 py-0.5 pt-3 text-center transition-colors ${
-              bRightServing ? "bg-pickle/20" : bRightReceiving ? "bg-sand/10" : ""
+              rightSide.rightServing ? "bg-pickle/20" : rightSide.rightReceiving ? "bg-sand/10" : ""
             }`}
           >
-            {bRightName && (
+            {rightSide.rightName && (
               <span className="max-w-full truncate text-[0.5rem] sm:text-[0.6rem] font-semibold text-sand/95 leading-tight">
-                {formatCourtPlayerName(bRightName, compact)}
+                {formatCourtPlayerName(rightSide.rightName, compact)}
               </span>
             )}
-            {bRightServing && (
+            {rightSide.rightServing && (
               <div className="flex items-center gap-1 mt-0.5">
                 <span className="relative flex h-2.5 w-2.5 shrink-0">
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-pickle opacity-75"></span>
@@ -233,25 +305,25 @@ export function MiniCourtVisualizer({
                 </span>
               </div>
             )}
-            {bRightReceiving && (
+            {rightSide.rightReceiving && (
               <span className="mt-0.5 px-1 rounded bg-sand/15 text-[0.46rem] sm:text-[0.5rem] font-bold text-sand/90 font-mono leading-tight">
                 RCV
               </span>
             )}
           </div>
 
-          {/* Team B - Left Service Box (Bottom half when viewing from Team B baseline) */}
+          {/* Right Team - Left Service Box (Bottom half when viewing from Right baseline) */}
           <div
             className={`absolute bottom-0 left-0 right-0 top-1/2 flex flex-col items-center justify-center px-1 py-0.5 text-center transition-colors ${
-              bLeftServing ? "bg-pickle/20" : bLeftReceiving ? "bg-sand/10" : ""
+              rightSide.leftServing ? "bg-pickle/20" : rightSide.leftReceiving ? "bg-sand/10" : ""
             }`}
           >
-            {bLeftName && (
+            {rightSide.leftName && (
               <span className="max-w-full truncate text-[0.5rem] sm:text-[0.6rem] font-semibold text-sand/95 leading-tight">
-                {formatCourtPlayerName(bLeftName, compact)}
+                {formatCourtPlayerName(rightSide.leftName, compact)}
               </span>
             )}
-            {bLeftServing && (
+            {rightSide.leftServing && (
               <div className="flex items-center gap-1 mt-0.5">
                 <span className="relative flex h-2.5 w-2.5 shrink-0">
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-pickle opacity-75"></span>
@@ -262,7 +334,7 @@ export function MiniCourtVisualizer({
                 </span>
               </div>
             )}
-            {bLeftReceiving && (
+            {rightSide.leftReceiving && (
               <span className="mt-0.5 px-1 rounded bg-sand/15 text-[0.46rem] sm:text-[0.5rem] font-bold text-sand/90 font-mono leading-tight">
                 RCV
               </span>
@@ -272,10 +344,10 @@ export function MiniCourtVisualizer({
 
         {/* Team Labels along sidelines */}
         <div className="absolute left-1 bottom-0.5 text-[0.48rem] sm:text-[0.55rem] font-bold uppercase tracking-wider text-sand/75 truncate max-w-[32%] pointer-events-none">
-          {teamAName}
+          {leftSide.teamName}
         </div>
         <div className="absolute right-1 top-0.5 text-[0.48rem] sm:text-[0.55rem] font-bold uppercase tracking-wider text-sand/75 truncate max-w-[32%] text-right pointer-events-none">
-          {teamBName}
+          {rightSide.teamName}
         </div>
       </div>
     </div>

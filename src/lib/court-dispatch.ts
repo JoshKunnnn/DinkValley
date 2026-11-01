@@ -174,6 +174,7 @@ export function saveCourtStations(
     // here used to cascade into reload -> reconcile -> save loops on every 3s poll.
     if (localStorage.getItem(STATIONS_KEY) !== serialized) {
       localStorage.setItem(STATIONS_KEY, serialized);
+      invalidateReadCaches();
       window.dispatchEvent(new Event("dv_court_stations_updated"));
     }
   } catch {
@@ -400,6 +401,7 @@ export function saveDispatchQueue(queue: QueueItem[]): void {
   });
   try {
     localStorage.setItem(QUEUE_KEY, JSON.stringify(sanitized));
+    invalidateReadCaches();
     window.dispatchEvent(new Event("storage"));
     window.dispatchEvent(new Event("dv_dispatch_queue_updated"));
   } catch {
@@ -795,6 +797,7 @@ export async function dispatchMatchToCourt(
   // 2. Mark local mutation and save matches locally without mass cloud sync
   markLocalMatchMutation(targetId);
   saveMatches(updatedMatches, false);
+  invalidateReadCaches();
 
   // 3. Save the dispatched match row to Supabase FIRST, then station rows, then broadcast.
   // Umpire and Public devices react to Realtime events; establishing deterministic cloud writes eliminates split-brain.
@@ -923,12 +926,12 @@ export function isStageMatchingBracket(
 
   // Playoffs assignment: matches any playoff/knockout stage, excludes pool play
   if (cleanBracket === "playoffs" || cleanBracket === "playoff") {
-    const isPool = /(?:bracket|pool)\s+[a-z]/i.test(cleanStage);
+    const isPool = cleanStage.includes("pool play") || /(?:bracket|pool)\s+[a-z]\b/i.test(cleanStage);
     return !isPool;
   }
 
   // Pool bracket assignment: extract the target letter, e.g. "Bracket A" -> "A", "Pool B" -> "B"
-  const targetLetterMatch = cleanBracket.match(/(?:bracket|pool)?\s*([a-z])/i);
+  const targetLetterMatch = cleanBracket.match(/(?:bracket|pool)?\s*([a-z])\b/i);
   if (!targetLetterMatch) {
     return cleanStage.includes(cleanBracket);
   }
@@ -936,7 +939,7 @@ export function isStageMatchingBracket(
   const targetLetter = targetLetterMatch[1]!.toUpperCase();
 
   // Extract letter from match stage
-  const stageLetterMatch = cleanStage.match(/(?:bracket|pool)\s+([a-z])/i);
+  const stageLetterMatch = cleanStage.match(/(?:bracket|pool)\s+([a-z])\b/i);
   if (!stageLetterMatch) {
     return false;
   }
@@ -1081,6 +1084,7 @@ export async function vacateCourt(court: FacilityCourt): Promise<void> {
   });
   if (matchesModified) {
     saveMatches(updatedMatches, false);
+  invalidateReadCaches();
     await Promise.all(vacatedMatches.map((vm) => dbSaveMatch(vm).catch(() => {})));
   }
 
@@ -1376,8 +1380,8 @@ export function isQueueItemFinished(
     }
 
     // Pool play: compare bracket letter
-    const qBracket = qStage.match(/(?:bracket|pool)\s+([a-z0-9]+)/i);
-    const mBracket = mStage.match(/(?:bracket|pool)\s+([a-z0-9]+)/i) || (m.bracketLetter ? [null, m.bracketLetter] : null);
+    const qBracket = qStage.match(/(?:bracket|pool)\s+([a-z])\b/i);
+    const mBracket = mStage.match(/(?:bracket|pool)\s+([a-z])\b/i) || (m.bracketLetter ? [null, m.bracketLetter] : null);
     if (qBracket?.[1] && mBracket?.[1]) {
       return qBracket[1].toUpperCase() === mBracket[1].toUpperCase();
     }
@@ -3124,7 +3128,7 @@ export function autoHealDispatchAnomalies(
     const nameA = pA ? `${cleanA}[${pA}]` : cleanA;
     const nameB = pB ? `${cleanB}[${pB}]` : cleanB;
     const pair = [nameA, nameB].sort().join("::");
-    const bracket = (m.stage || "").match(/(?:bracket|pool)\s*([a-z])/i)?.[1]?.toLowerCase() || (m.bracketLetter ? m.bracketLetter.toLowerCase() : "pool");
+    const bracket = (m.stage || "").match(/(?:bracket|pool)\s*([a-z])\b/i)?.[1]?.toLowerCase() || (m.bracketLetter ? m.bracketLetter.toLowerCase() : "pool");
     const stageType =
       m.stage && !m.stage.includes("Pool Play") && !m.stage.includes("Bracket ") && /(?:quarter|semi|final|playoff|bronze|round of|play-in)/i.test(m.stage)
         ? `playoff-${m.stage.trim().toLowerCase()}`

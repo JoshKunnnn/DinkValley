@@ -1883,10 +1883,17 @@ function UmpireConsole({
       setTossDone(alreadyDone);
       setShowToss(!alreadyDone);
       setTossServingTeam(match.score.servingTeam);
+      if (typeof localStorage !== "undefined") {
+        const savedSide = localStorage.getItem(`dv_court_side_${match.id}`);
+        setTeamASide(savedSide === "right" ? "right" : "left");
+      } else {
+        setTeamASide("left");
+      }
     } else {
       setShowToss(false);
       setTossDone(false);
       setTossServingTeam(null);
+      setTeamASide("left");
     }
     if (timerRef.current) clearInterval(timerRef.current);
     setTimeoutActive(false);

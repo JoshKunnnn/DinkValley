@@ -81,7 +81,7 @@ function getMatchBracketLabel(m: LiveMatch): string {
     const letter = m.bracketLetter.replace(/^bracket\s*/i, "").trim().toUpperCase();
     return `Bracket ${letter}`;
   }
-  const match = (m.stage || "").match(/(?:bracket|pool)\s+([a-z0-9]+)/i);
+  const match = (m.stage || "").match(/(?:bracket|pool)\s+([a-z])\b/i);
   if (match) {
     return `Bracket ${match[1]!.toUpperCase()}`;
   }
@@ -1540,10 +1540,10 @@ export function CourtDispatch({
     queue.forEach((q) => {
       if (q.status !== "queued" && q.status !== "on_deck") return;
       if (queueDivisionFilter === "current" && q.categoryId && !isSameCategory(q.categoryId, categoryId)) return;
-      const letterMatch = q.stage.match(/(?:bracket|pool)\s+([a-z])/i);
+      const letterMatch = q.stage.match(/(?:bracket|pool)\s+([a-z])\b/i);
       if (letterMatch) {
         set.add(`Bracket ${letterMatch[1]!.toUpperCase()}`);
-      } else if (!/(?:bracket|pool)\s+[a-z]/i.test(q.stage)) {
+      } else if (!/(?:bracket|pool)\s+[a-z]\b/i.test(q.stage)) {
         set.add("Playoffs");
       }
     });
@@ -1556,7 +1556,7 @@ export function CourtDispatch({
     queue.forEach((q) => {
       if (q.status !== "queued" && q.status !== "on_deck") return;
       if (queueDivisionFilter === "current" && q.categoryId && !isSameCategory(q.categoryId, categoryId)) return;
-      const letterMatch = q.stage.match(/(?:bracket|pool)\s+([a-z])/i);
+      const letterMatch = q.stage.match(/(?:bracket|pool)\s+([a-z])\b/i);
       const key = letterMatch ? `Bracket ${letterMatch[1]!.toUpperCase()}` : "Playoffs";
       map[key] = (map[key] || 0) + 1;
     });
@@ -1727,10 +1727,10 @@ export function CourtDispatch({
   const availableUnassignedBrackets = useMemo(() => {
     const set = new Set<string>();
     unassignedMatches.forEach((m) => {
-      const letterMatch = m.stage.match(/(?:bracket|pool)\s+([a-z])/i);
+      const letterMatch = m.stage.match(/(?:bracket|pool)\s+([a-z])\b/i);
       if (letterMatch) {
         set.add(`Bracket ${letterMatch[1]!.toUpperCase()}`);
-      } else if (!/(?:bracket|pool)\s+[a-z]/i.test(m.stage)) {
+      } else if (!/(?:bracket|pool)\s+[a-z]\b/i.test(m.stage)) {
         set.add("Playoffs");
       }
     });
