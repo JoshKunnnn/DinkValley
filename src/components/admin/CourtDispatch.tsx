@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
-import type { Tournament, Category } from "@/data/tournaments";
+import type { Tournament, Category, Team } from "@/data/tournaments";
+import { bulkSetTeamsInCategory } from "@/lib/tournament-store";
 import {
   useMatchStore,
   type LiveMatch,
@@ -111,22 +112,27 @@ function computeCategoryUnassignedMatches(
     return [];
   }
 
+  const divisionMatches = matches.filter((m) => {
+    if (m.tournamentSlug && m.tournamentSlug !== tournamentSlug) return false;
+    if (m.categoryId) {
+      return (
+        isSameCategory(m.categoryId, cat.id) ||
+        Boolean(cat.category_slug && isSameCategory(m.categoryId, cat.category_slug)) ||
+        Boolean((cat as any).uuid && isSameCategory(m.categoryId, (cat as any).uuid))
+      );
+    }
+    return isMatchInCategory(m, cat, tournamentSlug);
+  });
+  const divisionQueue = queue.filter((q) => isQueueItemInCategory(q, cat, tournamentSlug));
+
   const poolGroups = getDrawnGroups(tournamentSlug, cat.id);
   const playoffMatches =
-    syncMainDrawWithLiveMatches(tournamentSlug, cat.id, matches, false) ||
+    syncMainDrawWithLiveMatches(tournamentSlug, cat.id, divisionMatches, false) ||
     getMainDrawMatches(tournamentSlug, cat.id);
   const validTeamIds = new Set(cat.teams.map((t) => t.id));
   const validTeamNames = new Set(cat.teams.map((t) => t.name.trim().toLowerCase()));
 
-  const queuedIds = new Set(
-    queue
-      .filter(
-        (q) =>
-          (!q.categoryId || q.categoryId === cat.id) &&
-          (!q.tournamentSlug || q.tournamentSlug === tournamentSlug),
-      )
-      .map((q) => q.matchId),
-  );
+  const queuedIds = new Set(divisionQueue.map((q) => q.matchId));
   const activeCourtMatchIds = new Set(
     Object.values(stations)
       .map((s) => s.currentMatchId)
@@ -202,9 +208,9 @@ function computeCategoryUnassignedMatches(
           isDupB,
         );
         const existingLive =
-          (scopedMatchId ? matches.find((m) => m.id === scopedMatchId) : null) ||
+          (scopedMatchId ? divisionMatches.find((m) => m.id === scopedMatchId) : null) ||
           findMatchForPair(
-            matches,
+            divisionMatches,
             teamA.name,
             teamB.name,
             tournamentSlug,
@@ -246,17 +252,24 @@ function computeCategoryUnassignedMatches(
       const legacyId = `live-ko-${tournamentSlug}-${cat.id}-${km.id}`;
       const canonicalId = createPairMatchId(tournamentSlug, cat.id, stage, km.teamA.name, km.teamB.name);
       const existingLive =
-        matches.find((m) => m.id === canonicalId || m.id === legacyId || m.id === km.id) ||
-        findMatchForPair(matches, km.teamA.name, km.teamB.name, tournamentSlug, cat.id, stage, km.teamA.players, km.teamB.players) ||
-        matches.find((m) => {
-          const ma = m.teamAName?.trim().toLowerCase();
-          const mb = m.teamBName?.trim().toLowerCase();
-          const ta = km.teamA!.name.trim().toLowerCase();
-          const tb = km.teamB!.name.trim().toLowerCase();
-          if (!((ma === ta && mb === tb) || (ma === tb && mb === ta))) return false;
-          const mStage = (m.stage || "").toLowerCase();
-          return mStage.includes("quarter") || mStage.includes("semi") || mStage.includes("final") || mStage.includes("playoff") || mStage.includes("bronze");
-        });
+        divisionMatches.find(
+          (m) =>
+            !m.stage?.includes("Pool Play") &&
+            !m.stage?.includes("Bracket ") &&
+            (m.id === canonicalId || m.id === legacyId || m.id === km.id),
+        ) ||
+        findMatchForPair(
+          divisionMatches.filter(
+            (m) => !m.stage?.includes("Pool Play") && !m.stage?.includes("Bracket "),
+          ),
+          km.teamA.name,
+          km.teamB.name,
+          tournamentSlug,
+          cat.id,
+          stage,
+          km.teamA.players,
+          km.teamB.players,
+        );
       const effectiveId = existingLive?.id || canonicalId;
 
       if (existingLive?.status === "final" || existingLive?.winnerTeam || existingLive?.endedAt || km.winner) continue;
@@ -622,15 +635,21 @@ export function CourtDispatch({
       isSameCategory(q.categoryId, categoryId) ||
       (!q.categoryId && q.matchId && q.matchId.includes(categoryId));
 
-    // Case 1: All players in category were deleted
+    // Case 1: All players in category were deleted or not yet hydrated
     if (!category.teams || category.teams.length === 0) {
-      try {
-        localStorage.removeItem(`dv_drawn_groups_${tournamentSlug}_${categoryId}`);
-        localStorage.removeItem(`dv_main_draw_${tournamentSlug}_${categoryId}`);
-      } catch {
-        // ignore
+      // Check if drawn groups exist: if so, restore rosters into category.teams so they are never lost!
+      const existingDrawn = getDrawnGroups(tournamentSlug, categoryId);
+      const drawnTeams = (existingDrawn || [])
+        .flatMap((g) => g.slots.map((s) => s.team))
+        .filter((t): t is Team => t !== null);
+
+      if (drawnTeams.length > 0) {
+        bulkSetTeamsInCategory(tournamentSlug, categoryId, drawnTeams);
+        return;
       }
 
+      // Never wipe dv_drawn_groups or dv_main_draw here.
+      // Only purge stale queue entries if neither roster nor drawn groups contain teams.
       const hasStale = currentQueue.some(
         (q) => isCatMatch(q) && !q.id.startsWith("custom-"),
       );
@@ -641,7 +660,18 @@ export function CourtDispatch({
       }
     } else {
       // Case 2: Specific teams or players were deleted from database
-      const validNames = category.teams.map((t) => t.name.trim().toLowerCase());
+      const existingDrawn = getDrawnGroups(tournamentSlug, categoryId);
+      const drawnTeamNames = (existingDrawn || [])
+        .flatMap((g) => g.slots.map((s) => s.team?.name?.trim().toLowerCase()))
+        .filter((n): n is string => Boolean(n));
+
+      // Roster includes both current category.teams and drawn bracket teams
+      const validNames = Array.from(
+        new Set([
+          ...category.teams.map((t) => t.name.trim().toLowerCase()),
+          ...drawnTeamNames,
+        ]),
+      );
       const validSet = new Set(validNames);
       const hasOrphanMatches = currentQueue.some((q) => {
         if (!isCatMatch(q) || q.id.startsWith("custom-")) return false;
@@ -835,6 +865,7 @@ export function CourtDispatch({
           letter: string;
           label: string;
           unplayedCount: number;
+          onCourtCount: number;
           completedCount: number;
           totalCount: number;
           matches: Array<{
@@ -857,15 +888,29 @@ export function CourtDispatch({
     }
 
     const activeCat = tournament.categories.find((c) => c.id === bracketModalCategory) || category;
+    const divisionMatches = matches.filter((m) => {
+      if (m.tournamentSlug && m.tournamentSlug !== tournamentSlug) return false;
+      if (m.categoryId) {
+        return (
+          isSameCategory(m.categoryId, activeCat.id) ||
+          Boolean(activeCat.category_slug && isSameCategory(m.categoryId, activeCat.category_slug)) ||
+          Boolean((activeCat as any).uuid && isSameCategory(m.categoryId, (activeCat as any).uuid))
+        );
+      }
+      return isMatchInCategory(m, activeCat, tournamentSlug);
+    });
+    const divisionQueue = queue.filter((q) => isQueueItemInCategory(q, activeCat, tournamentSlug));
+
     const poolGroups = getDrawnGroups(tournamentSlug, activeCat.id);
     const playoffMatches =
-      syncMainDrawWithLiveMatches(tournamentSlug, activeCat.id, matches, false) ||
+      syncMainDrawWithLiveMatches(tournamentSlug, activeCat.id, divisionMatches, false) ||
       getMainDrawMatches(tournamentSlug, activeCat.id);
 
     const groupsList: Array<{
       letter: string;
       label: string;
       unplayedCount: number;
+      onCourtCount: number;
       completedCount: number;
       totalCount: number;
       matches: Array<{
@@ -886,10 +931,12 @@ export function CourtDispatch({
 
     if (poolGroups && poolGroups.length > 0) {
       for (const group of poolGroups) {
-        if (!group.isDrawn && !group.slots.some((s) => s.team !== null)) continue;
-        const teams = group.slots
-          .map((s) => s.team)
-          .filter((t): t is { id: string; name: string; players: string[] } => t !== null);
+        const isUndrawnGroup = !group.isDrawn && !group.slots.some((s) => s.team !== null);
+        const teams = isUndrawnGroup
+          ? []
+          : group.slots
+              .map((s) => s.team)
+              .filter((t): t is { id: string; name: string; players: string[] } => t !== null);
 
         const nameCounts = new Map<string, number>();
         for (const t of teams) {
@@ -933,9 +980,9 @@ export function CourtDispatch({
               isDupB,
             );
             const existing =
-              (scopedMatchId ? matches.find((m) => m.id === scopedMatchId) : null) ||
+              (scopedMatchId ? divisionMatches.find((m) => m.id === scopedMatchId) : null) ||
               findMatchForPair(
-                matches,
+                divisionMatches,
                 teamA.name,
                 teamB.name,
                 tournamentSlug,
@@ -970,7 +1017,7 @@ export function CourtDispatch({
                 matchStatus = "live";
                 assignedCourt = existing.court;
               } else {
-                const qIdx = queue.findIndex(
+                const qIdx = divisionQueue.findIndex(
                   (q) =>
                     (q.matchId === effectiveMatchId || q.matchId === matchId || (existing && q.matchId === existing.id)) &&
                     (q.status === "queued" || q.status === "on_deck"),
@@ -999,13 +1046,15 @@ export function CourtDispatch({
           }
         }
 
-        const unplayed = groupMatches.filter((m) => m.status !== "final").length;
+        const unplayed = groupMatches.filter((m) => m.status === "unassigned" || m.status === "queued").length;
+        const onCourt = groupMatches.filter((m) => m.status === "live").length;
         const completed = groupMatches.filter((m) => m.status === "final").length;
 
         groupsList.push({
           letter: group.letter,
           label: `Bracket ${group.letter}`,
           unplayedCount: unplayed,
+          onCourtCount: onCourt,
           completedCount: completed,
           totalCount: groupMatches.length,
           matches: groupMatches,
@@ -1021,17 +1070,24 @@ export function CourtDispatch({
         const legacyId = `live-ko-${tournamentSlug}-${activeCat.id}-${km.id}`;
         const canonicalId = createPairMatchId(tournamentSlug, activeCat.id, stage, km.teamA.name, km.teamB.name);
         const existing =
-          matches.find((m) => m.id === canonicalId || m.id === legacyId || m.id === km.id) ||
-          findMatchForPair(matches, km.teamA.name, km.teamB.name, tournamentSlug, activeCat.id, stage, km.teamA.players, km.teamB.players) ||
-          matches.find((m) => {
-            const ma = m.teamAName?.trim().toLowerCase();
-            const mb = m.teamBName?.trim().toLowerCase();
-            const ta = km.teamA!.name.trim().toLowerCase();
-            const tb = km.teamB!.name.trim().toLowerCase();
-            if (!((ma === ta && mb === tb) || (ma === tb && mb === ta))) return false;
-            const mStage = (m.stage || "").toLowerCase();
-            return mStage.includes("quarter") || mStage.includes("semi") || mStage.includes("final") || mStage.includes("playoff") || mStage.includes("bronze");
-          });
+          divisionMatches.find(
+            (m) =>
+              !m.stage?.includes("Pool Play") &&
+              !m.stage?.includes("Bracket ") &&
+              (m.id === canonicalId || m.id === legacyId || m.id === km.id),
+          ) ||
+          findMatchForPair(
+            divisionMatches.filter(
+              (m) => !m.stage?.includes("Pool Play") && !m.stage?.includes("Bracket "),
+            ),
+            km.teamA.name,
+            km.teamB.name,
+            tournamentSlug,
+            activeCat.id,
+            stage,
+            km.teamA.players,
+            km.teamB.players,
+          );
         const effectiveId = existing?.id || canonicalId;
 
         let matchStatus: "unassigned" | "queued" | "live" | "final" = "unassigned";
@@ -1061,7 +1117,7 @@ export function CourtDispatch({
             matchStatus = "live";
             assignedCourt = existing.court;
           } else {
-            const qIdx = queue.findIndex(
+            const qIdx = divisionQueue.findIndex(
               (q) =>
                 (q.matchId === effectiveId ||
                   q.matchId === canonicalId ||
@@ -1096,7 +1152,8 @@ export function CourtDispatch({
         groupsList.push({
           letter: "Playoffs",
           label: "Playoffs",
-          unplayedCount: koMatches.filter((m) => m.status !== "final").length,
+          unplayedCount: koMatches.filter((m) => m.status === "unassigned" || m.status === "queued").length,
+          onCourtCount: koMatches.filter((m) => m.status === "live").length,
           completedCount: koMatches.filter((m) => m.status === "final").length,
           totalCount: koMatches.length,
           matches: koMatches,
@@ -1120,16 +1177,20 @@ export function CourtDispatch({
     drawVersion,
   ]);
 
-  // Keep selected bracket letter aligned with available groups in modal
-  const prevCourtModalRef = useRef<FacilityCourt | null>(null);
+  // Keep selected bracket letter aligned with available groups in modal and on division switches
+  const prevCourtModalRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (selectedCourtForDispatch && bracketModalData.groups.length > 0) {
-      const isInitialOpen = prevCourtModalRef.current !== selectedCourtForDispatch;
-      prevCourtModalRef.current = selectedCourtForDispatch;
+      const modalContextKey = `${selectedCourtForDispatch}::${bracketModalCategory}`;
+      const isContextChange = prevCourtModalRef.current !== modalContextKey;
+      prevCourtModalRef.current = modalContextKey;
 
-      if (isInitialOpen) {
-        const assignedBracket = stations[selectedCourtForDispatch]?.activeBracket;
+      if (isContextChange) {
+        const assignedBracket =
+          bracketModalCategory === categoryId
+            ? stations[selectedCourtForDispatch]?.activeBracket
+            : undefined;
         let targetLetter: string | null = null;
         if (assignedBracket && assignedBracket !== "all") {
           if (assignedBracket.toLowerCase() === "playoffs") {
@@ -1152,23 +1213,37 @@ export function CourtDispatch({
           const firstWithUnplayed = bracketModalData.groups.find((g) => g.unplayedCount > 0);
           if (firstWithUnplayed) {
             setBracketModalSelectedLetter(firstWithUnplayed.letter);
-          } else if (targetLetter) {
-            setBracketModalSelectedLetter(targetLetter);
+          } else if (targetGroup && targetGroup.onCourtCount > 0) {
+            setBracketModalSelectedLetter(targetLetter!);
           } else {
-            setBracketModalSelectedLetter(bracketModalData.groups[0]?.letter ?? "A");
+            const firstWithOnCourt = bracketModalData.groups.find((g) => g.onCourtCount > 0);
+            setBracketModalSelectedLetter(
+              firstWithOnCourt ? firstWithOnCourt.letter : (bracketModalData.groups[0]?.letter ?? "A"),
+            );
           }
         }
       } else {
-        const exists = bracketModalSelectedLetter === "ALL" || bracketModalData.groups.some((g) => g.letter === bracketModalSelectedLetter);
+        const exists =
+          bracketModalSelectedLetter === "ALL" ||
+          bracketModalData.groups.some((g) => g.letter === bracketModalSelectedLetter);
         if (!exists) {
           const firstWithUnplayed = bracketModalData.groups.find((g) => g.unplayedCount > 0);
-          setBracketModalSelectedLetter(firstWithUnplayed ? firstWithUnplayed.letter : (bracketModalData.groups[0]?.letter ?? "A"));
+          setBracketModalSelectedLetter(
+            firstWithUnplayed ? firstWithUnplayed.letter : (bracketModalData.groups[0]?.letter ?? "A"),
+          );
         }
       }
     } else if (!selectedCourtForDispatch) {
       prevCourtModalRef.current = null;
     }
-  }, [selectedCourtForDispatch, bracketModalData.groups, stations, bracketModalSelectedLetter]);
+  }, [
+    selectedCourtForDispatch,
+    bracketModalCategory,
+    categoryId,
+    bracketModalData.groups,
+    stations,
+    bracketModalSelectedLetter,
+  ]);
 
   const handleOpenBracketModal = (court: FacilityCourt) => {
     prevCourtModalRef.current = null;
@@ -4470,7 +4545,10 @@ export function CourtDispatch({
                   return (
                     <button
                       key={c.id}
-                      onClick={() => setBracketModalCategory(c.id)}
+                      onClick={() => {
+                        setBracketModalCategory(c.id);
+                        setBracketModalTeamFilter("all");
+                      }}
                       className={`px-2.5 py-1 text-xs font-semibold tracking-wide border-2 transition-colors shrink-0 cursor-pointer ${isCurrent
                           ? "bg-brick text-sand border-brick font-bold"
                           : "bg-card text-foreground border-border hover:border-pickle hover:text-pickle"
@@ -4501,22 +4579,35 @@ export function CourtDispatch({
                   >
                     <span>All Brackets</span>
                     {(() => {
-                      const totalAll = bracketModalData.groups.reduce((acc, g) => acc + g.totalCount, 0);
-                      const unplayedAll = bracketModalData.groups.reduce((acc, g) => acc + g.unplayedCount, 0);
-                      const isEmpty = totalAll === 0;
-                      const hasUnplayed = unplayedAll > 0;
+                      const totalMatches = bracketModalData.groups.reduce((acc, g) => acc + g.totalCount, 0);
+                      const completedCount = bracketModalData.groups.reduce((acc, g) => acc + g.completedCount, 0);
+                      const onCourtCount = bracketModalData.groups.reduce((acc, g) => acc + g.onCourtCount, 0);
+                      const unplayedCount = bracketModalData.groups.reduce((acc, g) => acc + g.unplayedCount, 0);
+                      const badgeLabel =
+                        totalMatches === 0
+                          ? "EMPTY"
+                          : completedCount === totalMatches
+                          ? "DONE"
+                          : unplayedCount === 0 && onCourtCount > 0
+                          ? `${onCourtCount} ON COURT`
+                          : `${unplayedCount} LEFT`;
+                      const isEmpty = totalMatches === 0;
+                      const isDone = totalMatches > 0 && completedCount === totalMatches;
+                      const isOnCourtOnly = !isEmpty && !isDone && unplayedCount === 0 && onCourtCount > 0;
                       return (
                         <span
                           className={`px-1.5 py-0.2 text-[0.6rem] font-mono font-bold rounded-sm ${bracketModalSelectedLetter === "ALL"
                               ? "bg-sand text-charcoal"
                               : isEmpty
                                 ? "bg-muted text-muted-foreground"
-                                : hasUnplayed
-                                  ? "bg-pickle/20 text-pickle"
-                                  : "bg-emerald-500/20 text-emerald-400"
+                                : isDone
+                                  ? "bg-emerald-500/20 text-emerald-400"
+                                  : isOnCourtOnly
+                                    ? "bg-amber-500/20 text-amber-300"
+                                    : "bg-pickle/20 text-pickle"
                             }`}
                         >
-                          {isEmpty ? "Empty" : hasUnplayed ? `${unplayedAll} left` : "Done"}
+                          {badgeLabel}
                         </span>
                       );
                     })()}
@@ -4525,8 +4616,21 @@ export function CourtDispatch({
                   {/* Individual Bracket Tabs */}
                   {bracketModalData.groups.map((group) => {
                     const isActive = group.letter === bracketModalSelectedLetter;
-                    const isEmpty = group.totalCount === 0;
-                    const hasUnplayed = group.unplayedCount > 0;
+                    const totalMatches = group.totalCount;
+                    const completedCount = group.completedCount;
+                    const onCourtCount = group.onCourtCount;
+                    const unplayedCount = group.unplayedCount;
+                    const badgeLabel =
+                      totalMatches === 0
+                        ? "EMPTY"
+                        : completedCount === totalMatches
+                        ? "DONE"
+                        : unplayedCount === 0 && onCourtCount > 0
+                        ? `${onCourtCount} ON COURT`
+                        : `${unplayedCount} LEFT`;
+                    const isEmpty = totalMatches === 0;
+                    const isDone = totalMatches > 0 && completedCount === totalMatches;
+                    const isOnCourtOnly = !isEmpty && !isDone && unplayedCount === 0 && onCourtCount > 0;
                     return (
                       <button
                         key={group.letter}
@@ -4542,12 +4646,14 @@ export function CourtDispatch({
                               ? "bg-sand text-charcoal"
                               : isEmpty
                                 ? "bg-muted text-muted-foreground"
-                                : hasUnplayed
-                                  ? "bg-pickle/20 text-pickle"
-                                  : "bg-emerald-500/20 text-emerald-400"
+                                : isDone
+                                  ? "bg-emerald-500/20 text-emerald-400"
+                                  : isOnCourtOnly
+                                    ? "bg-amber-500/20 text-amber-300"
+                                    : "bg-pickle/20 text-pickle"
                             }`}
                         >
-                          {isEmpty ? "Empty" : hasUnplayed ? `${group.unplayedCount} left` : "Done"}
+                          {badgeLabel}
                         </span>
                       </button>
                     );

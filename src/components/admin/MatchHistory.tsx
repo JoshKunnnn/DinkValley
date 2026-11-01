@@ -385,6 +385,7 @@ export function MatchHistory({
         matchIds: targetIds,
         categoryId: isCurrentDivision ? (selectedCategoryObj?.id || selectedCategory) : undefined,
         targetMatches,
+        purgeAllCompletedInScope: true,
       });
 
       setShowClearModal(false);
@@ -410,6 +411,7 @@ export function MatchHistory({
         matchIds: [matchToDelete.id],
         categoryId: matchToDelete.categoryId,
         targetMatch: matchToDelete,
+        purgeAllCompletedInScope: false,
       });
       const nameA = matchToDelete.teamAName || "Team A";
       const nameB = matchToDelete.teamBName || "Team B";

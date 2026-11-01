@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Category, Team } from "@/data/tournaments";
 import {
-  findLiveMatchForTeams,
+  findMatchForPair,
   generateBalancedRoundRobinPairs,
   createCategoryScopedMatchId,
   type LiveMatch,
 } from "@/lib/match-store";
+import { isSameCategory } from "@/lib/supabase-service";
 import type { BracketGroup } from "@/components/admin/BracketDraw";
 import type { KnockoutMatch } from "@/components/admin/DrawsManager";
 import { UpNextSlider } from "./UpNextSlider";
@@ -32,6 +33,40 @@ function formatCourtName(court?: string | null): string | null {
   if (!court || court.toLowerCase() === "queue") return null;
   const num = court.replace(/[^0-9]/g, "");
   return num ? `Court ${num}` : court;
+}
+
+function getTeamKey(t: { id?: string; name: string; players?: string[] }): string {
+  return (
+    t.id ||
+    `${t.name.trim().toLowerCase()}::${(t.players || [])
+      .map((p) => p.trim().toLowerCase())
+      .sort()
+      .join(",")}`
+  );
+}
+
+function isMatchSameOrder(
+  live: LiveMatch,
+  teamA: { name: string; players?: string[] },
+  teamB: { name: string; players?: string[] },
+): boolean {
+  const aName = teamA.name.trim().toLowerCase();
+  const bName = teamB.name.trim().toLowerCase();
+  const liveA = (live.teamAName || "").trim().toLowerCase();
+  const liveB = (live.teamBName || "").trim().toLowerCase();
+  if (liveA !== bName && liveA === aName && aName !== bName) return true;
+  if (liveA === bName && liveB === aName && aName !== bName) return false;
+  if (teamA.players?.length && live.teamAPlayers?.length) {
+    const pA = [...teamA.players].map((p) => p.trim().toLowerCase()).sort().join(",");
+    const lpA = [...live.teamAPlayers].map((p) => p.trim().toLowerCase()).sort().join(",");
+    return pA === lpA;
+  }
+  if (teamB.players?.length && live.teamBPlayers?.length) {
+    const pB = [...teamB.players].map((p) => p.trim().toLowerCase()).sort().join(",");
+    const lpB = [...live.teamBPlayers].map((p) => p.trim().toLowerCase()).sort().join(",");
+    return pB === lpB;
+  }
+  return true;
 }
 
 /**
@@ -151,25 +186,64 @@ export function SimpleBracketView({
 
     // Playoff / Finals section
     if (currentSection.isPlayoff && mainDrawMatches) {
+      const koCandidates = matches.filter(
+        (lm) =>
+          !lm.stage?.includes("Pool Play") &&
+          !lm.stage?.includes("Bracket ") &&
+          (!lm.categoryId || isSameCategory(lm.categoryId, category.id)),
+      );
+
       const items: SimpleMatchItem[] = mainDrawMatches.map((m) => {
-        const teamAName = m.teamA?.name ?? (m.seedA ? `Seed ${m.seedA}` : "TBD");
-        const teamBName = m.teamB?.name ?? (m.seedB ? `Seed ${m.seedB}` : "TBD");
-        const live = matches.find(
-          (lm) =>
-            lm.status === "live" &&
-            ((lm.teamAName === teamAName && lm.teamBName === teamBName) ||
-              (lm.teamAName === teamBName && lm.teamBName === teamAName))
-        );
-        const isLive = Boolean(live);
+        const teamAName = m.teamA?.name ?? (m.seedA?.startsWith("#") ? `Seed ${m.seedA}` : (m.seedA || "TBD"));
+        const teamBName = m.teamB?.name ?? (m.seedB?.startsWith("#") ? `Seed ${m.seedB}` : (m.seedB || "TBD"));
+        const stage = `${m.round} - ${m.label}`;
+        const matchedKo =
+          koCandidates.find(
+            (lm) => lm.id === m.id && lm.categoryId && isSameCategory(lm.categoryId, category.id),
+          ) ||
+          (m.teamA && m.teamB
+            ? findMatchForPair(
+                koCandidates,
+                m.teamA.name,
+                m.teamB.name,
+                undefined,
+                category.id,
+                stage,
+                m.teamA.players,
+                m.teamB.players,
+              )
+            : undefined);
+
+        const isLive = matchedKo?.status === "live";
         const isDone =
           Boolean(m.winner) ||
-          (typeof m.scoreA === "number" && typeof m.scoreB === "number" && (m.scoreA > 0 || m.scoreB > 0));
-        const rawCourt = live?.court ?? (m.court && m.court !== "Queue" ? m.court : null);
+          matchedKo?.status === "final" ||
+          (!isLive && typeof m.scoreA === "number" && typeof m.scoreB === "number" && (m.scoreA > 0 || m.scoreB > 0));
+        const rawCourt = matchedKo?.court ?? (m.court && m.court !== "Queue" ? m.court : null);
         const court = formatCourtName(rawCourt);
+
+        const sameOrderKo = matchedKo
+          ? isMatchSameOrder(
+              matchedKo,
+              m.teamA ?? { name: teamAName },
+              m.teamB ?? { name: teamBName },
+            )
+          : true;
+        const resolvedScoreA = matchedKo
+          ? (sameOrderKo ? matchedKo.score.teamAScore : matchedKo.score.teamBScore)
+          : (m.scoreA ?? 0);
+        const resolvedScoreB = matchedKo
+          ? (sameOrderKo ? matchedKo.score.teamBScore : matchedKo.score.teamAScore)
+          : (m.scoreB ?? 0);
 
         let statusText = "Up Next";
         let statusKind: MatchStatusKind = "next";
-        let winnerName: string | null = m.winner?.name ?? null;
+        let winnerName: string | null =
+          m.winner?.name ??
+          matchedKo?.winnerTeam ??
+          (matchedKo?.status === "final" && resolvedScoreA !== resolvedScoreB
+            ? (resolvedScoreA > resolvedScoreB ? teamAName : teamBName)
+            : null);
 
         if (isLive) {
           statusKind = "playing";
@@ -187,8 +261,8 @@ export function SimpleBracketView({
           teamA: m.teamA ?? null,
           teamB: m.teamB ?? null,
           status: statusKind,
-          scoreA: m.scoreA ?? (live ? live.score.teamAScore : 0),
-          scoreB: m.scoreB ?? (live ? live.score.teamBScore : 0),
+          scoreA: resolvedScoreA,
+          scoreB: resolvedScoreB,
           court,
           statusText,
           winnerName,
@@ -197,7 +271,10 @@ export function SimpleBracketView({
 
       // Group playoff items by round order
       const rounds = new Map<string, SimpleMatchItem[]>();
-      const roundOrder = ["Round of 16", "Quarterfinal", "Semifinal", "Bronze", "Final"];
+      const baseRoundOrder = ["Play-In", "Round of 16", "Round of 12", "Quarterfinal", "Semifinal", "Bronze", "Final"];
+      const roundOrder = Array.from(
+        new Set([...baseRoundOrder, ...items.map((x) => x.round).filter((r): r is string => Boolean(r))]),
+      );
       roundOrder.forEach((rName) => {
         const matchesForRound = items.filter((x) => x.round === rName);
         if (matchesForRound.length > 0) {
@@ -217,10 +294,26 @@ export function SimpleBracketView({
       .filter((t): t is Team => t !== null);
 
     const categoryTeams = category?.teams || [];
+    const resolveCategoryTeam = (t: Team): Team => {
+      const byId = categoryTeams.find((ct) => ct.id === t.id);
+      if (byId) return byId;
+      const tPlayers = (t.players || []).map((p) => p.trim().toLowerCase()).sort().join(",");
+      if (tPlayers) {
+        const byNameAndPlayers = categoryTeams.find(
+          (ct) =>
+            ct.name.trim().toLowerCase() === t.name.trim().toLowerCase() &&
+            (ct.players || []).map((p) => p.trim().toLowerCase()).sort().join(",") === tPlayers,
+        );
+        return byNameAndPlayers || t;
+      }
+      return categoryTeams.find((ct) => ct.name.trim().toLowerCase() === t.name.trim().toLowerCase()) || t;
+    };
+
     const items: SimpleMatchItem[] = [];
     const tableMap = new Map<
       string,
       {
+        key: string;
         name: string;
         w: number;
         l: number;
@@ -232,11 +325,10 @@ export function SimpleBracketView({
     >();
 
     teams.forEach((t) => {
-      const fullTeam =
-        categoryTeams.find(
-          (ct) => ct.id === t.id || ct.name.toLowerCase() === t.name.toLowerCase()
-        ) || t;
-      tableMap.set(t.name, {
+      const fullTeam = resolveCategoryTeam(t);
+      const tKey = getTeamKey(t);
+      tableMap.set(tKey, {
+        key: tKey,
         name: t.name,
         w: 0,
         l: 0,
@@ -249,24 +341,31 @@ export function SimpleBracketView({
 
     const pairs = generateBalancedRoundRobinPairs(teams);
     pairs.forEach(([a, b], pIdx) => {
-      const teamAModel =
-        categoryTeams.find(
-          (ct) => ct.id === a.id || ct.name.toLowerCase() === a.name.toLowerCase()
-        ) || a;
-      const teamBModel =
-        categoryTeams.find(
-          (ct) => ct.id === b.id || ct.name.toLowerCase() === b.name.toLowerCase()
-        ) || b;
+      const teamAModel = resolveCategoryTeam(a);
+      const teamBModel = resolveCategoryTeam(b);
 
       const scopedMatchId = (a.id && b.id)
         ? createCategoryScopedMatchId(category.id, currentGroup.letter, a.id, b.id)
         : null;
       const live =
-        (scopedMatchId ? matches.find((m) => m.id === scopedMatchId) : null) ||
-        findLiveMatchForTeams(matches, a.name, b.name);
-      const flipped = live ? live.teamAName !== a.name : false;
-      const scoreA = live ? (flipped ? live.score.teamBScore : live.score.teamAScore) : 0;
-      const scoreB = live ? (flipped ? live.score.teamAScore : live.score.teamBScore) : 0;
+        (scopedMatchId
+          ? matches.find(
+              (m) => m.id === scopedMatchId && (!m.categoryId || isSameCategory(m.categoryId, category.id)),
+            )
+          : null) ||
+        findMatchForPair(
+          matches,
+          a.name,
+          b.name,
+          undefined,
+          category.id,
+          currentGroup.letter,
+          teamAModel.players,
+          teamBModel.players,
+        );
+      const sameOrder = live ? isMatchSameOrder(live, teamAModel, teamBModel) : true;
+      const scoreA = live ? (sameOrder ? live.score.teamAScore : live.score.teamBScore) : 0;
+      const scoreB = live ? (sameOrder ? live.score.teamBScore : live.score.teamAScore) : 0;
       const rawCourt = live && live.court && live.court !== "Queue" ? live.court : null;
       const court = formatCourtName(rawCourt);
 
@@ -279,13 +378,13 @@ export function SimpleBracketView({
         statusText = court ? `Live on ${court}` : "Playing Now";
       } else if (live?.status === "final") {
         statusKind = "done";
-        winnerName = live.winnerTeam ?? (scoreA > scoreB ? a.name : scoreB > scoreA ? b.name : null);
+        winnerName = scoreA > scoreB ? a.name : scoreB > scoreA ? b.name : (live.winnerTeam ?? null);
         statusText = winnerName ? `Done - ${winnerName} won` : "Finished";
       }
 
       if (statusKind === "done") {
-        const statsA = tableMap.get(a.name);
-        const statsB = tableMap.get(b.name);
+        const statsA = tableMap.get(getTeamKey(a));
+        const statsB = tableMap.get(getTeamKey(b));
         if (statsA && statsB) {
           if (scoreA > scoreB) {
             statsA.w += 1;
@@ -517,7 +616,7 @@ export function SimpleBracketView({
 
                   return (
                     <div
-                      key={team.name}
+                      key={team.key}
                       className={`py-3 flex items-center justify-between gap-3 text-sm sm:text-base ${
                         isHighlight ? "bg-pickle/15 px-3 rounded-xl font-bold" : ""
                       }`}

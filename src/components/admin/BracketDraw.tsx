@@ -58,11 +58,6 @@ export function saveDrawnGroups(
       // ignore
     }
 
-    // In silent mode (intermediate auto-draw step), skip store thrashing and event broadcasts
-    if (isSilent) {
-      return;
-    }
-
     // Sync the full roster into tournament category teams store and Supabase only if needed.
     // Use allTeams when provided (full roster) so a mid-draw save never
     // overwrites the category with only the partial set of revealed teams.
@@ -90,6 +85,11 @@ export function saveDrawnGroups(
       } catch {
         // ignore
       }
+    }
+
+    // In silent mode (intermediate auto-draw step), skip store thrashing and event broadcasts
+    if (isSilent) {
+      return;
     }
 
     syncDrawnBracketsToLiveMatches(tournamentSlug, categoryId, groups);
@@ -417,7 +417,37 @@ export function BracketDraw({
       return;
     }
 
+    const existingDrawn = getDrawnGroups(tournamentSlug, effectiveCategoryId);
+
     if (safeTeams.length === 0) {
+      // Check if existing drawn groups have teams to restore into category.teams
+      if (existingDrawn && existingDrawn.length > 0) {
+        const drawnTeams = existingDrawn
+          .flatMap((g) => g.slots.map((s) => s.team))
+          .filter((t): t is Team => t !== null);
+        if (drawnTeams.length > 0) {
+          try {
+            bulkSetTeamsInCategory(tournamentSlug, effectiveCategoryId, drawnTeams);
+          } catch {
+            // ignore
+          }
+          setGroups(existingDrawn);
+          groupsRef.current = existingDrawn;
+          const drawnNum = existingDrawn.filter((g) => g.isDrawn).length;
+          setDrawnCount(drawnNum);
+          drawnCountRef.current = drawnNum;
+          const buckets: Team[][] = existingDrawn.map((g) => {
+            return g.slots.map((s) => s.team).filter((t): t is Team => t !== null);
+          });
+          setTeamsByGroup(buckets);
+          teamsByGroupRef.current = buckets;
+          if (existingDrawn.length !== numBrackets) {
+            setNumBrackets(existingDrawn.length);
+          }
+          syncDrawnBracketsToLiveMatches(tournamentSlug, effectiveCategoryId, existingDrawn);
+          return;
+        }
+      }
       setGroups([]);
       groupsRef.current = [];
       setTeamsByGroup([]);
@@ -430,7 +460,6 @@ export function BracketDraw({
     const n = Math.max(1, Math.min(numBrackets, Math.ceil(safeTeams.length / 2) || 1));
 
     // Check if brackets were already drawn for this tournament & category
-    const existingDrawn = getDrawnGroups(tournamentSlug, effectiveCategoryId);
     if (existingDrawn && existingDrawn.length > 0) {
       const drawnNum = existingDrawn.filter((g) => g.isDrawn).length;
       if (drawnNum > 0) {
@@ -441,6 +470,21 @@ export function BracketDraw({
           )
         );
         const _currentIds = new Set(safeTeams.map((t) => t.id));
+
+        // Sync any missing teams from drawn groups into category.teams so rosters are backed up
+        const missingDrawnTeams = existingDrawn
+          .flatMap((g) => g.slots.map((s) => s.team))
+          .filter((t): t is Team => t !== null && !_currentIds.has(t.id));
+        if (missingDrawnTeams.length > 0) {
+          try {
+            const merged = [...safeTeams, ...missingDrawnTeams];
+            bulkSetTeamsInCategory(tournamentSlug, effectiveCategoryId, merged);
+            missingDrawnTeams.forEach((t) => _currentIds.add(t.id));
+          } catch {
+            // ignore
+          }
+        }
+
         const _rosterMatch =
           _cachedIds.size <= _currentIds.size && [..._cachedIds].every((id) => _currentIds.has(id));
 

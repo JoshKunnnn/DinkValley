@@ -392,7 +392,7 @@ export function DispatchDebugStation({
                   </span>
                 )}
               </div>
-              <h3 className="font-display text-xl sm:text-2xl text-foreground mt-0.5">
+              <h3 className="font-display text-xl sm:text-2xl text-sand mt-0.5">
                 Dispatch Debug Station
               </h3>
             </div>
@@ -724,16 +724,16 @@ export function DispatchDebugStation({
                         <div className="space-y-1">
                           {item.match ? (
                             <>
-                              <div className="font-bold text-sm text-foreground truncate">
-                                {item.match.teamAName} <span className="text-muted-foreground font-normal">vs</span> {item.match.teamBName}
+                              <div className="font-bold text-sm text-sand truncate">
+                                {item.match.teamAName} <span className="text-sand/60 font-normal">vs</span> {item.match.teamBName}
                               </div>
-                              <div className="flex items-center justify-between text-[0.65rem] text-muted-foreground">
+                              <div className="flex items-center justify-between text-[0.65rem] text-sand/70">
                                 <span className="truncate">{item.match.stage || "Facility Match"}</span>
                                 <span className="text-pickle font-mono truncate">{item.officiatedBy}</span>
                               </div>
                             </>
                           ) : (
-                            <div className="py-4 text-center text-xs text-muted-foreground italic">
+                            <div className="py-4 text-center text-xs text-sand/50 italic">
                               No match currently assigned to this court.
                             </div>
                           )}
@@ -818,7 +818,7 @@ export function DispatchDebugStation({
                                 <button
                                   type="button"
                                   onClick={() => setExpandedRalliesCourt(isExpanded ? null : item.court)}
-                                  className="w-full py-1 text-[0.6rem] font-bold uppercase tracking-wider text-muted-foreground hover:text-foreground transition-colors cursor-pointer flex items-center justify-center gap-1"
+                                  className="w-full py-1 text-[0.6rem] font-bold uppercase tracking-wider text-sand/70 hover:text-sand transition-colors cursor-pointer flex items-center justify-center gap-1"
                                 >
                                   <span>{isExpanded ? "Hide Rally Log" : `View ${ralliesList.length} Rallies Log`}</span>
                                   {isExpanded ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
@@ -895,7 +895,7 @@ export function DispatchDebugStation({
                               {evt.court}
                             </span>
                           )}
-                          <span className="font-semibold text-foreground truncate max-w-xs sm:max-w-none">
+                          <span className="font-semibold text-sand truncate max-w-xs sm:max-w-none">
                             {evt.teams}
                           </span>
                         </div>

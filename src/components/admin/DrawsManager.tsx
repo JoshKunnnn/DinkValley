@@ -1,12 +1,13 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
 import type { Team, Tournament, Category } from "@/data/tournaments";
 import { getDrawnGroups } from "./BracketDraw";
-import { getMatches, saveMatches, sanitizeCourtName, type LiveMatch, createPairMatchId, findMatchForPair } from "@/lib/match-store";
+import { getMatches, saveMatches, sanitizeCourtName, type LiveMatch, createPairMatchId, createCategoryScopedMatchId, findMatchForPair } from "@/lib/match-store";
 import {
   dbSaveMainDraw,
   dbDeleteMainDraw,
   getCachedMainDraw,
   clearMainDrawCache,
+  isSameCategory,
 } from "@/lib/supabase-service";
 
 export type BracketMatch = {
@@ -38,6 +39,8 @@ export type KnockoutMatch = {
   scoreB?: number | undefined;
   winner?: Team | undefined;
   court: string;
+  feedWinnerTo?: { matchId: string; slot: "teamA" | "teamB" } | undefined;
+  feedLoserTo?: { matchId: string; slot: "teamA" | "teamB" } | undefined;
 };
 
 export type StandingRow = {
@@ -188,97 +191,187 @@ function isSamePlayoffTeam(t1?: Team, t2?: Team): boolean {
 /**
  * Executes automatic tournament bracket advancement rules across rounds:
  * Round of 16 -> Quarterfinals -> Semifinals -> Finals & Bronze
+ * Supports dynamic linkages (feedWinnerTo / feedLoserTo) with automatic cascading and legacy fallback.
  */
 export function advancePlayoffBracket(matches: KnockoutMatch[]): { updated: KnockoutMatch[]; hasChanges: boolean } {
   let hasChanges = false;
-  let updated = [...matches];
+  let updated = matches.map((m) => ({ ...m }));
 
-  // 1. Auto-advance R16 winners to Quarterfinals
-  const r16Matches = updated.filter((m) => m.round === "Round of 16");
-  if (r16Matches.length > 0) {
-    const getWinner = (id: string) => updated.find((m) => m.id === id)?.winner;
+  const hasMetadata = updated.some((m) => m.feedWinnerTo !== undefined);
+
+  if (hasMetadata) {
+    let passChanged = true;
+    let passes = 0;
+    while (passChanged && passes < 4) {
+      passChanged = false;
+      passes++;
+
+      for (const m of updated) {
+        if (m.winner) {
+          if (m.feedWinnerTo) {
+            const targetIdx = updated.findIndex((x) => x.id === m.feedWinnerTo!.matchId);
+            if (targetIdx !== -1) {
+              const slot = m.feedWinnerTo.slot;
+              if (!isSamePlayoffTeam(updated[targetIdx]![slot], m.winner)) {
+                updated[targetIdx] = {
+                  ...updated[targetIdx]!,
+                  [slot]: m.winner,
+                };
+                passChanged = true;
+                hasChanges = true;
+              }
+            }
+          }
+          if (m.feedLoserTo && m.teamA && m.teamB) {
+            const isAWinner =
+              m.winner.id === m.teamA.id ||
+              m.winner.name.trim().toLowerCase() === m.teamA.name.trim().toLowerCase();
+            const loser = isAWinner ? m.teamB : m.teamA;
+            const targetIdx = updated.findIndex((x) => x.id === m.feedLoserTo!.matchId);
+            if (targetIdx !== -1 && loser) {
+              const slot = m.feedLoserTo.slot;
+              if (!isSamePlayoffTeam(updated[targetIdx]![slot], loser)) {
+                updated[targetIdx] = {
+                  ...updated[targetIdx]!,
+                  [slot]: loser,
+                };
+                passChanged = true;
+                hasChanges = true;
+              }
+            }
+          }
+        } else {
+          // If a match score was reset and winner was removed, clear the downstream fed slot
+          if (m.feedWinnerTo) {
+            const targetIdx = updated.findIndex((x) => x.id === m.feedWinnerTo!.matchId);
+            if (targetIdx !== -1) {
+              const slot = m.feedWinnerTo.slot;
+              if (updated[targetIdx]![slot] !== undefined) {
+                updated[targetIdx] = {
+                  ...updated[targetIdx]!,
+                  [slot]: undefined,
+                  winner: undefined,
+                  scoreA: undefined,
+                  scoreB: undefined,
+                };
+                passChanged = true;
+                hasChanges = true;
+              }
+            }
+          }
+          if (m.feedLoserTo) {
+            const targetIdx = updated.findIndex((x) => x.id === m.feedLoserTo!.matchId);
+            if (targetIdx !== -1) {
+              const slot = m.feedLoserTo.slot;
+              if (updated[targetIdx]![slot] !== undefined) {
+                updated[targetIdx] = {
+                  ...updated[targetIdx]!,
+                  [slot]: undefined,
+                  winner: undefined,
+                  scoreA: undefined,
+                  scoreB: undefined,
+                };
+                passChanged = true;
+                hasChanges = true;
+              }
+            }
+          }
+        }
+      }
+    }
+  } else {
+    // Legacy fallback for brackets saved without feedWinnerTo metadata
+    // 1. Auto-advance R16 winners to Quarterfinals
+    const r16Matches = updated.filter((m) => m.round === "Round of 16");
+    if (r16Matches.length > 0) {
+      const getWinner = (id: string) => updated.find((m) => m.id === id)?.winner;
+
+      updated = updated.map((m) => {
+        let teamA = m.teamA;
+        let teamB = m.teamB;
+        if (m.id === "md-qf-1") {
+          teamA = getWinner("md-r16-1") ?? m.teamA;
+          teamB = getWinner("md-r16-2") ?? m.teamB;
+        } else if (m.id === "md-qf-2") {
+          teamA = getWinner("md-r16-3") ?? m.teamA;
+          teamB = getWinner("md-r16-4") ?? m.teamB;
+        } else if (m.id === "md-qf-3") {
+          teamA = getWinner("md-r16-5") ?? m.teamA;
+          teamB = getWinner("md-r16-6") ?? m.teamB;
+        } else if (m.id === "md-qf-4") {
+          teamA = getWinner("md-r16-7") ?? m.teamA;
+          teamB = getWinner("md-r16-8") ?? m.teamB;
+        }
+        if (!isSamePlayoffTeam(teamA, m.teamA) || !isSamePlayoffTeam(teamB, m.teamB)) {
+          hasChanges = true;
+          return { ...m, teamA, teamB };
+        }
+        return m;
+      });
+    }
+
+    // 2. Auto-advance QF winners to Semifinals
+    const qfMatches = updated.filter((m) => m.round === "Quarterfinal");
+    if (qfMatches.length > 0) {
+      const qf1 = updated.find((m) => m.id === "md-qf-1");
+      const qf2 = updated.find((m) => m.id === "md-qf-2");
+      const qf3 = updated.find((m) => m.id === "md-qf-3");
+      const qf4 = updated.find((m) => m.id === "md-qf-4");
+
+      updated = updated.map((m) => {
+        let teamA = m.teamA;
+        let teamB = m.teamB;
+        if (m.id === "md-sf-1") {
+          teamA = qf1?.winner ?? m.teamA;
+          teamB = qf2?.winner ?? m.teamB;
+        } else if (m.id === "md-sf-2") {
+          teamA = qf3?.winner ?? m.teamA;
+          teamB = qf4?.winner ?? m.teamB;
+        }
+        if (!isSamePlayoffTeam(teamA, m.teamA) || !isSamePlayoffTeam(teamB, m.teamB)) {
+          hasChanges = true;
+          return { ...m, teamA, teamB };
+        }
+        return m;
+      });
+    }
+
+    // 3. Auto-advance SF winners to Final & losers to Bronze
+    const sf1 = updated.find((m) => m.id === "md-sf-1");
+    const sf2 = updated.find((m) => m.id === "md-sf-2");
 
     updated = updated.map((m) => {
-      let teamA = m.teamA;
-      let teamB = m.teamB;
-      if (m.id === "md-qf-1") {
-        teamA = getWinner("md-r16-1") ?? m.teamA;
-        teamB = getWinner("md-r16-2") ?? m.teamB;
-      } else if (m.id === "md-qf-2") {
-        teamA = getWinner("md-r16-3") ?? m.teamA;
-        teamB = getWinner("md-r16-4") ?? m.teamB;
-      } else if (m.id === "md-qf-3") {
-        teamA = getWinner("md-r16-5") ?? m.teamA;
-        teamB = getWinner("md-r16-6") ?? m.teamB;
-      } else if (m.id === "md-qf-4") {
-        teamA = getWinner("md-r16-7") ?? m.teamA;
-        teamB = getWinner("md-r16-8") ?? m.teamB;
+      if (m.id === "md-final") {
+        const teamA = sf1?.winner ?? m.teamA;
+        const teamB = sf2?.winner ?? m.teamB;
+        if (!isSamePlayoffTeam(teamA, m.teamA) || !isSamePlayoffTeam(teamB, m.teamB)) {
+          hasChanges = true;
+          return { ...m, teamA, teamB };
+        }
       }
-      if (!isSamePlayoffTeam(teamA, m.teamA) || !isSamePlayoffTeam(teamB, m.teamB)) {
-        hasChanges = true;
-        return { ...m, teamA, teamB };
+      if (m.id === "md-bronze") {
+        let teamA = m.teamA;
+        let teamB = m.teamB;
+        if (sf1?.winner && sf1.teamA && sf1.teamB) {
+          const isAWinner =
+            sf1.winner.id === sf1.teamA.id ||
+            sf1.winner.name.trim().toLowerCase() === sf1.teamA.name.trim().toLowerCase();
+          teamA = isAWinner ? sf1.teamB : sf1.teamA;
+        }
+        if (sf2?.winner && sf2.teamA && sf2.teamB) {
+          const isAWinner =
+            sf2.winner.id === sf2.teamA.id ||
+            sf2.winner.name.trim().toLowerCase() === sf2.teamA.name.trim().toLowerCase();
+          teamB = isAWinner ? sf2.teamB : sf2.teamA;
+        }
+        if (!isSamePlayoffTeam(teamA, m.teamA) || !isSamePlayoffTeam(teamB, m.teamB)) {
+          hasChanges = true;
+          return { ...m, teamA, teamB };
+        }
       }
       return m;
     });
   }
-
-  // 2. Auto-advance QF winners to Semifinals
-  const qfMatches = updated.filter((m) => m.round === "Quarterfinal");
-  if (qfMatches.length > 0) {
-    const qf1 = updated.find((m) => m.id === "md-qf-1");
-    const qf2 = updated.find((m) => m.id === "md-qf-2");
-    const qf3 = updated.find((m) => m.id === "md-qf-3");
-    const qf4 = updated.find((m) => m.id === "md-qf-4");
-
-    updated = updated.map((m) => {
-      let teamA = m.teamA;
-      let teamB = m.teamB;
-      if (m.id === "md-sf-1") {
-        teamA = qf1?.winner ?? m.teamA;
-        teamB = qf2?.winner ?? m.teamB;
-      } else if (m.id === "md-sf-2") {
-        teamA = qf3?.winner ?? m.teamA;
-        teamB = qf4?.winner ?? m.teamB;
-      }
-      if (!isSamePlayoffTeam(teamA, m.teamA) || !isSamePlayoffTeam(teamB, m.teamB)) {
-        hasChanges = true;
-        return { ...m, teamA, teamB };
-      }
-      return m;
-    });
-  }
-
-  // 3. Auto-advance SF winners to Final & losers to Bronze
-  const sf1 = updated.find((m) => m.id === "md-sf-1");
-  const sf2 = updated.find((m) => m.id === "md-sf-2");
-
-  updated = updated.map((m) => {
-    if (m.id === "md-final") {
-      const teamA = sf1?.winner ?? m.teamA;
-      const teamB = sf2?.winner ?? m.teamB;
-      if (!isSamePlayoffTeam(teamA, m.teamA) || !isSamePlayoffTeam(teamB, m.teamB)) {
-        hasChanges = true;
-        return { ...m, teamA, teamB };
-      }
-    }
-    if (m.id === "md-bronze") {
-      let teamA = m.teamA;
-      let teamB = m.teamB;
-      if (sf1?.winner && sf1.teamA && sf1.teamB) {
-        const isAWinner = sf1.winner.id === sf1.teamA.id || sf1.winner.name.trim().toLowerCase() === sf1.teamA.name.trim().toLowerCase();
-        teamA = isAWinner ? sf1.teamB : sf1.teamA;
-      }
-      if (sf2?.winner && sf2.teamA && sf2.teamB) {
-        const isAWinner = sf2.winner.id === sf2.teamA.id || sf2.winner.name.trim().toLowerCase() === sf2.teamA.name.trim().toLowerCase();
-        teamB = isAWinner ? sf2.teamB : sf2.teamA;
-      }
-      if (!isSamePlayoffTeam(teamA, m.teamA) || !isSamePlayoffTeam(teamB, m.teamB)) {
-        hasChanges = true;
-        return { ...m, teamA, teamB };
-      }
-    }
-    return m;
-  });
 
   return { updated, hasChanges };
 }
@@ -305,35 +398,35 @@ export function syncMainDrawWithLiveMatches(
     const nameA = km.teamA.name.trim().toLowerCase();
     const nameB = km.teamB.name.trim().toLowerCase();
 
-    // Find corresponding match in liveMatches by ID or team names
-    const live = matches.find((m) => {
-      // 1. Direct ID match
-      const stage = `${km.round} - ${km.label}`;
-      const canonical = createPairMatchId(tournamentSlug, categoryId, stage, km.teamA!.name, km.teamB!.name);
-      const legacy = `live-ko-${tournamentSlug}-${categoryId}-${km.id}`;
-      if (m.id === canonical || m.id === legacy || m.id === km.id) return true;
+    // Find corresponding match in liveMatches strictly scoped to categoryId and knockout round
+    const stage = `${km.round} - ${km.label}`;
+    const canonical = createPairMatchId(tournamentSlug, categoryId, stage, km.teamA.name, km.teamB.name);
+    const legacy = `live-ko-${tournamentSlug}-${categoryId}-${km.id}`;
 
-      // 2. Matching teams and stage
-      const ma = m.teamAName?.trim().toLowerCase();
-      const mb = m.teamBName?.trim().toLowerCase();
-      const teamsMatch = (ma === nameA && mb === nameB) || (ma === nameB && mb === nameA);
-      if (!teamsMatch) return false;
-
-      // Ensure stage is knockout or matches km.round / km.label
-      const mStage = (m.stage || "").toLowerCase();
-      const kmRound = km.round.toLowerCase();
-      const kmLabel = km.label.toLowerCase();
-      const isKnockoutStage =
-        mStage.includes(kmRound) ||
-        mStage.includes(kmLabel) ||
-        mStage.includes("quarter") ||
-        mStage.includes("semi") ||
-        mStage.includes("final") ||
-        mStage.includes("playoff") ||
-        mStage.includes("bronze");
-
-      return isKnockoutStage;
-    });
+    const live =
+      matches.find((m) => {
+        if (tournamentSlug && m.tournamentSlug && m.tournamentSlug !== tournamentSlug) return false;
+        if (m.categoryId && !isSameCategory(m.categoryId, categoryId)) return false;
+        if (m.stage?.includes("Pool Play") || m.stage?.includes("Bracket ")) return false;
+        if (m.id === canonical || m.id === legacy) return true;
+        if (m.id === km.id && m.categoryId && isSameCategory(m.categoryId, categoryId)) return true;
+        return false;
+      }) ||
+      findMatchForPair(
+        matches.filter(
+          (m) =>
+            !m.stage?.includes("Pool Play") &&
+            !m.stage?.includes("Bracket ") &&
+            (!m.categoryId || isSameCategory(m.categoryId, categoryId)),
+        ),
+        km.teamA.name,
+        km.teamB.name,
+        tournamentSlug,
+        categoryId,
+        stage,
+        km.teamA.players,
+        km.teamB.players,
+      );
 
     if (!live) return km;
 
@@ -405,24 +498,31 @@ export function syncKnockoutToLiveMatches(
     const canonicalId = createPairMatchId(tournamentSlug, categoryId, stage, teamA.name, teamB.name);
     const cleanCourt = sanitizeCourtName(km.court);
 
-    // Look for existing match strictly within knockout stages
-    const existing = current.find((m) => {
-      if (m.id === canonicalId || m.id === legacyId || m.id === km.id) return true;
-      const ma = m.teamAName?.trim().toLowerCase();
-      const mb = m.teamBName?.trim().toLowerCase();
-      const ta = teamA.name.trim().toLowerCase();
-      const tb = teamB.name.trim().toLowerCase();
-      const teamsMatch = (ma === ta && mb === tb) || (ma === tb && mb === ta);
-      if (!teamsMatch) return false;
-      const mStage = (m.stage || "").toLowerCase();
-      const isKnockoutStage =
-        mStage.includes("quarter") ||
-        mStage.includes("semi") ||
-        mStage.includes("final") ||
-        mStage.includes("playoff") ||
-        mStage.includes("bronze");
-      return isKnockoutStage;
-    });
+    // Look for existing match strictly within this category and knockout round (never Pool Play / Bracket)
+    const existing =
+      current.find((m) => {
+        if (tournamentSlug && m.tournamentSlug && m.tournamentSlug !== tournamentSlug) return false;
+        if (m.categoryId && !isSameCategory(m.categoryId, categoryId)) return false;
+        if (m.stage?.includes("Pool Play") || m.stage?.includes("Bracket ")) return false;
+        if (m.id === canonicalId || m.id === legacyId) return true;
+        if (m.id === km.id && m.categoryId && isSameCategory(m.categoryId, categoryId)) return true;
+        return false;
+      }) ||
+      findMatchForPair(
+        current.filter(
+          (m) =>
+            !m.stage?.includes("Pool Play") &&
+            !m.stage?.includes("Bracket ") &&
+            (!m.categoryId || isSameCategory(m.categoryId, categoryId)),
+        ),
+        teamA.name,
+        teamB.name,
+        tournamentSlug,
+        categoryId,
+        stage,
+        teamA.players,
+        teamB.players,
+      );
 
     const effectiveId = existing?.id || canonicalId;
 
@@ -451,6 +551,7 @@ export function syncKnockoutToLiveMatches(
           teamBScore: km.scoreB ?? 0,
           servingTeam: "A",
           serverNumber: 2,
+          activeServerBase: 1,
           rallies: [],
         },
         winnerTeam: km.winner?.name,
@@ -524,29 +625,28 @@ export function DrawsManager({
           const isDupA = (nameCounts.get(teamA.name.trim().toLowerCase()) || 0) > 1;
           const isDupB = (nameCounts.get(teamB.name.trim().toLowerCase()) || 0) > 1;
 
-          const matchId = createPairMatchId(
-            tournamentSlug,
-            categoryId,
-            `Bracket ${dGrp.letter}`,
-            teamA.name,
-            teamB.name,
-            teamA.players,
-            teamB.players,
-            isDupA,
-            isDupB,
-          );
-          const bracketMatchId = `bracket-${dGrp.letter}-m${i + 1}-${j + 1}`;
+          const scopedId =
+            teamA.id && teamB.id
+              ? createCategoryScopedMatchId(categoryId, dGrp.letter, teamA.id, teamB.id)
+              : null;
+          const bracketMatchId = scopedId || `bracket-${dGrp.letter}-m${i + 1}-${j + 1}`;
 
-          const liveMatch = findMatchForPair(
-            liveMatches,
-            teamA.name,
-            teamB.name,
-            tournamentSlug,
-            categoryId,
-            dGrp.letter,
-            teamA.players,
-            teamB.players,
-          );
+          const liveMatch =
+            (scopedId
+              ? liveMatches.find(
+                  (m) => m.id === scopedId && (!m.categoryId || isSameCategory(m.categoryId, categoryId)),
+                )
+              : undefined) ||
+            findMatchForPair(
+              liveMatches,
+              teamA.name,
+              teamB.name,
+              tournamentSlug,
+              categoryId,
+              dGrp.letter,
+              teamA.players,
+              teamB.players,
+            );
 
           let scoreA: number | undefined = undefined;
           let scoreB: number | undefined = undefined;
@@ -555,9 +655,21 @@ export function DrawsManager({
 
           if (liveMatch) {
             court = liveMatch.court;
+            const aNameLower = teamA.name.trim().toLowerCase();
+            const bNameLower = teamB.name.trim().toLowerCase();
+            const liveALower = (liveMatch.teamAName || "").trim().toLowerCase();
+            let isSameOrder = liveALower === aNameLower && aNameLower !== bNameLower;
+            if (aNameLower === bNameLower && teamA.players?.length && liveMatch.teamAPlayers?.length) {
+              const pA = [...teamA.players].map((p) => p.trim().toLowerCase()).sort().join(",");
+              const lpA = [...liveMatch.teamAPlayers].map((p) => p.trim().toLowerCase()).sort().join(",");
+              isSameOrder = pA === lpA;
+            } else if (liveALower === bNameLower && aNameLower !== bNameLower) {
+              isSameOrder = false;
+            }
+
             if (liveMatch.status === "final") {
               status = "completed";
-              if (liveMatch.teamAName === teamA.name) {
+              if (isSameOrder) {
                 scoreA = liveMatch.score.teamAScore;
                 scoreB = liveMatch.score.teamBScore;
               } else {
@@ -566,7 +678,7 @@ export function DrawsManager({
               }
             } else if (liveMatch.status === "live") {
               status = "in_progress";
-              if (liveMatch.teamAName === teamA.name) {
+              if (isSameOrder) {
                 scoreA = liveMatch.score.teamAScore;
                 scoreB = liveMatch.score.teamBScore;
               } else {
@@ -873,203 +985,383 @@ export function DrawsManager({
     }
 
     const matches: KnockoutMatch[] = [];
+    const n = Math.min(qualifiers.length, 16);
     const qBySeed = (seedNum: number) => qualifiers.find((q) => q.overallSeed === seedNum);
 
-    if (qualifiers.length >= 16) {
-      // 16 Teams (8 Brackets): Round of 16 -> Quarterfinals -> Semifinals -> Final & Bronze
-      // Pairings: 1v16, 8v9, 4v13, 5v12, 2v15, 7v10, 3v14, 6v11
-      const pairings: [number, number][] = [
-        [1, 16],
-        [8, 9],
-        [4, 13],
-        [5, 12],
-        [2, 15],
-        [7, 10],
-        [3, 14],
-        [6, 11],
+    const formatSeedLabel = (q?: Qualifier, isBye = false) => {
+      if (!q) return undefined;
+      const diffStr = q.pointDiff > 0 ? `+${q.pointDiff}` : `${q.pointDiff}`;
+      if (isBye) {
+        return `#${q.overallSeed} (${q.bracketSeed}, ${diffStr} diff - BYE)`;
+      }
+      return `#${q.overallSeed} (${q.bracketSeed}, ${diffStr} diff)`;
+    };
+
+    if (n >= 9) {
+      // 16-slot bracket (Round of 16 -> Quarterfinals -> Semifinals -> Final & Bronze)
+      // Standard 16 pairings feeding 4 Quarterfinals:
+      // QF 1: Top slot 1v16, Bot slot 8v9 -> feeds SF 1 top
+      // QF 2: Top slot 4v13, Bot slot 5v12 -> feeds SF 1 bot
+      // QF 3: Top slot 2v15, Bot slot 7v10 -> feeds SF 2 top
+      // QF 4: Top slot 3v14, Bot slot 6v11 -> feeds SF 2 bot
+      const pairConfigs = [
+        { top: 1, bot: 16, targetQf: "md-qf-1", slot: "teamA" as const },
+        { top: 8, bot: 9,  targetQf: "md-qf-1", slot: "teamB" as const },
+        { top: 4, bot: 13, targetQf: "md-qf-2", slot: "teamA" as const },
+        { top: 5, bot: 12, targetQf: "md-qf-2", slot: "teamB" as const },
+        { top: 2, bot: 15, targetQf: "md-qf-3", slot: "teamA" as const },
+        { top: 7, bot: 10, targetQf: "md-qf-3", slot: "teamB" as const },
+        { top: 3, bot: 14, targetQf: "md-qf-4", slot: "teamA" as const },
+        { top: 6, bot: 11, targetQf: "md-qf-4", slot: "teamB" as const },
       ];
 
-      // Prevent early rematch: If top seed and bot seed share the same bracket, swap lower seed
-      for (let i = 0; i < pairings.length; i++) {
-        const [topSeed, botSeed] = pairings[i]!;
-        const qTop = qBySeed(topSeed);
-        const qBot = qBySeed(botSeed);
+      // Prevent early rematch for playable R16 matches:
+      const playable = pairConfigs.filter((cfg) => cfg.bot <= n && qBySeed(cfg.bot));
+      for (let i = 0; i < playable.length; i++) {
+        const p = playable[i]!;
+        const qTop = qBySeed(p.top);
+        const qBot = qBySeed(p.bot);
         if (qTop && qBot && qTop.bracketLetter === qBot.bracketLetter) {
-          const altIdx = i % 2 === 0 ? i + 1 : i - 1;
-          if (pairings[altIdx]) {
-            const temp = pairings[i]![1];
-            pairings[i]![1] = pairings[altIdx]![1];
-            pairings[altIdx]![1] = temp;
+          for (let j = 0; j < playable.length; j++) {
+            if (i === j) continue;
+            const otherP = playable[j]!;
+            const otherTop = qBySeed(otherP.top);
+            const otherBot = qBySeed(otherP.bot);
+            if (otherTop && otherBot) {
+              if (qTop.bracketLetter !== otherBot.bracketLetter && otherTop.bracketLetter !== qBot.bracketLetter) {
+                const temp = p.bot;
+                p.bot = otherP.bot;
+                otherP.bot = temp;
+                break;
+              }
+            }
           }
         }
       }
 
-      // Generate 8 Round of 16 Matches
-      pairings.forEach(([topSeed, botSeed], idx) => {
-        const q1 = qBySeed(topSeed);
-        const q2 = qBySeed(botSeed);
-        const courtName = idx < 4 ? `Court ${idx + 1}` : "Queue";
-
-        matches.push({
-          id: `md-r16-${idx + 1}`,
-          round: "Round of 16",
-          label: `Round of 16 - Match ${idx + 1}`,
-          court: courtName,
-          teamA: q1?.team,
-          teamB: q2?.team,
-          seedA: q1 ? `#${q1.overallSeed} (${q1.bracketSeed}, ${q1.pointDiff > 0 ? "+" : ""}${q1.pointDiff} diff)` : undefined,
-          seedB: q2 ? `#${q2.overallSeed} (${q2.bracketSeed}, ${q2.pointDiff > 0 ? "+" : ""}${q2.pointDiff} diff)` : undefined,
-        });
-      });
-
-      // 4 Quarterfinals
-      for (let i = 0; i < 4; i++) {
-        matches.push({
-          id: `md-qf-${i + 1}`,
+      // Shells for Quarterfinals
+      const qfMap: Record<string, KnockoutMatch> = {
+        "md-qf-1": {
+          id: "md-qf-1",
           round: "Quarterfinal",
-          label: `Quarterfinal ${i + 1}`,
-          court: `Court ${i + 1}`,
-        });
+          label: "Quarterfinal 1",
+          court: "Court 1",
+          feedWinnerTo: { matchId: "md-sf-1", slot: "teamA" },
+        },
+        "md-qf-2": {
+          id: "md-qf-2",
+          round: "Quarterfinal",
+          label: "Quarterfinal 2",
+          court: "Court 2",
+          feedWinnerTo: { matchId: "md-sf-1", slot: "teamB" },
+        },
+        "md-qf-3": {
+          id: "md-qf-3",
+          round: "Quarterfinal",
+          label: "Quarterfinal 3",
+          court: "Court 3",
+          feedWinnerTo: { matchId: "md-sf-2", slot: "teamA" },
+        },
+        "md-qf-4": {
+          id: "md-qf-4",
+          round: "Quarterfinal",
+          label: "Quarterfinal 4",
+          court: "Court 4",
+          feedWinnerTo: { matchId: "md-sf-2", slot: "teamB" },
+        },
+      };
+
+      let r16Counter = 1;
+      for (const cfg of pairConfigs) {
+        const qTop = qBySeed(cfg.top);
+        const qBot = qBySeed(cfg.bot);
+
+        if (cfg.bot <= n && qBot) {
+          // Playable R16 match
+          const r16Id = `md-r16-${r16Counter}`;
+          const r16Label = `Round of 16 - Match ${r16Counter}`;
+          const courtName = r16Counter <= 4 ? `Court ${r16Counter}` : "Queue";
+          matches.push({
+            id: r16Id,
+            round: "Round of 16",
+            label: r16Label,
+            court: courtName,
+            teamA: qTop?.team,
+            teamB: qBot?.team,
+            seedA: formatSeedLabel(qTop),
+            seedB: formatSeedLabel(qBot),
+            feedWinnerTo: { matchId: cfg.targetQf, slot: cfg.slot },
+          });
+          const targetQf = qfMap[cfg.targetQf]!;
+          if (cfg.slot === "teamA") {
+            targetQf.seedA = `Winner of ${r16Label}`;
+          } else {
+            targetQf.seedB = `Winner of ${r16Label}`;
+          }
+          r16Counter++;
+        } else {
+          // Bottom seed does not exist -> Top seed gets a BYE directly to QF!
+          const targetQf = qfMap[cfg.targetQf]!;
+          targetQf[cfg.slot] = qTop?.team;
+          if (cfg.slot === "teamA") {
+            targetQf.seedA = formatSeedLabel(qTop, true);
+          } else {
+            targetQf.seedB = formatSeedLabel(qTop, true);
+          }
+        }
       }
 
-      // 2 Semifinals
+      // Add the 4 Quarterfinals
+      matches.push(qfMap["md-qf-1"]!, qfMap["md-qf-2"]!, qfMap["md-qf-3"]!, qfMap["md-qf-4"]!);
+
+      // Semifinals
       matches.push({
         id: "md-sf-1",
         round: "Semifinal",
         label: "Semifinal 1",
         court: "Court 1",
+        seedA: "Winner of Quarterfinal 1",
+        seedB: "Winner of Quarterfinal 2",
+        feedWinnerTo: { matchId: "md-final", slot: "teamA" },
+        feedLoserTo: { matchId: "md-bronze", slot: "teamA" },
       });
       matches.push({
         id: "md-sf-2",
         round: "Semifinal",
         label: "Semifinal 2",
         court: "Court 2",
+        seedA: "Winner of Quarterfinal 3",
+        seedB: "Winner of Quarterfinal 4",
+        feedWinnerTo: { matchId: "md-final", slot: "teamB" },
+        feedLoserTo: { matchId: "md-bronze", slot: "teamB" },
       });
 
-      // 3rd Place Match & Championship Final
-      matches.push({
-        id: "md-bronze",
-        round: "Bronze",
-        label: "3rd Place Match",
-        court: "Court 3",
-      });
+      // Championship Final & 3rd Place Match
       matches.push({
         id: "md-final",
         round: "Final",
         label: "Championship Final",
         court: "Court 1",
+        seedA: "Winner of Semifinal 1",
+        seedB: "Winner of Semifinal 2",
       });
-    } else if (qualifiers.length >= 8) {
-      // 8 Teams (4 Brackets): Quarterfinals -> Semifinals -> Finals
-      const pairings: [number, number][] = [
-        [1, 8],
-        [4, 5],
-        [2, 7],
-        [3, 6],
+      matches.push({
+        id: "md-bronze",
+        round: "Bronze",
+        label: "3rd Place Match",
+        court: "Court 3",
+        seedA: "Runner-up of Semifinal 1",
+        seedB: "Runner-up of Semifinal 2",
+      });
+    } else if (n >= 5) {
+      // 8-slot bracket (Quarterfinals -> Semifinals -> Final & Bronze)
+      // Standard 8 pairings feeding 2 Semifinals:
+      // SF 1: Top slot 1v8, Bot slot 4v5 -> feeds SF 1
+      // SF 2: Top slot 2v7, Bot slot 3v6 -> feeds SF 2
+      const pairConfigs = [
+        { top: 1, bot: 8, targetSf: "md-sf-1", slot: "teamA" as const },
+        { top: 4, bot: 5, targetSf: "md-sf-1", slot: "teamB" as const },
+        { top: 2, bot: 7, targetSf: "md-sf-2", slot: "teamA" as const },
+        { top: 3, bot: 6, targetSf: "md-sf-2", slot: "teamB" as const },
       ];
 
-      // Prevent early rematch
-      for (let i = 0; i < pairings.length; i++) {
-        const [topSeed, botSeed] = pairings[i]!;
-        const qTop = qBySeed(topSeed);
-        const qBot = qBySeed(botSeed);
+      // Prevent early rematch for playable QF matches:
+      const playable = pairConfigs.filter((cfg) => cfg.bot <= n && qBySeed(cfg.bot));
+      for (let i = 0; i < playable.length; i++) {
+        const p = playable[i]!;
+        const qTop = qBySeed(p.top);
+        const qBot = qBySeed(p.bot);
         if (qTop && qBot && qTop.bracketLetter === qBot.bracketLetter) {
-          const altIdx = i % 2 === 0 ? i + 1 : i - 1;
-          if (pairings[altIdx]) {
-            const temp = pairings[i]![1];
-            pairings[i]![1] = pairings[altIdx]![1];
-            pairings[altIdx]![1] = temp;
+          for (let j = 0; j < playable.length; j++) {
+            if (i === j) continue;
+            const otherP = playable[j]!;
+            const otherTop = qBySeed(otherP.top);
+            const otherBot = qBySeed(otherP.bot);
+            if (otherTop && otherBot) {
+              if (qTop.bracketLetter !== otherBot.bracketLetter && otherTop.bracketLetter !== qBot.bracketLetter) {
+                const temp = p.bot;
+                p.bot = otherP.bot;
+                otherP.bot = temp;
+                break;
+              }
+            }
           }
         }
       }
 
-      pairings.forEach(([topSeed, botSeed], idx) => {
-        const q1 = qBySeed(topSeed);
-        const q2 = qBySeed(botSeed);
-        matches.push({
-          id: `md-qf-${idx + 1}`,
-          round: "Quarterfinal",
-          label: `Quarterfinal ${idx + 1}`,
-          court: `Court ${idx + 1}`,
-          teamA: q1?.team,
-          teamB: q2?.team,
-          seedA: q1 ? `#${q1.overallSeed} (${q1.bracketSeed}, ${q1.pointDiff > 0 ? "+" : ""}${q1.pointDiff} diff)` : undefined,
-          seedB: q2 ? `#${q2.overallSeed} (${q2.bracketSeed}, ${q2.pointDiff > 0 ? "+" : ""}${q2.pointDiff} diff)` : undefined,
-        });
-      });
+      // Shells for Semifinals
+      const sfMap: Record<string, KnockoutMatch> = {
+        "md-sf-1": {
+          id: "md-sf-1",
+          round: "Semifinal",
+          label: "Semifinal 1",
+          court: "Court 1",
+          feedWinnerTo: { matchId: "md-final", slot: "teamA" },
+          feedLoserTo: { matchId: "md-bronze", slot: "teamA" },
+        },
+        "md-sf-2": {
+          id: "md-sf-2",
+          round: "Semifinal",
+          label: "Semifinal 2",
+          court: "Court 2",
+          feedWinnerTo: { matchId: "md-final", slot: "teamB" },
+          feedLoserTo: { matchId: "md-bronze", slot: "teamB" },
+        },
+      };
 
+      let qfCounter = 1;
+      for (const cfg of pairConfigs) {
+        const qTop = qBySeed(cfg.top);
+        const qBot = qBySeed(cfg.bot);
+
+        if (cfg.bot <= n && qBot) {
+          // Playable QF match
+          const qfId = `md-qf-${qfCounter}`;
+          const qfLabel = `Quarterfinal ${qfCounter}`;
+          const courtName = qfCounter <= 4 ? `Court ${qfCounter}` : "Queue";
+          matches.push({
+            id: qfId,
+            round: "Quarterfinal",
+            label: qfLabel,
+            court: courtName,
+            teamA: qTop?.team,
+            teamB: qBot?.team,
+            seedA: formatSeedLabel(qTop),
+            seedB: formatSeedLabel(qBot),
+            feedWinnerTo: { matchId: cfg.targetSf, slot: cfg.slot },
+          });
+          const targetSf = sfMap[cfg.targetSf]!;
+          if (cfg.slot === "teamA") {
+            targetSf.seedA = `Winner of ${qfLabel}`;
+          } else {
+            targetSf.seedB = `Winner of ${qfLabel}`;
+          }
+          qfCounter++;
+        } else {
+          // Bottom seed does not exist -> Top seed gets a BYE directly to SF!
+          const targetSf = sfMap[cfg.targetSf]!;
+          targetSf[cfg.slot] = qTop?.team;
+          if (cfg.slot === "teamA") {
+            targetSf.seedA = formatSeedLabel(qTop, true);
+          } else {
+            targetSf.seedB = formatSeedLabel(qTop, true);
+          }
+        }
+      }
+
+      // Add Semifinals
+      matches.push(sfMap["md-sf-1"]!, sfMap["md-sf-2"]!);
+
+      // Championship Final & 3rd Place Match
       matches.push({
-        id: "md-sf-1",
-        round: "Semifinal",
-        label: "Semifinal 1",
+        id: "md-final",
+        round: "Final",
+        label: "Championship Final",
         court: "Court 1",
-      });
-      matches.push({
-        id: "md-sf-2",
-        round: "Semifinal",
-        label: "Semifinal 2",
-        court: "Court 2",
+        seedA: "Winner of Semifinal 1",
+        seedB: "Winner of Semifinal 2",
       });
       matches.push({
         id: "md-bronze",
         round: "Bronze",
         label: "3rd Place Match",
         court: "Court 3",
-      });
-      matches.push({
-        id: "md-final",
-        round: "Final",
-        label: "Championship Final",
-        court: "Court 1",
+        seedA: "Runner-up of Semifinal 1",
+        seedB: "Runner-up of Semifinal 2",
       });
     } else {
-      // 4 Teams (2 Brackets): Semifinals -> Finals
+      // 4-slot bracket (4, 3, or 2 teams)
       const q1 = qBySeed(1);
       const q2 = qBySeed(2);
       const q3 = qBySeed(3);
       const q4 = qBySeed(4);
 
-      let sf1Opp = q4;
-      let sf2Opp = q3;
-      if (q1 && q4 && q1.bracketLetter === q4.bracketLetter) {
-        sf1Opp = q3;
-        sf2Opp = q4;
+      if (n >= 4) {
+        let sf1Opp = q4;
+        let sf2Opp = q3;
+        if (q1 && q4 && q1.bracketLetter === q4.bracketLetter) {
+          sf1Opp = q3;
+          sf2Opp = q4;
+        }
+
+        matches.push({
+          id: "md-sf-1",
+          round: "Semifinal",
+          label: "Semifinal 1",
+          court: "Court 1",
+          teamA: q1?.team,
+          teamB: sf1Opp?.team,
+          seedA: formatSeedLabel(q1),
+          seedB: formatSeedLabel(sf1Opp),
+          feedWinnerTo: { matchId: "md-final", slot: "teamA" },
+          feedLoserTo: { matchId: "md-bronze", slot: "teamA" },
+        });
+
+        matches.push({
+          id: "md-sf-2",
+          round: "Semifinal",
+          label: "Semifinal 2",
+          court: "Court 2",
+          teamA: q2?.team,
+          teamB: sf2Opp?.team,
+          seedA: formatSeedLabel(q2),
+          seedB: formatSeedLabel(sf2Opp),
+          feedWinnerTo: { matchId: "md-final", slot: "teamB" },
+          feedLoserTo: { matchId: "md-bronze", slot: "teamB" },
+        });
+
+        matches.push({
+          id: "md-bronze",
+          round: "Bronze",
+          label: "3rd Place Match",
+          court: "Court 3",
+          seedA: "Runner-up of Semifinal 1",
+          seedB: "Runner-up of Semifinal 2",
+        });
+        matches.push({
+          id: "md-final",
+          round: "Final",
+          label: "Championship Final",
+          court: "Court 1",
+          seedA: "Winner of Semifinal 1",
+          seedB: "Winner of Semifinal 2",
+        });
+      } else if (n === 3) {
+        // Seed 1 gets a BYE directly into Championship Final
+        matches.push({
+          id: "md-sf-1",
+          round: "Semifinal",
+          label: "Semifinal 1",
+          court: "Court 1",
+          teamA: q2?.team,
+          teamB: q3?.team,
+          seedA: formatSeedLabel(q2),
+          seedB: formatSeedLabel(q3),
+          feedWinnerTo: { matchId: "md-final", slot: "teamB" },
+        });
+
+        matches.push({
+          id: "md-final",
+          round: "Final",
+          label: "Championship Final",
+          court: "Court 1",
+          teamA: q1?.team,
+          seedA: formatSeedLabel(q1, true),
+          seedB: "Winner of Semifinal 1",
+        });
+      } else {
+        // 2 teams
+        matches.push({
+          id: "md-final",
+          round: "Final",
+          label: "Championship Final",
+          court: "Court 1",
+          teamA: q1?.team,
+          teamB: q2?.team,
+          seedA: formatSeedLabel(q1),
+          seedB: formatSeedLabel(q2),
+        });
       }
-
-      matches.push({
-        id: "md-sf-1",
-        round: "Semifinal",
-        label: "Semifinal 1",
-        court: "Court 1",
-        teamA: q1?.team,
-        teamB: sf1Opp?.team,
-        seedA: q1 ? `#${q1.overallSeed} (${q1.bracketSeed}, ${q1.pointDiff > 0 ? "+" : ""}${q1.pointDiff} diff)` : undefined,
-        seedB: sf1Opp ? `#${sf1Opp.overallSeed} (${sf1Opp.bracketSeed}, ${sf1Opp.pointDiff > 0 ? "+" : ""}${sf1Opp.pointDiff} diff)` : undefined,
-      });
-
-      matches.push({
-        id: "md-sf-2",
-        round: "Semifinal",
-        label: "Semifinal 2",
-        court: "Court 2",
-        teamA: q2?.team,
-        teamB: sf2Opp?.team,
-        seedA: q2 ? `#${q2.overallSeed} (${q2.bracketSeed}, ${q2.pointDiff > 0 ? "+" : ""}${q2.pointDiff} diff)` : undefined,
-        seedB: sf2Opp ? `#${sf2Opp.overallSeed} (${sf2Opp.bracketSeed}, ${sf2Opp.pointDiff > 0 ? "+" : ""}${sf2Opp.pointDiff} diff)` : undefined,
-      });
-
-      matches.push({
-        id: "md-bronze",
-        round: "Bronze",
-        label: "3rd Place Match",
-        court: "Court 3",
-      });
-      matches.push({
-        id: "md-final",
-        round: "Final",
-        label: "Championship Final",
-        court: "Court 1",
-      });
     }
 
     setMainDrawMatches(matches);
@@ -2086,17 +2378,21 @@ function KnockoutMatchCard({
         >
           <div className="truncate mr-2">
             <div className="flex items-center gap-1.5">
-              {match.seedA && (
+              {match.seedA && match.seedA.startsWith("#") && (
                 <span className="text-[0.6rem] font-bold font-mono px-1 py-0.2 bg-charcoal text-sand rounded">
                   {match.seedA}
                 </span>
               )}
               <span
                 className={`text-sm truncate ${
-                  winnerA ? "font-bold text-pickle" : "font-semibold text-foreground"
+                  winnerA
+                    ? "font-bold text-pickle"
+                    : match.teamA
+                      ? "font-semibold text-foreground"
+                      : "text-muted-foreground italic text-xs"
                 }`}
               >
-                {match.teamA?.name ?? "TBD (Qualifier)"}
+                {match.teamA?.name ?? (match.seedA?.startsWith("#") ? "TBD (Qualifier)" : (match.seedA || "TBD (Qualifier)"))}
               </span>
             </div>
             {match.teamA && (
@@ -2129,17 +2425,21 @@ function KnockoutMatchCard({
         >
           <div className="truncate mr-2">
             <div className="flex items-center gap-1.5">
-              {match.seedB && (
+              {match.seedB && match.seedB.startsWith("#") && (
                 <span className="text-[0.6rem] font-bold font-mono px-1 py-0.2 bg-charcoal text-sand rounded">
                   {match.seedB}
                 </span>
               )}
               <span
                 className={`text-sm truncate ${
-                  winnerB ? "font-bold text-pickle" : "font-semibold text-foreground"
+                  winnerB
+                    ? "font-bold text-pickle"
+                    : match.teamB
+                      ? "font-semibold text-foreground"
+                      : "text-muted-foreground italic text-xs"
                 }`}
               >
-                {match.teamB?.name ?? "TBD (Qualifier)"}
+                {match.teamB?.name ?? (match.seedB?.startsWith("#") ? "TBD (Qualifier)" : (match.seedB || "TBD (Qualifier)"))}
               </span>
             </div>
             {match.teamB && (

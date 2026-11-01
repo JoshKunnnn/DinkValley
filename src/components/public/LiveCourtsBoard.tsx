@@ -388,9 +388,14 @@ export function LiveCourtsBoard({
                     {liveMatch && isExpanded && (
                       <div className="mt-2 pt-2 border-t border-white/15">
                         <MiniCourtVisualizer
+                          matchId={liveMatch.id}
                           score={liveMatch.score}
                           teamAName={liveMatch.teamAName}
                           teamBName={liveMatch.teamBName}
+                          teamAPlayers={liveMatch.teamAPlayers}
+                          teamBPlayers={liveMatch.teamBPlayers}
+                          teamABase1Player={liveMatch.teamABase1Player}
+                          teamBBase1Player={liveMatch.teamBBase1Player}
                           compact={true}
                         />
                       </div>

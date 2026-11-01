@@ -33,7 +33,7 @@ import {
   findMatchForCourtStation,
 } from "@/lib/court-dispatch";
 import { useTournamentStore, getTournaments } from "@/lib/tournament-store";
-import { dbUpdateCourtStation, dbSubscribeToLive, dbSaveMatch } from "@/lib/supabase-service";
+import { dbUpdateCourtStation, dbSubscribeToLive, dbSaveMatch, isSameCategory } from "@/lib/supabase-service";
 import { DispatchDebugStation } from "@/components/admin/DispatchDebugStation";
 import { syncMainDrawWithLiveMatches } from "@/components/admin/DrawsManager";
 
@@ -145,14 +145,28 @@ function Umpire() {
         return true;
       }
 
-      // 4. Default to tournament slug match
+      // 4. Default to tournament slug or active category match
       if (!activeTournamentSlug) return true;
       if (m.tournamentSlug) {
         return m.tournamentSlug === activeTournamentSlug;
       }
+      if (
+        m.categoryId &&
+        activeTournament?.categories?.some(
+          (c: any) =>
+            isSameCategory(m.categoryId, c.id) ||
+            Boolean(c.category_slug && isSameCategory(m.categoryId, c.category_slug)) ||
+            Boolean(c.uuid && isSameCategory(m.categoryId, c.uuid)),
+        )
+      ) {
+        return true;
+      }
+      if (m.id.startsWith("match_")) {
+        return true;
+      }
       return m.id.includes(activeTournamentSlug);
     });
-  }, [matches, activeTournamentSlug, stations]);
+  }, [matches, activeTournamentSlug, activeTournament, stations]);
 
   // Load umpire identity
   useEffect(() => {
@@ -205,20 +219,33 @@ function Umpire() {
       // 1. Immediately inject the self-contained match payload into local storage for 0ms zero-latency rendering
       if (detail.match) {
         try {
-          const localMatches = getMatches();
+          const localMatches = getMatches().map((m) => {
+            if (m.court === detail.court && m.id !== detail.matchId && m.id !== detail.match!.id && m.status !== "final") {
+              return { ...m, court: "Queue", status: "scheduled" as const, startedAt: undefined };
+            }
+            return m;
+          });
           const existingIdx = localMatches.findIndex(
-            (m) => m.id === detail.matchId || isMatchMatchingStation(m, detail.matchId, detail.court)
+            (m) => m.id === detail.matchId || m.id === detail.match!.id || isMatchMatchingStation(m, detail.matchId, detail.court)
           );
+          const injectedTeamA = (detail.match.teamAName || detail.teamAName || "").trim();
+          const injectedTeamB = (detail.match.teamBName || detail.teamBName || "").trim();
           if (existingIdx !== -1) {
             localMatches[existingIdx] = {
               ...localMatches[existingIdx],
               ...detail.match,
+              id: detail.match.id || detail.matchId,
+              teamAName: injectedTeamA || localMatches[existingIdx]!.teamAName,
+              teamBName: injectedTeamB || localMatches[existingIdx]!.teamBName,
               court: detail.court,
               status: detail.match.status || "scheduled",
             };
           } else {
             localMatches.push({
               ...detail.match,
+              id: detail.match.id || detail.matchId,
+              teamAName: injectedTeamA,
+              teamBName: injectedTeamB,
               court: detail.court,
               status: detail.match.status || "scheduled",
             });
@@ -3290,7 +3317,7 @@ function UmpireConsole({
       teamABase1Player: bases?.teamABase1 ?? m.teamABase1Player ?? m.teamAPlayers?.[0],
       teamBBase1Player: bases?.teamBBase1 ?? m.teamBBase1Player ?? m.teamBPlayers?.[0],
       officiatedBy: m.officiatedBy ?? currentUmpire,
-      score: { ...m.score, servingTeam: serving, serverNumber: 2, teamAScore: 0, teamBScore: 0, activeServerBase: 1 },
+      score: { ...m.score, servingTeam: serving, serverNumber: 2, teamAScore: 0, teamBScore: 0, activeServerBase: 1, rallies: [] },
     }));
   };
 

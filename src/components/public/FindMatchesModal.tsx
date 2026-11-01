@@ -1,7 +1,8 @@
 import { useState, useEffect } from "react";
 import type { Team, Category } from "@/data/tournaments";
-import { type LiveMatch, findLiveMatchForTeams } from "@/lib/match-store";
+import { type LiveMatch } from "@/lib/match-store";
 import { type BracketGroup } from "@/components/admin/BracketDraw";
+import { isSameCategory } from "@/lib/supabase-service";
 
 interface FindMatchesModalProps {
   isOpen: boolean;
@@ -37,18 +38,36 @@ export function FindMatchesModal({
 
   if (!isOpen || !team) return null;
 
+  const targetPlayersKey = (team.players || [])
+    .map((p) => p.trim().toLowerCase())
+    .filter(Boolean)
+    .sort()
+    .join(",");
+
   // Find which bracket group this team belongs to
   let assignedBracketLetter: string | null = null;
   if (drawnGroups) {
     for (const group of drawnGroups) {
-      if (group.slots.some((s) => s.team?.id === team.id || s.team?.name.toLowerCase() === team.name.toLowerCase())) {
+      if (
+        group.slots.some((s) => {
+          if (!s.team) return false;
+          if (s.team.id && team.id && s.team.id === team.id) return true;
+          if (s.team.name.trim().toLowerCase() !== team.name.trim().toLowerCase()) return false;
+          const slotPlayersKey = (s.team.players || [])
+            .map((p) => p.trim().toLowerCase())
+            .filter(Boolean)
+            .sort()
+            .join(",");
+          return !targetPlayersKey || !slotPlayersKey || targetPlayersKey === slotPlayersKey;
+        })
+      ) {
         assignedBracketLetter = group.letter;
         break;
       }
     }
   }
 
-  // Find all matches involving this team
+  // Find all matches involving this team strictly within this category & player roster
   const cleanTeamName = team.name.trim().toLowerCase();
   const teamMatches: {
     id: string;
@@ -66,8 +85,45 @@ export function FindMatchesModal({
 
   // 1. Matches from live match store
   for (const m of matches) {
-    const isTeamA = m.teamAName.trim().toLowerCase() === cleanTeamName;
-    const isTeamB = m.teamBName.trim().toLowerCase() === cleanTeamName;
+    if (m.categoryId) {
+      const matchesCat =
+        isSameCategory(m.categoryId, category.id) ||
+        Boolean(category.category_slug && isSameCategory(m.categoryId, category.category_slug)) ||
+        Boolean((category as any).uuid && isSameCategory(m.categoryId, (category as any).uuid));
+      if (!matchesCat) continue;
+    } else if (m.id) {
+      if (m.id.startsWith("match_")) {
+        const segMatch = m.id.match(/^match_(.+?)_(?:[A-Z]|PLAYOFF|KO)_/i);
+        if (segMatch?.[1] && !isSameCategory(segMatch[1], category.id)) {
+          continue;
+        }
+      } else {
+        const normCat = category.id.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
+        if (normCat && !m.id.toLowerCase().includes(normCat)) {
+          continue;
+        }
+      }
+    }
+
+    const matchPlayersA = (m.teamAPlayers || [])
+      .map((p) => p.trim().toLowerCase())
+      .filter(Boolean)
+      .sort()
+      .join(",");
+    const matchPlayersB = (m.teamBPlayers || [])
+      .map((p) => p.trim().toLowerCase())
+      .filter(Boolean)
+      .sort()
+      .join(",");
+
+    const isTeamA =
+      m.teamAName.trim().toLowerCase() === cleanTeamName &&
+      (!targetPlayersKey || !matchPlayersA || targetPlayersKey === matchPlayersA);
+    const isTeamB =
+      !isTeamA &&
+      m.teamBName.trim().toLowerCase() === cleanTeamName &&
+      (!targetPlayersKey || !matchPlayersB || targetPlayersKey === matchPlayersB);
+
     if (isTeamA || isTeamB) {
       const isServing = (isTeamA && m.score.servingTeam === "A") || (isTeamB && m.score.servingTeam === "B");
       teamMatches.push({

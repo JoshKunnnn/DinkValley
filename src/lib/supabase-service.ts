@@ -687,6 +687,7 @@ export async function dbGetMatches(tournamentSlug?: string): Promise<LiveMatch[]
           teamBScore: m.team_b_score,
           servingTeam: (m.serving_team as "A" | "B") || "A",
           serverNumber: (m.server_number as 1 | 2) || 2,
+          activeServerBase: 1,
           rallies: Array.isArray(m.rallies) ? (m.rallies as any) : [],
         };
 

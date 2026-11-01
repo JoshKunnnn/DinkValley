@@ -10,7 +10,7 @@ import {
 import { useTournamentStore } from "@/lib/tournament-store";
 import {
   useMatchStore,
-  findLiveMatchForTeams,
+  findMatchForPair,
   generateBalancedRoundRobinPairs,
   createCategoryScopedMatchId,
   type LiveMatch,
@@ -26,7 +26,7 @@ import {
 } from "@/lib/court-dispatch";
 import { getDrawnGroups, type BracketGroup } from "@/components/admin/BracketDraw";
 import { getMainDrawMatches, syncMainDrawWithLiveMatches, type KnockoutMatch } from "@/components/admin/DrawsManager";
-import { dbGetTournaments, dbGetDrawnGroups, getCachedDrawnGroups, dbSubscribeToLive } from "@/lib/supabase-service";
+import { dbGetTournaments, dbGetDrawnGroups, getCachedDrawnGroups, dbSubscribeToLive, isSameCategory } from "@/lib/supabase-service";
 import { MiniCourtVisualizer } from "@/components/public/MiniCourtVisualizer";
 import { FindMatchesModal } from "@/components/public/FindMatchesModal";
 import { PublicRegistrationModal } from "@/components/public/PublicRegistrationModal";
@@ -293,11 +293,14 @@ function TournamentPage() {
 
   const categoryFinalMatches = useMemo(() => {
     if (!category) return [];
-    return finalMatches.filter((m) => {
-      if (m.categoryId === category.id) return true;
-      if (category.teams?.some((t) => t.name === m.teamAName || t.name === m.teamBName)) return true;
-      return false;
-    });
+    return finalMatches.filter((m) =>
+      Boolean(
+        m.categoryId &&
+          (isSameCategory(m.categoryId, category.id) ||
+            (category.category_slug && isSameCategory(m.categoryId, category.category_slug)) ||
+            ((category as any).uuid && isSameCategory(m.categoryId, (category as any).uuid))),
+      ),
+    );
   }, [finalMatches, category]);
 
   // Intelligent default tab: if drawn groups exist with teams and no live matches, default to "pools"
@@ -1125,9 +1128,14 @@ function LiveCourtsTab({
                             {activeMatch.score.serverNumber}
                           </div>
                           <MiniCourtVisualizer
+                            matchId={liveMatch.id}
                             score={liveMatch.score}
                             teamAName={liveMatch.teamAName}
                             teamBName={liveMatch.teamBName}
+                            teamAPlayers={liveMatch.teamAPlayers}
+                            teamBPlayers={liveMatch.teamBPlayers}
+                            teamABase1Player={liveMatch.teamABase1Player}
+                            teamBBase1Player={liveMatch.teamBBase1Player}
                             compact={true}
                           />
                         </div>
@@ -1472,9 +1480,14 @@ function LiveCourtCard({ match }: { match: LiveMatch }) {
         {isLive && (
           <div className="mt-3">
             <MiniCourtVisualizer
+              matchId={match.id}
               score={s}
               teamAName={match.teamAName}
               teamBName={match.teamBName}
+              teamAPlayers={match.teamAPlayers}
+              teamBPlayers={match.teamBPlayers}
+              teamABase1Player={match.teamABase1Player}
+              teamBBase1Player={match.teamBBase1Player}
             />
           </div>
         )}
@@ -1531,11 +1544,31 @@ function MatchCard({
 }) {
   const nameA = teamName(category, a);
   const nameB = teamName(category, b);
+  const teamAObj = useMemo(
+    () => category.teams?.find((t) => t.id === a || t.name === nameA),
+    [category.teams, a, nameA],
+  );
+  const teamBObj = useMemo(
+    () => category.teams?.find((t) => t.id === b || t.name === nameB),
+    [category.teams, b, nameB],
+  );
 
-  // Check if there is an active or final match in the live store
+  // Check if there is an active or final knockout match in the live store strictly for this category and round
   const liveMatch = useMemo(() => {
-    return findLiveMatchForTeams(matches, nameA, nameB);
-  }, [matches, nameA, nameB]);
+    const koCandidates = matches.filter(
+      (m) => !m.stage?.includes("Pool Play") && !m.stage?.includes("Bracket "),
+    );
+    return findMatchForPair(
+      koCandidates,
+      nameA,
+      nameB,
+      undefined,
+      category.id,
+      label,
+      teamAObj?.players,
+      teamBObj?.players,
+    );
+  }, [matches, nameA, nameB, category.id, label, teamAObj, teamBObj]);
 
   const isLive = liveMatch?.status === "live";
   const isFinal = liveMatch?.status === "final";
@@ -1598,18 +1631,40 @@ function MatchCard({
 function MainDrawKnockoutMatchCard({
   match,
   matches,
+  categoryId,
   isFinal = false,
 }: {
   match: KnockoutMatch;
   matches: LiveMatch[];
+  categoryId: string;
   isFinal?: boolean;
 }) {
   const nameA = match.teamA?.name;
   const nameB = match.teamB?.name;
 
   const liveMatch = useMemo(() => {
-    return findLiveMatchForTeams(matches, nameA, nameB);
-  }, [matches, nameA, nameB]);
+    const stage = `${match.round} - ${match.label}`;
+    const koCandidates = matches.filter(
+      (m) =>
+        !m.stage?.includes("Pool Play") &&
+        !m.stage?.includes("Bracket ") &&
+        (!m.categoryId || isSameCategory(m.categoryId, categoryId)),
+    );
+    const byExactId = koCandidates.find(
+      (m) => m.id === match.id && m.categoryId && isSameCategory(m.categoryId, categoryId),
+    );
+    if (byExactId) return byExactId;
+    return findMatchForPair(
+      koCandidates,
+      nameA,
+      nameB,
+      undefined,
+      categoryId,
+      stage,
+      match.teamA?.players,
+      match.teamB?.players,
+    );
+  }, [matches, match.id, match.round, match.label, match.teamA, match.teamB, nameA, nameB, categoryId]);
 
   const isLive = liveMatch?.status === "live";
   const isCompleted = match.winner !== undefined || liveMatch?.status === "final";
@@ -1654,12 +1709,14 @@ function MainDrawKnockoutMatchCard({
       <div className={`flex items-center justify-between px-3 py-2 text-sm transition-colors ${wonA ? "bg-accent/10 font-bold" : ""}`}>
         <div className="flex items-center gap-2 min-w-0 pr-2">
           {isAServing && <span className="h-2 w-2 rounded-full bg-pickle shrink-0 animate-pulse" />}
-          {match.seedA && (
+          {match.seedA && match.seedA.startsWith("#") && (
             <span className="text-[0.6rem] font-bold font-mono px-1.5 py-0.5 bg-card border border-border text-foreground rounded shrink-0">
               {match.seedA}
             </span>
           )}
-          <span className={`truncate ${wonA ? "text-pickle" : ""}`}>{nameA ?? "TBD (Qualifier)"}</span>
+          <span className={`truncate ${wonA ? "text-pickle" : nameA ? "" : "text-muted-foreground italic text-xs"}`}>
+            {nameA ?? (match.seedA?.startsWith("#") ? "TBD (Qualifier)" : (match.seedA || "TBD (Qualifier)"))}
+          </span>
         </div>
         <span className="flex-shrink-0 font-display text-lg">{scoreA ?? "-"}</span>
       </div>
@@ -1670,12 +1727,14 @@ function MainDrawKnockoutMatchCard({
       <div className={`flex items-center justify-between px-3 py-2 text-sm transition-colors ${wonB ? "bg-accent/10 font-bold" : ""}`}>
         <div className="flex items-center gap-2 min-w-0 pr-2">
           {isBServing && <span className="h-2 w-2 rounded-full bg-pickle shrink-0 animate-pulse" />}
-          {match.seedB && (
+          {match.seedB && match.seedB.startsWith("#") && (
             <span className="text-[0.6rem] font-bold font-mono px-1.5 py-0.5 bg-card border border-border text-foreground rounded shrink-0">
               {match.seedB}
             </span>
           )}
-          <span className={`truncate ${wonB ? "text-pickle" : ""}`}>{nameB ?? "TBD (Qualifier)"}</span>
+          <span className={`truncate ${wonB ? "text-pickle" : nameB ? "" : "text-muted-foreground italic text-xs"}`}>
+            {nameB ?? (match.seedB?.startsWith("#") ? "TBD (Qualifier)" : (match.seedB || "TBD (Qualifier)"))}
+          </span>
         </div>
         <span className="flex-shrink-0 font-display text-lg">{scoreB ?? "-"}</span>
       </div>
@@ -1737,7 +1796,7 @@ function Bracket({
               </div>
               <div className="space-y-3">
                 {r16Matches.map((m) => (
-                  <MainDrawKnockoutMatchCard key={m.id} match={m} matches={matches} />
+                  <MainDrawKnockoutMatchCard key={m.id} match={m} matches={matches} categoryId={category.id} />
                 ))}
               </div>
             </div>
@@ -1752,7 +1811,7 @@ function Bracket({
               </div>
               <div className="space-y-3">
                 {qfMatches.map((m) => (
-                  <MainDrawKnockoutMatchCard key={m.id} match={m} matches={matches} />
+                  <MainDrawKnockoutMatchCard key={m.id} match={m} matches={matches} categoryId={category.id} />
                 ))}
               </div>
             </div>
@@ -1767,7 +1826,7 @@ function Bracket({
               </div>
               <div className="space-y-3">
                 {sfMatches.map((m) => (
-                  <MainDrawKnockoutMatchCard key={m.id} match={m} matches={matches} />
+                  <MainDrawKnockoutMatchCard key={m.id} match={m} matches={matches} categoryId={category.id} />
                 ))}
               </div>
             </div>
@@ -1781,7 +1840,7 @@ function Bracket({
                   <span className="h-2 w-2 rounded-full bg-brick" />
                   <h4 className="font-display text-lg text-brick uppercase tracking-wider">Championship Final</h4>
                 </div>
-                <MainDrawKnockoutMatchCard match={finalMatch} matches={matches} isFinal />
+                <MainDrawKnockoutMatchCard match={finalMatch} matches={matches} categoryId={category.id} isFinal />
 
                 {finalMatch.winner && (
                   <div className="surface-card p-5 bg-pickle/20 border-2 border-pickle text-center space-y-1 mt-3">
@@ -1805,7 +1864,7 @@ function Bracket({
                   <span className="h-2 w-2 rounded-full bg-muted-foreground" />
                   <h4 className="font-display text-lg text-muted-foreground uppercase tracking-wider">3rd Place Match</h4>
                 </div>
-                <MainDrawKnockoutMatchCard match={bronzeMatch} matches={matches} />
+                <MainDrawKnockoutMatchCard match={bronzeMatch} matches={matches} categoryId={category.id} />
               </div>
             )}
           </div>
@@ -1926,11 +1985,43 @@ function BracketCard({
     });
   }, [teams, grp.letter, categoryId]);
 
+  const getBracketTeamKey = (t: { id?: string; name: string; players?: string[] }) =>
+    t.id ||
+    `${t.name.trim().toLowerCase()}::${(t.players || [])
+      .map((p) => p.trim().toLowerCase())
+      .sort()
+      .join(",")}`;
+
+  const isBracketMatchSameOrder = (
+    live: LiveMatch,
+    teamA: { name: string; players?: string[] },
+    teamB: { name: string; players?: string[] },
+  ): boolean => {
+    const aName = teamA.name.trim().toLowerCase();
+    const bName = teamB.name.trim().toLowerCase();
+    const liveA = (live.teamAName || "").trim().toLowerCase();
+    const liveB = (live.teamBName || "").trim().toLowerCase();
+    if (liveA !== bName && liveA === aName && aName !== bName) return true;
+    if (liveA === bName && liveB === aName && aName !== bName) return false;
+    if (teamA.players?.length && live.teamAPlayers?.length) {
+      const pA = [...teamA.players].map((p) => p.trim().toLowerCase()).sort().join(",");
+      const lpA = [...live.teamAPlayers].map((p) => p.trim().toLowerCase()).sort().join(",");
+      return pA === lpA;
+    }
+    if (teamB.players?.length && live.teamBPlayers?.length) {
+      const pB = [...teamB.players].map((p) => p.trim().toLowerCase()).sort().join(",");
+      const lpB = [...live.teamBPlayers].map((p) => p.trim().toLowerCase()).sort().join(",");
+      return pB === lpB;
+    }
+    return true;
+  };
+
   // Compute live standings for this group from match-store
   const standings = useMemo(() => {
     const map = new Map<
       string,
       {
+        key: string;
         name: string;
         w: number;
         l: number;
@@ -1939,26 +2030,42 @@ function BracketCard({
         club?: string | undefined;
       }
     >();
-    teams.forEach((t) =>
-      map.set(t.name, {
+    teams.forEach((t) => {
+      const tKey = getBracketTeamKey(t);
+      map.set(tKey, {
+        key: tKey,
         name: t.name,
         w: 0,
         l: 0,
         pd: 0,
         players: t.players,
         club: t.club,
-      })
-    );
+      });
+    });
 
     groupMatches.forEach((gm) => {
-      const live = matches.find((m) => m.id === gm.id) || findLiveMatchForTeams(matches, gm.teamA.name, gm.teamB.name);
+      const live =
+        matches.find(
+          (m) => m.id === gm.id && (!categoryId || !m.categoryId || isSameCategory(m.categoryId, categoryId)),
+        ) ||
+        findMatchForPair(
+          matches,
+          gm.teamA.name,
+          gm.teamB.name,
+          undefined,
+          categoryId,
+          grp.letter,
+          gm.teamA.players,
+          gm.teamB.players,
+        );
       if (!live || live.status !== "final") return;
 
-      const sA = live.teamAName === gm.teamA.name ? live.score.teamAScore : live.score.teamBScore;
-      const sB = live.teamAName === gm.teamA.name ? live.score.teamBScore : live.score.teamAScore;
+      const sameOrder = isBracketMatchSameOrder(live, gm.teamA, gm.teamB);
+      const sA = sameOrder ? live.score.teamAScore : live.score.teamBScore;
+      const sB = sameOrder ? live.score.teamBScore : live.score.teamAScore;
 
-      const entryA = map.get(gm.teamA.name);
-      const entryB = map.get(gm.teamB.name);
+      const entryA = map.get(getBracketTeamKey(gm.teamA));
+      const entryB = map.get(getBracketTeamKey(gm.teamB));
       if (!entryA || !entryB) return;
 
       if (sA > sB) {
@@ -1973,15 +2080,41 @@ function BracketCard({
     });
 
     return [...map.values()].sort((a, b) => b.w - a.w || b.pd - a.pd);
-  }, [matches, groupMatches, teams]);
+  }, [matches, groupMatches, teams, categoryId, grp.letter]);
 
   const completedCount = groupMatches.filter((gm) => {
-    const live = matches.find((m) => m.id === gm.id) || findLiveMatchForTeams(matches, gm.teamA.name, gm.teamB.name);
+    const live =
+      matches.find(
+        (m) => m.id === gm.id && (!categoryId || !m.categoryId || isSameCategory(m.categoryId, categoryId)),
+      ) ||
+      findMatchForPair(
+        matches,
+        gm.teamA.name,
+        gm.teamB.name,
+        undefined,
+        categoryId,
+        grp.letter,
+        gm.teamA.players,
+        gm.teamB.players,
+      );
     return live?.status === "final";
   }).length;
 
   const liveCount = groupMatches.filter((gm) => {
-    const live = matches.find((m) => m.id === gm.id) || findLiveMatchForTeams(matches, gm.teamA.name, gm.teamB.name);
+    const live =
+      matches.find(
+        (m) => m.id === gm.id && (!categoryId || !m.categoryId || isSameCategory(m.categoryId, categoryId)),
+      ) ||
+      findMatchForPair(
+        matches,
+        gm.teamA.name,
+        gm.teamB.name,
+        undefined,
+        categoryId,
+        grp.letter,
+        gm.teamA.players,
+        gm.teamB.players,
+      );
     return live?.status === "live";
   }).length;
 
@@ -2111,7 +2244,7 @@ function BracketCard({
                     const isQualified = isGroupDone && i < 2;
                     return (
                       <tr
-                        key={row.name}
+                        key={row.key}
                         className={`border-t border-border/60 transition-colors ${isQualified
                             ? "border-l-4 border-l-pickle bg-pickle/5"
                             : i % 2 === 0
@@ -2174,25 +2307,33 @@ function BracketCard({
             </div>
             <div className="space-y-2">
               {groupMatches.map((gm, matchIdx) => {
-                const live = matches.find((m) => m.id === gm.id) || findLiveMatchForTeams(matches, gm.teamA.name, gm.teamB.name);
+                const live =
+                  matches.find(
+                    (m) => m.id === gm.id && (!categoryId || !m.categoryId || isSameCategory(m.categoryId, categoryId)),
+                  ) ||
+                  findMatchForPair(
+                    matches,
+                    gm.teamA.name,
+                    gm.teamB.name,
+                    undefined,
+                    categoryId,
+                    grp.letter,
+                    gm.teamA.players,
+                    gm.teamB.players,
+                  );
                 const isLive = live?.status === "live";
                 const isFinal = live?.status === "final";
+                const sameOrder = live ? isBracketMatchSameOrder(live, gm.teamA, gm.teamB) : true;
 
                 const scoreA = live
-                  ? (live.teamAName === gm.teamA.name ? live.score.teamAScore : live.score.teamBScore)
+                  ? (sameOrder ? live.score.teamAScore : live.score.teamBScore)
                   : undefined;
                 const scoreB = live
-                  ? (live.teamAName === gm.teamA.name ? live.score.teamBScore : live.score.teamAScore)
+                  ? (sameOrder ? live.score.teamBScore : live.score.teamAScore)
                   : undefined;
 
-                const servingA = isLive && live && (
-                  (live.teamAName === gm.teamA.name && live.score.servingTeam === "A") ||
-                  (live.teamBName === gm.teamA.name && live.score.servingTeam === "B")
-                );
-                const servingB = isLive && live && (
-                  (live.teamAName === gm.teamB.name && live.score.servingTeam === "A") ||
-                  (live.teamBName === gm.teamB.name && live.score.servingTeam === "B")
-                );
+                const servingA = isLive && live && (sameOrder ? live.score.servingTeam === "A" : live.score.servingTeam === "B");
+                const servingB = isLive && live && (sameOrder ? live.score.servingTeam === "B" : live.score.servingTeam === "A");
 
                 return (
                   <div
@@ -2344,6 +2485,8 @@ function Pools({
               return matches.some(
                 (m) =>
                   m.status === "live" &&
+                  Boolean(m.categoryId && isSameCategory(m.categoryId, category.id)) &&
+                  Boolean(m.stage?.includes(`Bracket ${grp.letter}`)) &&
                   (m.teamAName === s.team!.name || m.teamBName === s.team!.name),
               );
             });
@@ -2430,10 +2573,27 @@ function Pools({
                 .map((m) => {
                   const nameA = teamName(category, m.teamA);
                   const nameB = teamName(category, m.teamB);
+                  const teamAObj = category.teams?.find((t) => t.id === m.teamA || t.name === nameA);
+                  const teamBObj = category.teams?.find((t) => t.id === m.teamB || t.name === nameB);
                   const scopedMatchId = (m.teamA && m.teamB)
                     ? createCategoryScopedMatchId(category.id, pool, m.teamA, m.teamB)
                     : null;
-                  const live = (scopedMatchId ? matches.find((lm) => lm.id === scopedMatchId) : null) || findLiveMatchForTeams(matches, nameA, nameB);
+                  const live =
+                    (scopedMatchId
+                      ? matches.find(
+                          (lm) => lm.id === scopedMatchId && (!lm.categoryId || isSameCategory(lm.categoryId, category.id)),
+                        )
+                      : null) ||
+                    findMatchForPair(
+                      matches,
+                      nameA,
+                      nameB,
+                      undefined,
+                      category.id,
+                      pool,
+                      teamAObj?.players,
+                      teamBObj?.players,
+                    );
 
                   const isLive = live?.status === "live";
                   const isFinal = live?.status === "final";
