@@ -32,6 +32,7 @@ import { FindMatchesModal } from "@/components/public/FindMatchesModal";
 import { PublicRegistrationModal } from "@/components/public/PublicRegistrationModal";
 import { CategorySheet } from "@/components/public/CategorySheet";
 import { SimpleBracketView } from "@/components/public/SimpleBracketView";
+import { KnockoutBracketListView } from "@/components/public/KnockoutBracketListView";
 import { TeamFinder } from "@/components/public/TeamFinder";
 import { StepIndicator } from "@/components/public/StepIndicator";
 import { UpNextSlider } from "@/components/public/UpNextSlider";
@@ -152,7 +153,7 @@ function TournamentPage() {
 
   // Friendly flow state (Step 1 -> Step 2 -> Step 3)
   const [friendlyMode, setFriendlyMode] = useState(true);
-  const [friendlySubTab, setFriendlySubTab] = useState<"bracket" | "results">("bracket");
+  const [friendlySubTab, setFriendlySubTab] = useState<"bracket" | "knockout" | "results">("bracket");
   const [isCategorySheetOpen, setIsCategorySheetOpen] = useState(false);
   const [highlightTeam, setHighlightTeam] = useState<string | null>(null);
 
@@ -473,23 +474,37 @@ function TournamentPage() {
               }}
             />
 
-            {/* Friendly Sub-view Switcher: Bracket Groups vs All Match Results */}
-            <div className="flex items-center gap-2">
+            {/* Friendly Sub-view Switcher: Bracket Groups vs Knockout Stage vs All Match Results */}
+            <div className="flex items-center gap-2 overflow-x-auto pb-1 sm:pb-0">
               <button
                 type="button"
                 onClick={() => setFriendlySubTab("bracket")}
-                className={`min-h-[2.75rem] px-4 py-2 rounded-xl text-xs sm:text-sm font-bold uppercase tracking-wider transition-all cursor-pointer border-2 ${
+                className={`min-h-[2.75rem] px-4 py-2 rounded-xl text-xs sm:text-sm font-bold uppercase tracking-wider transition-all cursor-pointer border-2 whitespace-nowrap ${
                   friendlySubTab === "bracket"
                     ? "border-pickle bg-pickle text-sand shadow-sm"
                     : "border-border bg-card text-foreground/80 hover:border-pickle"
                 }`}
               >
-                Bracket Groups
+                Round Robin (Groups)
+              </button>
+              <button
+                type="button"
+                onClick={() => setFriendlySubTab("knockout")}
+                className={`min-h-[2.75rem] px-4 py-2 rounded-xl text-xs sm:text-sm font-bold uppercase tracking-wider transition-all cursor-pointer border-2 whitespace-nowrap flex items-center gap-1.5 ${
+                  friendlySubTab === "knockout"
+                    ? "border-pickle bg-pickle text-sand shadow-sm"
+                    : "border-border bg-card text-foreground/80 hover:border-pickle"
+                }`}
+              >
+                <span>Knockout Stage</span>
+                <span className="font-mono text-xs opacity-80">
+                  {mainDrawMatches && mainDrawMatches.length > 0 ? `(${mainDrawMatches.length})` : "Playoffs"}
+                </span>
               </button>
               <button
                 type="button"
                 onClick={() => setFriendlySubTab("results")}
-                className={`min-h-[2.75rem] px-4 py-2 rounded-xl text-xs sm:text-sm font-bold uppercase tracking-wider transition-all cursor-pointer border-2 flex items-center gap-1.5 ${
+                className={`min-h-[2.75rem] px-4 py-2 rounded-xl text-xs sm:text-sm font-bold uppercase tracking-wider transition-all cursor-pointer border-2 whitespace-nowrap flex items-center gap-1.5 ${
                   friendlySubTab === "results"
                     ? "border-pickle bg-pickle text-sand shadow-sm"
                     : "border-border bg-card text-foreground/80 hover:border-pickle"
@@ -516,6 +531,16 @@ function TournamentPage() {
                 highlightTeam={highlightTeam}
                 onTeamTap={(tm) => setFindMatchesTeam(tm)}
                 emptyMessage="No matches have completed yet in this division. Once games finish, full scores and outcomes will appear here."
+              />
+            ) : friendlySubTab === "knockout" ? (
+              <KnockoutBracketListView
+                category={category}
+                matches={matches}
+                drawnGroups={drawnGroups}
+                mainDrawMatches={mainDrawMatches}
+                highlightTeam={highlightTeam}
+                onTeamTap={(tm) => setFindMatchesTeam(tm)}
+                onSwitchToPools={() => setFriendlySubTab("bracket")}
               />
             ) : (
               <SimpleBracketView
@@ -1755,198 +1780,14 @@ function Bracket({
   drawnGroups?: BracketGroup[] | null;
   onSwitchToPools?: () => void;
 }) {
-  // If official point differential seeded Main Draw has been generated in admin
-  if (mainDrawMatches && mainDrawMatches.length > 0) {
-    const r16Matches = mainDrawMatches.filter((m) => m.round === "Round of 16");
-    const qfMatches = mainDrawMatches.filter((m) => m.round === "Quarterfinal");
-    const sfMatches = mainDrawMatches.filter((m) => m.round === "Semifinal");
-    const finalMatch = mainDrawMatches.find((m) => m.round === "Final");
-    const bronzeMatch = mainDrawMatches.find((m) => m.round === "Bronze");
-
-    return (
-      <div className="space-y-6">
-        <div className="border-b border-border pb-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="h-2 w-2 rounded-full bg-pickle" />
-              <span className="text-xs font-bold uppercase tracking-[0.24em] text-pickle">
-                Seeded by Point Differential
-              </span>
-            </div>
-            <h3 className="text-2xl font-display mt-0.5">Championship Playoff Tree</h3>
-            <p className="text-xs text-muted-foreground">
-              Official single-elimination bracket seeded from round robin point differential (+/-) tie-breakers.
-            </p>
-          </div>
-        </div>
-
-        {/* Responsive bracket columns */}
-        <div className={`grid gap-6 ${r16Matches.length > 0
-            ? "grid-cols-1 md:grid-cols-2 lg:grid-cols-4"
-            : qfMatches.length > 0
-              ? "grid-cols-1 md:grid-cols-2 lg:grid-cols-3"
-              : "grid-cols-1 md:grid-cols-2"
-          }`}>
-          {/* Round of 16 */}
-          {r16Matches.length > 0 && (
-            <div className="space-y-4">
-              <div className="flex items-center gap-2 border-b border-border pb-2">
-                <span className="h-2 w-2 rounded-full bg-pickle" />
-                <h4 className="font-display text-lg text-foreground uppercase tracking-wider">Round of 16</h4>
-              </div>
-              <div className="space-y-3">
-                {r16Matches.map((m) => (
-                  <MainDrawKnockoutMatchCard key={m.id} match={m} matches={matches} categoryId={category.id} />
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Quarterfinals */}
-          {qfMatches.length > 0 && (
-            <div className="space-y-4">
-              <div className="flex items-center gap-2 border-b border-border pb-2">
-                <span className="h-2 w-2 rounded-full bg-pickle" />
-                <h4 className="font-display text-lg text-foreground uppercase tracking-wider">Quarterfinals</h4>
-              </div>
-              <div className="space-y-3">
-                {qfMatches.map((m) => (
-                  <MainDrawKnockoutMatchCard key={m.id} match={m} matches={matches} categoryId={category.id} />
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Semifinals */}
-          {sfMatches.length > 0 && (
-            <div className="space-y-4">
-              <div className="flex items-center gap-2 border-b border-border pb-2">
-                <span className="h-2 w-2 rounded-full bg-pickle" />
-                <h4 className="font-display text-lg text-foreground uppercase tracking-wider">Semifinals</h4>
-              </div>
-              <div className="space-y-3">
-                {sfMatches.map((m) => (
-                  <MainDrawKnockoutMatchCard key={m.id} match={m} matches={matches} categoryId={category.id} />
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Championship Final & 3rd Place Match */}
-          <div className="space-y-6">
-            {finalMatch && (
-              <div className="space-y-3">
-                <div className="flex items-center gap-2 border-b border-border pb-2">
-                  <span className="h-2 w-2 rounded-full bg-brick" />
-                  <h4 className="font-display text-lg text-brick uppercase tracking-wider">Championship Final</h4>
-                </div>
-                <MainDrawKnockoutMatchCard match={finalMatch} matches={matches} categoryId={category.id} isFinal />
-
-                {finalMatch.winner && (
-                  <div className="surface-card p-5 bg-pickle/20 border-2 border-pickle text-center space-y-1 mt-3">
-                    <span className="block text-[0.6rem] uppercase tracking-[0.28em] font-bold text-pickle">
-                      Tournament Champion
-                    </span>
-                    <h5 className="font-display text-2xl text-foreground">
-                      {finalMatch.winner.name}
-                    </h5>
-                    <p className="text-xs text-muted-foreground">
-                      {finalMatch.winner.players.join(" & ")}
-                    </p>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {bronzeMatch && (
-              <div className="space-y-3">
-                <div className="flex items-center gap-2 border-b border-border pb-2">
-                  <span className="h-2 w-2 rounded-full bg-muted-foreground" />
-                  <h4 className="font-display text-lg text-muted-foreground uppercase tracking-wider">3rd Place Match</h4>
-                </div>
-                <MainDrawKnockoutMatchCard match={bronzeMatch} matches={matches} categoryId={category.id} />
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // Fallback to preview semifinals/finals
-  const semis = category.playoffs.filter((m) => m.round === "Semifinal");
-  const final = category.playoffs.find((m) => m.round === "Final");
-
   return (
-    <div className="space-y-6">
-      <div className="border-b border-border pb-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-        <div>
-          <span className="text-xs font-bold uppercase tracking-[0.24em] text-muted-foreground">
-            Playoff Preview
-          </span>
-          <h3 className="text-2xl font-display mt-0.5">Projected Knockout Stage</h3>
-          <p className="text-xs text-muted-foreground">
-            Official playoff seeds will be automatically finalized from pool play Point Differential standings.
-          </p>
-        </div>
-      </div>
-
-      {drawnGroups &&
-        drawnGroups.some((g) => g.isDrawn || g.slots.some((s) => s.team !== null)) &&
-        onSwitchToPools && (
-          <div className="surface-card p-4 sm:p-5 border border-pickle/40 bg-pickle/10 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-            <div>
-              <span className="text-xs font-mono font-bold uppercase tracking-widest text-pickle flex items-center gap-1.5">
-                <span className="h-2 w-2 rounded-full bg-pickle animate-pulse" />
-                Tournament in Pool Play Stage
-              </span>
-              <p className="text-xs text-sand/80 mt-1">
-                Group matches and standings are currently active. Top teams from each pool will advance to this playoff bracket.
-              </p>
-            </div>
-            <button
-              onClick={onSwitchToPools}
-              className="px-4 py-2 bg-pickle text-sand text-xs font-bold uppercase tracking-wider hover:opacity-90 transition-opacity rounded shrink-0 cursor-pointer"
-            >
-              View Drawn Groups & Pool Play &rarr;
-            </button>
-          </div>
-        )}
-
-      <div className="space-y-6 md:space-y-0 md:grid md:grid-cols-[1fr_auto_1fr] md:items-center md:gap-6">
-        <div className="space-y-4 sm:space-y-6">
-          {semis.map((m, i) => (
-            <MatchCard
-              key={m.id}
-              category={category}
-              a={m.teamA}
-              b={m.teamB}
-              scoreA={m.scoreA}
-              scoreB={m.scoreB}
-              label={`Semifinal ${i + 1}`}
-              matches={matches}
-            />
-          ))}
-        </div>
-        <div className="hidden h-24 w-10 border-y-2 border-r-2 border-charcoal md:block" />
-        <div>
-          {final && (
-            <MatchCard
-              category={category}
-              a={final.teamA}
-              b={final.teamB}
-              scoreA={final.scoreA}
-              scoreB={final.scoreB}
-              label="Championship Final"
-              matches={matches}
-            />
-          )}
-          <p className="mt-3 text-xs uppercase tracking-widest text-muted-foreground">
-            Top seeds of pool play advance to knockouts
-          </p>
-        </div>
-      </div>
-    </div>
+    <KnockoutBracketListView
+      category={category}
+      matches={matches}
+      drawnGroups={drawnGroups ?? null}
+      mainDrawMatches={mainDrawMatches}
+      onSwitchToPools={onSwitchToPools}
+    />
   );
 }
 

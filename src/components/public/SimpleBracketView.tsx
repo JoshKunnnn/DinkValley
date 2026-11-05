@@ -11,6 +11,7 @@ import type { BracketGroup } from "@/components/admin/BracketDraw";
 import type { KnockoutMatch } from "@/components/admin/DrawsManager";
 import { UpNextSlider } from "./UpNextSlider";
 import { FinalResultsView } from "./FinalResultsView";
+import { KnockoutBracketListView } from "./KnockoutBracketListView";
 
 type MatchStatusKind = "playing" | "next" | "done";
 
@@ -119,7 +120,11 @@ export function SimpleBracketView({
       });
     });
 
-    if (mainDrawMatches && mainDrawMatches.length > 0) {
+    if (
+      (mainDrawMatches && mainDrawMatches.length > 0) ||
+      groups.length > 0 ||
+      (category.teams && category.teams.length >= 2)
+    ) {
       list.push({
         id: "playoffs",
         title: "Championship Finals",
@@ -129,7 +134,7 @@ export function SimpleBracketView({
     }
 
     return list;
-  }, [groups, mainDrawMatches]);
+  }, [groups, mainDrawMatches, category.teams]);
 
   const [activeIdx, setActiveIdx] = useState(0);
 
@@ -537,55 +542,17 @@ export function SimpleBracketView({
         </button>
       </div>
 
-      {/* ── PLAYOFFS VIEW: Round by Round ── */}
+      {/* ── PLAYOFFS VIEW: Round by Round / Dynamic Knockout ── */}
       {currentSection.isPlayoff ? (
-        <div className="space-y-6">
-          {/* Champion Crown Banner if Final is completed */}
-          {tournamentChampion && (
-            <div className="surface-card p-6 border-2 border-pickle bg-pickle/15 rounded-2xl text-center space-y-1 shadow-md">
-              <span className="text-xs font-bold uppercase tracking-[0.24em] text-pickle block">
-                Tournament Champion
-              </span>
-              <h4 className="text-3xl sm:text-4xl font-display text-foreground font-bold">
-                {tournamentChampion}
-              </h4>
-              <p className="text-xs sm:text-sm text-foreground/75">
-                Official {category.label} Division Champions
-              </p>
-            </div>
-          )}
-
-          {/* Group playoff matches by round */}
-          {Array.from(roundsMap.entries()).map(([roundTitle, roundMatches]) => {
-            const isFinalRound = roundTitle === "Final";
-            return (
-              <div key={roundTitle} className="space-y-3">
-                <div className="flex items-center justify-between border-b border-border pb-1.5">
-                  <span className="font-display text-xl sm:text-2xl text-foreground">
-                    {roundTitle === "Final"
-                      ? "Championship Final"
-                      : roundTitle === "Bronze"
-                        ? "Bronze Medal Match (3rd Place)"
-                        : roundTitle}
-                  </span>
-                  <span className="text-xs uppercase font-mono tracking-wider text-muted-foreground">
-                    {roundMatches.length} {roundMatches.length === 1 ? "match" : "matches"}
-                  </span>
-                </div>
-
-                <div className="space-y-2.5">
-                  {roundMatches.map((m: SimpleMatchItem) => renderMatchCard(m, highlightTeam, onTeamTap, isFinalRound))}
-                </div>
-              </div>
-            );
-          })}
-
-          {matchItems.length === 0 && (
-            <div className="p-8 text-center bg-card rounded-2xl border-2 border-border text-foreground/70 text-sm">
-              Playoff matches will be scheduled after pool play concludes.
-            </div>
-          )}
-        </div>
+        <KnockoutBracketListView
+          category={category}
+          matches={matches}
+          drawnGroups={drawnGroups}
+          mainDrawMatches={mainDrawMatches}
+          highlightTeam={highlightTeam}
+          onTeamTap={onTeamTap}
+          onSwitchToPools={() => setActiveIdx(0)}
+        />
       ) : (
         /* ── ROUND-ROBIN GROUP VIEW ── */
         <div className="space-y-5">
