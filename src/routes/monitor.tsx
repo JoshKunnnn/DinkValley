@@ -1129,20 +1129,21 @@ function Arena2DCourtDiagram({
       <div
         className={`inline-flex items-center gap-1.5 sm:gap-2 px-2.5 sm:px-3.5 py-1 sm:py-1.5 rounded-full font-bold max-w-[96%] transition-all shadow-md ${
           player.isServing
-            ? "ring-2 ring-sand shadow-lg"
-            : player.isReceiver
             ? "border-2 border-dashed border-amber-300 ring-2 ring-amber-400/30"
+            : player.isReceiver
+            ? "ring-2 ring-sand shadow-lg"
             : "border border-sand/30"
         } ${teamLetter === "A" ? "bg-pickle text-sand" : "bg-brick text-sand"} ${
           isFocusedSingle ? "text-sm sm:text-lg" : "text-xs sm:text-sm"
         }`}
       >
-        {player.isServing && (
+        {/* Dot marker on active receiver */}
+        {player.isReceiver && (
           <span
-            className="w-3.5 h-3.5 sm:w-4 sm:h-4 rounded-full bg-sand text-charcoal flex items-center justify-center shrink-0"
-            title="Active Server"
+            className="w-3.5 h-3.5 sm:w-4 sm:h-4 rounded-full bg-sand text-charcoal flex items-center justify-center shrink-0 shadow-xs border border-charcoal/30"
+            title="Active Receiver"
           >
-            <span className="w-2 h-2 rounded-full bg-pickle animate-ping" />
+            <span className="w-2 h-2 rounded-full bg-pickle inline-block" />
           </span>
         )}
 

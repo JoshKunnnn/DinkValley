@@ -191,19 +191,21 @@ export function MiniCourtVisualizer({
             )}
             {leftSide.leftServing && (
               <div className="flex items-center gap-1 mt-0.5">
-                <span className="relative flex h-2.5 w-2.5 shrink-0">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-pickle opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-pickle shadow"></span>
-                </span>
+                <span className="w-2.5 h-2.5 rounded-full border border-dashed border-amber-300 inline-block shrink-0" />
                 <span className="text-[0.5rem] sm:text-[0.55rem] font-bold text-pickle font-mono leading-none">
                   {isSingles ? "SRV" : `S${score.serverNumber}`}
                 </span>
               </div>
             )}
             {leftSide.leftReceiving && (
-              <span className="mt-0.5 px-1 rounded bg-sand/15 text-[0.46rem] sm:text-[0.5rem] font-bold text-sand/90 font-mono leading-tight">
-                RCV
-              </span>
+              <div className="flex items-center gap-1 mt-0.5">
+                <span className="w-2 h-2 rounded-full bg-sand text-charcoal flex items-center justify-center shrink-0 border border-charcoal/30">
+                  <span className="w-1 h-1 rounded-full bg-pickle inline-block" />
+                </span>
+                <span className="px-1 rounded bg-sand/15 text-[0.46rem] sm:text-[0.5rem] font-bold text-sand/90 font-mono leading-tight">
+                  RCV
+                </span>
+              </div>
             )}
           </div>
 
@@ -220,19 +222,21 @@ export function MiniCourtVisualizer({
             )}
             {leftSide.rightServing && (
               <div className="flex items-center gap-1 mt-0.5">
-                <span className="relative flex h-2.5 w-2.5 shrink-0">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-pickle opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-pickle shadow"></span>
-                </span>
+                <span className="w-2.5 h-2.5 rounded-full border border-dashed border-amber-300 inline-block shrink-0" />
                 <span className="text-[0.5rem] sm:text-[0.55rem] font-bold text-pickle font-mono leading-none">
                   {isSingles ? "SRV" : `S${score.serverNumber}`}
                 </span>
               </div>
             )}
             {leftSide.rightReceiving && (
-              <span className="mt-0.5 px-1 rounded bg-sand/15 text-[0.46rem] sm:text-[0.5rem] font-bold text-sand/90 font-mono leading-tight">
-                RCV
-              </span>
+              <div className="flex items-center gap-1 mt-0.5">
+                <span className="w-2 h-2 rounded-full bg-sand text-charcoal flex items-center justify-center shrink-0 border border-charcoal/30">
+                  <span className="w-1 h-1 rounded-full bg-pickle inline-block" />
+                </span>
+                <span className="px-1 rounded bg-sand/15 text-[0.46rem] sm:text-[0.5rem] font-bold text-sand/90 font-mono leading-tight">
+                  RCV
+                </span>
+              </div>
             )}
           </div>
         </div>
@@ -254,19 +258,21 @@ export function MiniCourtVisualizer({
             )}
             {rightSide.rightServing && (
               <div className="flex items-center gap-1 mt-0.5">
-                <span className="relative flex h-2.5 w-2.5 shrink-0">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-pickle opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-pickle shadow"></span>
-                </span>
+                <span className="w-2.5 h-2.5 rounded-full border border-dashed border-amber-300 inline-block shrink-0" />
                 <span className="text-[0.5rem] sm:text-[0.55rem] font-bold text-pickle font-mono leading-none">
                   {isSingles ? "SRV" : `S${score.serverNumber}`}
                 </span>
               </div>
             )}
             {rightSide.rightReceiving && (
-              <span className="mt-0.5 px-1 rounded bg-sand/15 text-[0.46rem] sm:text-[0.5rem] font-bold text-sand/90 font-mono leading-tight">
-                RCV
-              </span>
+              <div className="flex items-center gap-1 mt-0.5">
+                <span className="w-2 h-2 rounded-full bg-sand text-charcoal flex items-center justify-center shrink-0 border border-charcoal/30">
+                  <span className="w-1 h-1 rounded-full bg-pickle inline-block" />
+                </span>
+                <span className="px-1 rounded bg-sand/15 text-[0.46rem] sm:text-[0.5rem] font-bold text-sand/90 font-mono leading-tight">
+                  RCV
+                </span>
+              </div>
             )}
           </div>
 
@@ -283,19 +289,21 @@ export function MiniCourtVisualizer({
             )}
             {rightSide.leftServing && (
               <div className="flex items-center gap-1 mt-0.5">
-                <span className="relative flex h-2.5 w-2.5 shrink-0">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-pickle opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-pickle shadow"></span>
-                </span>
+                <span className="w-2.5 h-2.5 rounded-full border border-dashed border-amber-300 inline-block shrink-0" />
                 <span className="text-[0.5rem] sm:text-[0.55rem] font-bold text-pickle font-mono leading-none">
                   {isSingles ? "SRV" : `S${score.serverNumber}`}
                 </span>
               </div>
             )}
             {rightSide.leftReceiving && (
-              <span className="mt-0.5 px-1 rounded bg-sand/15 text-[0.46rem] sm:text-[0.5rem] font-bold text-sand/90 font-mono leading-tight">
-                RCV
-              </span>
+              <div className="flex items-center gap-1 mt-0.5">
+                <span className="w-2 h-2 rounded-full bg-sand text-charcoal flex items-center justify-center shrink-0 border border-charcoal/30">
+                  <span className="w-1 h-1 rounded-full bg-pickle inline-block" />
+                </span>
+                <span className="px-1 rounded bg-sand/15 text-[0.46rem] sm:text-[0.5rem] font-bold text-sand/90 font-mono leading-tight">
+                  RCV
+                </span>
+              </div>
             )}
           </div>
         </div>

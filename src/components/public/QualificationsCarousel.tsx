@@ -11,32 +11,46 @@ export interface QualificationPoster {
 
 export const QUALIFICATION_POSTERS: QualificationPoster[] = [
   {
-    id: "40plus",
-    category: "40+ Category",
-    badge: "Born 1986 or Earlier",
-    badgeColor: "bg-brick text-sand border-brick",
-    image: "/qualifications/40-plus-qualifications.jpg",
-  },
-  {
-    id: "50plus",
-    category: "50+ Category",
-    badge: "Born 1976 or Earlier",
-    badgeColor: "bg-[#c97a3c] text-sand border-[#c97a3c]",
-    image: "/qualifications/50-plus-qualifications.jpg",
-  },
-  {
     id: "beginner",
     category: "Beginner Category",
     badge: "New to Pickleball",
     badgeColor: "bg-pickle text-sand border-pickle",
-    image: "/qualifications/beginner-qualifications.jpg",
+    image: "/categories/beginner.jpg",
   },
   {
     id: "novice",
     category: "Novice Category",
     badge: "Developing Consistency",
     badgeColor: "bg-[#7ecb7e] text-charcoal border-[#7ecb7e]",
-    image: "/qualifications/novice-qualifications.jpg",
+    image: "/categories/novice.jpg",
+  },
+  {
+    id: "inter-low",
+    category: "Intermediate-Low",
+    badge: "Consistent & Strategic",
+    badgeColor: "bg-[#2b6b55] text-sand border-[#2b6b55]",
+    image: "/categories/inter-low.jpg",
+  },
+  {
+    id: "inter-high",
+    category: "Intermediate-High",
+    badge: "Open For All / Pro Level",
+    badgeColor: "bg-[#c97a3c] text-sand border-[#c97a3c]",
+    image: "/categories/inter-high.jpg",
+  },
+  {
+    id: "35plus",
+    category: "35+ Category",
+    badge: "Born 1991 or Earlier",
+    badgeColor: "bg-brick text-sand border-brick",
+    image: "/categories/35-plus.jpg",
+  },
+  {
+    id: "45plus",
+    category: "45+ Category",
+    badge: "Born 1981 or Earlier",
+    badgeColor: "bg-red-900 text-sand border-red-900",
+    image: "/categories/45-plus.jpg",
   },
 ];
 

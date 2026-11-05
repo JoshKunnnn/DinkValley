@@ -325,7 +325,8 @@ function getBracketsForCapacity(cap: number): number {
   if (cap >= 24) return 6;
   if (cap >= 16) return 4;
   if (cap >= 12) return 3;
-  return 2;
+  if (cap >= 6) return 2;
+  return 1;
 }
 
 // ── Main Component ─────────────────────────────────────────────────────────
@@ -961,6 +962,44 @@ export function BracketDraw({
     setNumBrackets(_n);
   };
 
+  const handlePopulate3Teams = () => {
+    const prevTeams = [...(category?.teams || [])];
+    setUndoRoster({
+      action: "populate",
+      teams: prevTeams,
+      label: "Previous roster",
+    });
+
+    resetDrawnGroups(
+      tournamentSlug,
+      effectiveCategoryId,
+      [categoryId, category?.id].filter(Boolean) as string[]
+    );
+
+    const generated = generateMockTeams(3, { verifiedOnly: true });
+    bulkSetTeamsInCategory(tournamentSlug, categoryId, generated);
+
+    const _buckets = [generated];
+    const _initial: BracketGroup[] = [{
+      name: "Bracket A",
+      letter: "A",
+      slots: generated.map(() => ({ team: null, revealed: false })),
+      revealed: false,
+      isDrawn: false,
+    }];
+    setTeamsByGroup(_buckets);
+    teamsByGroupRef.current = _buckets;
+    setGroups(_initial);
+    groupsRef.current = _initial;
+    setDrawnCount(0);
+    drawnCountRef.current = 0;
+    setSelectedSlot(null);
+    setDraggedSlot(null);
+    setSwapNotice(null);
+    skipEffectRef.current = true;
+    setNumBrackets(1);
+  };
+
   const handleDeleteAllTeams = () => {
     if (teams.length === 0) return;
     if (!window.confirm(`Delete all ${teams.length} teams and players from ${category.label}? This will reset the bracket draw.`)) return;
@@ -1100,6 +1139,7 @@ export function BracketDraw({
               onChange={(e) => setNumBrackets(parseInt(e.target.value, 10))}
               className="w-full border border-input bg-background px-3 py-2 text-xs sm:text-sm focus:border-pickle focus:outline-none disabled:opacity-60 font-semibold text-pickle"
             >
+              <option value={1}>1 Bracket (Single Pool - 3 Pairs Round Robin)</option>
               <option value={2}>2 Brackets (A &amp; B - 8 Teams)</option>
               <option value={3}>3 Brackets (A, B, C - 12 Teams)</option>
               <option value={4}>4 Brackets (A, B, C, D - 16 Teams)</option>
@@ -1107,15 +1147,31 @@ export function BracketDraw({
               <option value={8}>8 Brackets (A to H - 32 Teams)</option>
               <option value={12}>12 Brackets (A to L - 48 Teams)</option>
             </select>
-            {teams.length < maxCapacity && (
+            <div className="flex flex-wrap items-center gap-2 mt-1">
+              {teams.length < maxCapacity && (
+                <button
+                  type="button"
+                  onClick={handleQuickPopulate}
+                  disabled={isAnimating}
+                  className="text-[0.65rem] text-pickle hover:text-foreground font-semibold uppercase tracking-wider underline cursor-pointer"
+                >
+                  + Auto-Populate {maxCapacity} Teams ({targetBrackets} Brackets)
+                </button>
+              )}
               <button
                 type="button"
-                onClick={handleQuickPopulate}
+                onClick={handlePopulate3Teams}
                 disabled={isAnimating}
-                className="self-start text-[0.65rem] text-pickle hover:text-foreground font-semibold uppercase tracking-wider underline cursor-pointer mt-1"
+                className="text-[0.65rem] text-sand/90 hover:text-pickle bg-charcoal border border-border px-2 py-0.5 rounded font-semibold uppercase tracking-wider cursor-pointer"
+                title="Populate 3 pairs into a single pool to test 3-pair round robin"
               >
-                + Auto-Populate {maxCapacity} Teams ({targetBrackets} Brackets)
+                + 3 Pairs (Round Robin Mode)
               </button>
+            </div>
+            {numBrackets === 1 && (
+              <div className="mt-2 p-2 bg-pickle/15 border border-pickle/40 rounded text-[0.7rem] text-foreground font-medium">
+                3-Pair Round Robin Mode: All 3 pairs play each other. Standings by point differential determine the Champion directly.
+              </div>
             )}
           </div>
         </div>

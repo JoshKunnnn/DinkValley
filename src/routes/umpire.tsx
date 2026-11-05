@@ -1554,20 +1554,21 @@ function CourtDiagramView({
 
     return (
       <div
-        key={`${player.name}-${player.base}-${player.isServing ? "srv" : "nosrv"}`}
-        className={`relative inline-flex items-center gap-1.5 px-2.5 py-1 sm:px-3 sm:py-1.5 rounded-full font-bold text-xs sm:text-sm max-w-[95%] transition-all duration-300 animate-in fade-in zoom-in-95 ${isReceiver
+        key={`${player.name}-${player.base}-${player.isServing ? "srv" : player.isReceiver ? "rcv" : "idle"}`}
+        className={`relative inline-flex items-center gap-1.5 px-2.5 py-1 sm:px-3 sm:py-1.5 rounded-full font-bold text-xs sm:text-sm max-w-[95%] transition-all duration-300 animate-in fade-in zoom-in-95 ${
+          isServing
             ? "border-2 border-dashed border-amber-300 ring-2 ring-amber-400/40 text-sand shadow-md"
-            : isServing
+            : isReceiver
               ? "ring-2 ring-sand/80 shadow-md text-sand"
               : "text-sand border border-sand/30"
-          } ${teamLetter === "A" ? "bg-pickle" : "bg-brick"}`}
-        title={`${player.name} (Base ${player.base})`}
+        } ${teamLetter === "A" ? "bg-pickle" : "bg-brick"}`}
+        title={`${player.name} (Base ${player.base})${isServing ? " - Active Server" : isReceiver ? " - Active Receiver" : ""}`}
       >
-        {/* Ball marker on active server */}
-        {isServing && (
+        {/* Dot marker on active receiver */}
+        {isReceiver && (
           <span
             className="w-3.5 h-3.5 sm:w-4 sm:h-4 rounded-full bg-sand text-charcoal flex items-center justify-center flex-shrink-0 shadow-xs border border-charcoal/30"
-            title="Active Server"
+            title="Active Receiver"
           >
             <span className="w-2 h-2 rounded-full bg-pickle inline-block" />
           </span>
@@ -1602,7 +1603,7 @@ function CourtDiagramView({
                   <span className="px-1 py-0.2 text-[0.55rem] sm:text-[0.6rem] font-mono font-bold uppercase tracking-wider bg-pickle text-sand rounded flex-shrink-0">
                     Srv
                   </span>
-                  <span className="w-1.5 h-1.5 rounded-full bg-pickle inline-block flex-shrink-0" />
+                  <span className="w-2 h-2 rounded-full border border-dashed border-amber-400 inline-block flex-shrink-0" />
                   <span className="font-bold text-foreground text-xs sm:text-sm truncate">
                     {serverInfo.name}
                   </span>
@@ -1622,7 +1623,9 @@ function CourtDiagramView({
                   <span className="px-1 py-0.2 text-[0.55rem] sm:text-[0.6rem] font-mono font-bold uppercase tracking-wider bg-charcoal text-sand rounded border border-border flex-shrink-0">
                     Rec
                   </span>
-                  <span className="w-1.5 h-1.5 rounded-full border border-dashed border-amber-400 inline-block flex-shrink-0" />
+                  <span className="w-2 h-2 rounded-full bg-sand flex items-center justify-center inline-flex flex-shrink-0 border border-charcoal/30">
+                    <span className="w-1 h-1 rounded-full bg-pickle inline-block" />
+                  </span>
                   <span className="font-bold text-foreground text-xs sm:text-sm truncate">
                     {receiverInfo.name}
                   </span>

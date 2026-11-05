@@ -630,6 +630,22 @@ export function DrawsManager({
   const [stageView, setStageView] = useState<"round_robin" | "main_draw">("round_robin");
   const [syncNotice, setSyncNotice] = useState<string | null>(null);
 
+  const [threePairFormat, setThreePairFormat] = useState<"round_robin_direct" | "knockout_bracket">(() => {
+    if (typeof localStorage !== "undefined") {
+      const saved = localStorage.getItem(`dv_3pair_format_${tournamentSlug}_${categoryId}`);
+      if (saved === "knockout_bracket" || saved === "round_robin_direct") return saved;
+    }
+    return "round_robin_direct";
+  });
+
+  const handleToggleThreePairFormat = (fmt: "round_robin_direct" | "knockout_bracket") => {
+    setThreePairFormat(fmt);
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(`dv_3pair_format_${tournamentSlug}_${categoryId}`, fmt);
+    }
+    window.dispatchEvent(new Event("dv_drawn_groups_updated"));
+  };
+
   // Initialize groups directly from Bracket Draw (MAIN) and sync with live scores
   const initializeGroupsFromDrawn = useCallback((): BracketGroup[] => {
     const drawn = getDrawnGroups(tournamentSlug, categoryId);
@@ -885,6 +901,45 @@ export function DrawsManager({
   ───────────────────────────────────────────────────────────── */
   const qualifiers = useMemo((): Qualifier[] => {
     const rawQualifiers: Omit<Qualifier, "overallSeed">[] = [];
+
+    // Special case for single-bracket round robin (e.g. 3 pairs in 1 pool)
+    const firstStanding = allStandings[0];
+    if (allStandings.length === 1 && firstStanding && firstStanding.rows.length <= 4) {
+      const b = firstStanding;
+      const letter = b.name.replace("Bracket ", "").trim();
+      b.rows.forEach((row) => {
+        rawQualifiers.push({
+          team: row.team,
+          bracketLetter: letter,
+          bracketName: b.name,
+          bracketRank: row.rank,
+          bracketSeed: `${letter}${row.rank}`,
+          won: row.won,
+          lost: row.lost,
+          played: row.played,
+          pointsFor: row.pointsFor,
+          pointsAgainst: row.pointsAgainst,
+          pointDiff: row.pointDiff,
+        });
+      });
+
+      const compareByPointDiff = (a: Omit<Qualifier, "overallSeed">, b: Omit<Qualifier, "overallSeed">) => {
+        return (
+          b.won - a.won ||
+          b.pointDiff - a.pointDiff ||
+          b.pointsFor - a.pointsFor ||
+          a.pointsAgainst - b.pointsAgainst
+        );
+      };
+
+      rawQualifiers.sort(compareByPointDiff);
+
+      let seedCounter = 1;
+      return rawQualifiers.map((q) => ({
+        ...q,
+        overallSeed: seedCounter++,
+      }));
+    }
 
     allStandings.forEach((b) => {
       const letter = b.name.replace("Bracket ", "").trim();
@@ -1463,6 +1518,10 @@ export function DrawsManager({
     0,
   );
   const isRoundRobinFinished = totalMatchesCount > 0 && completedMatchesCount === totalMatchesCount;
+  const isSingle3PairPool = brackets.length === 1 && Boolean(brackets[0]?.teams && brackets[0].teams.length === 3);
+  const q0 = qualifiers[0];
+  const q1 = qualifiers[1];
+  const q2 = qualifiers[2];
 
   return (
     <div className="space-y-8 max-w-6xl pb-16">
@@ -1621,15 +1680,57 @@ export function DrawsManager({
               {/* Status banner */}
               <div className="surface-card flex flex-col md:flex-row items-start md:items-center justify-between gap-4 p-5 bg-card border-2 border-border border-l-4 border-l-pickle rounded-xl shadow-xs">
                 <div>
-                  <h3 className="font-display text-2xl text-foreground">
-                    Round Robin Stage ({brackets.length} Pools, {category.teams.length} Teams)
+                  <div className="flex items-center gap-2">
+                    <span className="h-2 w-2 rounded-full bg-pickle" />
+                    <span className="text-xs font-bold uppercase tracking-widest text-pickle">
+                      {isSingle3PairPool ? "3-Pair Single Pool Division" : `Round Robin Stage (${brackets.length} Pools)`}
+                    </span>
+                  </div>
+                  <h3 className="font-display text-2xl text-foreground mt-0.5">
+                    {isSingle3PairPool
+                      ? threePairFormat === "round_robin_direct"
+                        ? "Round-Robin Point Differential Mode"
+                        : "Round-Robin with Playoff Bracket"
+                      : `Round Robin Stage (${brackets.length} Pools, ${category.teams.length} Teams)`}
                   </h3>
-                  <p className="text-xs text-foreground/80 font-medium mt-0.5">
-                    Top 2 teams from each bracket qualify for the Main Draw playoffs. Standings and playoff seeds are ranked automatically by <strong>Point Differential (+/-)</strong>.
+                  <p className="text-xs text-foreground/80 font-medium mt-0.5 max-w-2xl">
+                    {isSingle3PairPool
+                      ? threePairFormat === "round_robin_direct"
+                        ? "All 3 pairs play each other. Standings decide the podium directly based on Matches Won and Point Differential (+/-). Highest / Seed 1 is crowned Champion."
+                        : "All 3 pairs play round-robin. Seed 1 advances to Final with a bye; Seed 2 and Seed 3 play a semifinal elimination match."
+                      : "Top 2 teams from each bracket qualify for the Main Draw playoffs. Standings and playoff seeds are ranked automatically by Point Differential (+/-)."}
                   </p>
+
+                  {isSingle3PairPool && (
+                    <div className="mt-3 flex items-center gap-2">
+                      <span className="text-[0.65rem] font-mono text-muted-foreground uppercase font-bold">Format:</span>
+                      <button
+                        type="button"
+                        onClick={() => handleToggleThreePairFormat("round_robin_direct")}
+                        className={`px-2.5 py-1 text-[0.65rem] font-bold uppercase tracking-wider rounded transition-colors cursor-pointer ${
+                          threePairFormat === "round_robin_direct"
+                            ? "bg-pickle text-sand border border-pickle"
+                            : "bg-charcoal text-sand/70 border border-border hover:text-sand"
+                        }`}
+                      >
+                        Round Robin Champion (Point Diff)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleToggleThreePairFormat("knockout_bracket")}
+                        className={`px-2.5 py-1 text-[0.65rem] font-bold uppercase tracking-wider rounded transition-colors cursor-pointer ${
+                          threePairFormat === "knockout_bracket"
+                            ? "bg-brick text-sand border border-brick"
+                            : "bg-charcoal text-sand/70 border border-border hover:text-sand"
+                        }`}
+                      >
+                        Playoff Bracket
+                      </button>
+                    </div>
+                  )}
                 </div>
 
-                <div className="flex items-center gap-4">
+                <div className="flex items-center gap-4 shrink-0">
                   <div className="text-right">
                     <span className="block font-display text-2xl text-foreground">
                       {completedMatchesCount} / {totalMatchesCount}
@@ -1638,21 +1739,62 @@ export function DrawsManager({
                       Matches Completed
                     </span>
                   </div>
-                  <button
-                    onClick={handleGenerateMainDraw}
-                    disabled={completedMatchesCount === 0}
-                    className={`px-5 py-2.5 text-xs font-bold uppercase tracking-widest transition-all rounded ${
-                      isRoundRobinFinished
-                        ? "bg-pickle text-white animate-pulse hover:opacity-90 cursor-pointer shadow-lg font-bold"
-                        : completedMatchesCount > 0
-                          ? "bg-brick text-white hover:bg-brick-deep cursor-pointer font-bold"
-                          : "border-2 border-border bg-card text-foreground/40 cursor-not-allowed font-bold"
-                    }`}
-                  >
-                    Seed Main Draw &rarr;
-                  </button>
+                  {isSingle3PairPool && threePairFormat === "round_robin_direct" ? (
+                    <button
+                      onClick={() => setStageView("main_draw")}
+                      className="px-5 py-2.5 text-xs font-bold uppercase tracking-widest bg-pickle text-white hover:opacity-90 cursor-pointer shadow-lg rounded transition-opacity"
+                    >
+                      View Champion &rarr;
+                    </button>
+                  ) : (
+                    <button
+                      onClick={handleGenerateMainDraw}
+                      disabled={completedMatchesCount === 0}
+                      className={`px-5 py-2.5 text-xs font-bold uppercase tracking-widest transition-all rounded ${
+                        isRoundRobinFinished
+                          ? "bg-pickle text-white animate-pulse hover:opacity-90 cursor-pointer shadow-lg font-bold"
+                          : completedMatchesCount > 0
+                            ? "bg-brick text-white hover:bg-brick-deep cursor-pointer font-bold"
+                            : "border-2 border-border bg-card text-foreground/40 cursor-not-allowed font-bold"
+                      }`}
+                    >
+                      Seed Main Draw &rarr;
+                    </button>
+                  )}
                 </div>
               </div>
+
+              {/* Champion Podium Banner for 3-pair round-robin direct champion mode */}
+              {isSingle3PairPool && threePairFormat === "round_robin_direct" && isRoundRobinFinished && q0 && q1 && q2 && (
+                <div className="surface-card p-6 bg-pickle/20 border-2 border-pickle rounded-xl text-center space-y-3 animate-in fade-in zoom-in duration-300">
+                  <span className="block text-xs uppercase tracking-[0.28em] font-bold text-pickle">
+                    Tournament Champion
+                  </span>
+                  <h4 className="font-display text-4xl text-foreground font-bold">
+                    {q0.team.name}
+                  </h4>
+                  <p className="text-xs text-muted-foreground">
+                    {q0.team.players.join(" & ")} &bull; Official Division Champion (Point Differential: {q0.pointDiff > 0 ? `+${q0.pointDiff}` : q0.pointDiff})
+                  </p>
+                  <div className="pt-3 grid grid-cols-1 sm:grid-cols-3 gap-2 border-t border-pickle/30 text-xs max-w-xl mx-auto">
+                    <div className="bg-amber-400/20 border border-amber-400/50 p-2.5 rounded text-center">
+                      <span className="font-mono text-[0.65rem] font-black uppercase text-amber-500 block">1st Place / Gold</span>
+                      <span className="font-bold text-foreground truncate block mt-0.5">{q0.team.name}</span>
+                      <span className="font-mono text-[0.65rem] text-muted-foreground mt-0.5 block">{q0.won}W - {q0.lost}L ({q0.pointDiff > 0 ? "+" : ""}{q0.pointDiff} diff)</span>
+                    </div>
+                    <div className="bg-slate-300/20 border border-slate-300/50 p-2.5 rounded text-center">
+                      <span className="font-mono text-[0.65rem] font-black uppercase text-slate-400 block">2nd Place / Silver</span>
+                      <span className="font-bold text-foreground truncate block mt-0.5">{q1.team.name}</span>
+                      <span className="font-mono text-[0.65rem] text-muted-foreground mt-0.5 block">{q1.won}W - {q1.lost}L ({q1.pointDiff > 0 ? "+" : ""}{q1.pointDiff} diff)</span>
+                    </div>
+                    <div className="bg-amber-700/20 border border-amber-700/50 p-2.5 rounded text-center">
+                      <span className="font-mono text-[0.65rem] font-black uppercase text-amber-600 block">3rd Place / Bronze</span>
+                      <span className="font-bold text-foreground truncate block mt-0.5">{q2.team.name}</span>
+                      <span className="font-mono text-[0.65rem] text-muted-foreground mt-0.5 block">{q2.won}W - {q2.lost}L ({q2.pointDiff > 0 ? "+" : ""}{q2.pointDiff} diff)</span>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* Bracket cards grid */}
               <div className="grid gap-8 lg:grid-cols-2">
@@ -1796,13 +1938,27 @@ export function DrawsManager({
                                     </div>
                                   </div>
                                 </div>
-                                <span className={`text-[0.62rem] font-bold uppercase tracking-wider px-2 py-0.5 rounded shrink-0 ${
-                                  row.isQualified
-                                    ? "bg-pickle text-sand font-black"
-                                    : "text-muted-foreground border border-border/60"
-                                }`}>
-                                  {row.isQualified ? "Advances" : `Rank ${row.rank}`}
-                                </span>
+                                {isSingle3PairPool && threePairFormat === "round_robin_direct" ? (
+                                  <span className={`text-[0.62rem] font-bold uppercase tracking-wider px-2 py-0.5 rounded shrink-0 ${
+                                    row.rank === 1
+                                      ? "bg-amber-400 text-charcoal font-black"
+                                      : row.rank === 2
+                                        ? "bg-slate-300 text-charcoal font-black"
+                                        : "bg-amber-700 text-sand font-black"
+                                  }`}>
+                                    {isRoundRobinFinished
+                                      ? row.rank === 1 ? "Champion (Gold)" : row.rank === 2 ? "Runner-Up (Silver)" : "3rd Place (Bronze)"
+                                      : row.rank === 1 ? "Current Leader (#1)" : `Rank ${row.rank}`}
+                                  </span>
+                                ) : (
+                                  <span className={`text-[0.62rem] font-bold uppercase tracking-wider px-2 py-0.5 rounded shrink-0 ${
+                                    row.isQualified
+                                      ? "bg-pickle text-sand font-black"
+                                      : "text-muted-foreground border border-border/60"
+                                  }`}>
+                                    {row.isQualified ? "Advances" : `Rank ${row.rank}`}
+                                  </span>
+                                )}
                               </div>
 
                               {/* Stats Row */}
@@ -2211,8 +2367,57 @@ export function DrawsManager({
                 </div>
               </div>
 
-              {/* ── Main Draw Knockout Tree ── */}
-              {!mainDrawGenerated || mainDrawMatches.length === 0 ? (
+              {/* ── Main Draw Knockout Tree / 3-Pair Round Robin Champion ── */}
+              {isSingle3PairPool && threePairFormat === "round_robin_direct" ? (
+                <div className="surface-card p-8 border-2 border-pickle/60 bg-pickle/10 rounded-xl space-y-4 text-center">
+                  <span className="text-xs uppercase tracking-[0.28em] font-bold text-pickle block">
+                    Round-Robin Direct Champion Format
+                  </span>
+                  <h4 className="font-display text-3xl sm:text-4xl text-foreground">
+                    {isRoundRobinFinished && q0
+                      ? `Champion: ${q0.team.name}`
+                      : "Standings Determine The Champion"}
+                  </h4>
+                  <p className="text-sm text-foreground/80 max-w-lg mx-auto">
+                    {isRoundRobinFinished
+                      ? "All 3 round-robin matches are completed. The highest-ranked team by point differential has been crowned the Official Division Champion."
+                      : "Matches are currently in progress. The team with the highest record and point differential will be crowned Champion directly."}
+                  </p>
+                  {isRoundRobinFinished && q0 && q1 && q2 && (
+                    <div className="pt-2 grid grid-cols-1 sm:grid-cols-3 gap-3 max-w-lg mx-auto text-left">
+                      <div className="p-3 bg-amber-400/20 border border-amber-400/50 rounded text-center">
+                        <span className="text-[0.65rem] font-black uppercase text-amber-500 block">Gold / Champion</span>
+                        <span className="font-bold text-foreground truncate block mt-0.5">{q0.team.name}</span>
+                        <span className="text-xs font-mono text-muted-foreground">{q0.won}W - {q0.lost}L ({q0.pointDiff > 0 ? "+" : ""}{q0.pointDiff})</span>
+                      </div>
+                      <div className="p-3 bg-slate-300/20 border border-slate-300/50 rounded text-center">
+                        <span className="text-[0.65rem] font-black uppercase text-slate-400 block">Silver / Runner-Up</span>
+                        <span className="font-bold text-foreground truncate block mt-0.5">{q1.team.name}</span>
+                        <span className="text-xs font-mono text-muted-foreground">{q1.won}W - {q1.lost}L ({q1.pointDiff > 0 ? "+" : ""}{q1.pointDiff})</span>
+                      </div>
+                      <div className="p-3 bg-amber-700/20 border border-amber-700/50 rounded text-center">
+                        <span className="text-[0.65rem] font-black uppercase text-amber-600 block">Bronze / 3rd Place</span>
+                        <span className="font-bold text-foreground truncate block mt-0.5">{q2.team.name}</span>
+                        <span className="text-xs font-mono text-muted-foreground">{q2.won}W - {q2.lost}L ({q2.pointDiff > 0 ? "+" : ""}{q2.pointDiff})</span>
+                      </div>
+                    </div>
+                  )}
+                  <div className="pt-4 flex items-center justify-center gap-3">
+                    <button
+                      onClick={() => setStageView("round_robin")}
+                      className="bg-pickle px-5 py-2 text-xs font-bold uppercase tracking-widest text-sand hover:opacity-90 transition-opacity cursor-pointer shadow-md rounded"
+                    >
+                      &larr; View Round-Robin Standings
+                    </button>
+                    <button
+                      onClick={() => handleToggleThreePairFormat("knockout_bracket")}
+                      className="border border-border bg-charcoal px-4 py-2 text-xs font-bold uppercase tracking-widest text-sand hover:border-pickle hover:text-pickle transition-colors cursor-pointer rounded"
+                    >
+                      Switch to Playoff Bracket
+                    </button>
+                  </div>
+                </div>
+              ) : !mainDrawGenerated || mainDrawMatches.length === 0 ? (
                 <div className="surface-card p-12 text-center space-y-4 border border-border">
                   <span className="text-xs uppercase tracking-[0.28em] font-bold text-pickle block">
                     Playoff Bracket

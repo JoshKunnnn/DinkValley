@@ -589,7 +589,22 @@ export function SimpleBracketView({
       ) : (
         /* ── ROUND-ROBIN GROUP VIEW ── */
         <div className="space-y-5">
-          {/* Standings Summary Box with 'Top 2 Advance' Badges */}
+          {/* Champion Crown Banner if 3-pair round-robin concluded */}
+          {groups.length === 1 && standings.length === 3 && isBracketDone && standings[0] && (
+            <div className="surface-card p-6 border-2 border-pickle bg-pickle/15 rounded-2xl text-center space-y-1 shadow-md mb-4 animate-in fade-in zoom-in duration-300">
+              <span className="text-xs font-bold uppercase tracking-[0.24em] text-pickle block">
+                Tournament Champion
+              </span>
+              <h4 className="text-3xl sm:text-4xl font-display text-foreground font-bold">
+                {standings[0].name}
+              </h4>
+              <p className="text-xs sm:text-sm text-foreground/75">
+                Official {category.label} Division Champions &middot; Decided by Point Differential ({standings[0].pd > 0 ? `+${standings[0].pd}` : standings[0].pd})
+              </p>
+            </div>
+          )}
+
+          {/* Standings Summary Box */}
           {standings.length > 0 && (
             <div className="surface-card p-4 sm:p-5 border-2 border-border rounded-2xl">
               <div className="flex items-center justify-between pb-3 border-b border-border">
@@ -598,9 +613,13 @@ export function SimpleBracketView({
                     {currentSection.title} Standings
                   </h4>
                   <p className="text-xs text-foreground/70 mt-0.5">
-                    {isBracketDone
-                      ? "Group play concluded. Top 2 teams advance to Championship Finals."
-                      : "Top 2 teams advance once all group matches conclude."}
+                    {groups.length === 1 && standings.length === 3
+                      ? isBracketDone
+                        ? "Round-robin concluded. Official Champion determined by Point Differential (+/-)."
+                        : "3-pair round-robin. All pairs play each other; Highest seed by point differential will be the Champion."
+                      : isBracketDone
+                        ? "Group play concluded. Top 2 teams advance to Championship Finals."
+                        : "Top 2 teams advance once all group matches conclude."}
                   </p>
                 </div>
                 <div className="flex items-center gap-3 sm:gap-4 text-xs uppercase tracking-wider font-mono text-muted-foreground shrink-0">
@@ -636,10 +655,24 @@ export function SimpleBracketView({
                             <span className="font-semibold text-foreground truncate block">
                               {team.name}
                             </span>
-                            {isAdvancing && (
-                              <span className="text-[0.65rem] font-mono px-1.5 py-0.5 rounded bg-pickle/20 text-pickle border border-pickle/30 font-bold shrink-0">
-                                Seed {rank + 1}
+                            {groups.length === 1 && standings.length === 3 ? (
+                              <span className={`text-[0.65rem] font-mono px-2 py-0.5 rounded font-bold shrink-0 ${
+                                rank === 0
+                                  ? "bg-amber-400 text-charcoal font-black"
+                                  : rank === 1
+                                    ? "bg-slate-300 text-charcoal font-black"
+                                    : "bg-amber-700 text-sand font-black"
+                              }`}>
+                                {isBracketDone
+                                  ? rank === 0 ? "Champion (Gold)" : rank === 1 ? "Runner-Up (Silver)" : "3rd Place (Bronze)"
+                                  : rank === 0 ? "Current Leader (#1)" : `Rank ${rank + 1}`}
                               </span>
+                            ) : (
+                              isAdvancing && (
+                                <span className="text-[0.65rem] font-mono px-1.5 py-0.5 rounded bg-pickle/20 text-pickle border border-pickle/30 font-bold shrink-0">
+                                  Seed {rank + 1}
+                                </span>
+                              )
                             )}
                           </div>
                           {((team.players && team.players.length > 0) || team.club) && (
