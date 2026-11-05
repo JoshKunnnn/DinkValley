@@ -41,3 +41,9 @@ supabase/.temp/
 *.sw?
 __pycache__/
 *.py[cod]
+
+# Scratch and documents
+*.docx
+.agents/*.txt
+.agents/*.ps1
+

@@ -9,11 +9,10 @@
 
 import {
   Swords,
-  Trophy,
   LogOut,
 } from "lucide-react";
 
-type UmpireTab = "console" | "results" | "scoreboard" | "desk";
+type UmpireTab = "console" | "scoreboard" | "desk";
 
 interface UmpireMobileNavProps {
   activeTab: UmpireTab;
@@ -28,7 +27,6 @@ const UMPIRE_TABS: {
   icon: React.ElementType;
 }[] = [
   { key: "console", label: "Courts", icon: Swords },
-  { key: "results", label: "Results", icon: Trophy },
 ];
 
 export function UmpireMobileNav({
@@ -51,7 +49,7 @@ export function UmpireMobileNav({
           relative
           bg-charcoal/96 backdrop-blur-md
           border-t border-white/10
-          grid grid-cols-3
+          grid grid-cols-2
           pb-[env(safe-area-inset-bottom,0.75rem)]
         "
         style={{ boxShadow: "0 -4px 24px rgba(0,0,0,0.5)" }}

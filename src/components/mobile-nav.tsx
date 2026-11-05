@@ -24,7 +24,7 @@ export function MobileNav() {
 
   // Hide on admin / umpire routes — staff have their own full bottom nav
   const isConsole =
-    pathname.startsWith("/admin") || pathname.startsWith("/umpire");
+    pathname.startsWith("/admin") || pathname.startsWith("/umpire") || pathname.startsWith("/monitor");
 
   useEffect(() => {
     const checkAuth = () => {

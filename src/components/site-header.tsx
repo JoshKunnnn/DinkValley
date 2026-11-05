@@ -1,12 +1,15 @@
 import { Link, useRouterState } from "@tanstack/react-router";
 import { useState, useEffect, useRef } from "react";
-import { Download } from "lucide-react";
+import { Download, Monitor } from "lucide-react";
 import { getAuthenticatedStaff, logoutStaff, type StaffRole } from "@/lib/auth-store";
 import { StaffPortalModal } from "./admin/StaffPortalModal";
 import { triggerPwaInstall } from "./PwaInstallPrompt";
 import { TextSizeToggle } from "./public/TextSizeToggle";
 
 export function SiteHeader() {
+  const pathname = useRouterState({
+    select: (s) => s.location.pathname,
+  });
   const [authRole, setAuthRole] = useState<StaffRole | null>(null);
   const [userName, setUserName] = useState<string | null>(null);
   const [showStaffModal, setShowStaffModal] = useState(false);
@@ -69,6 +72,10 @@ export function SiteHeader() {
     }, 1800);
   };
 
+  if (pathname.startsWith("/monitor")) {
+    return null;
+  }
+
   return (
     <>
       <header className="sticky top-0 z-50 border-b border-border bg-charcoal/95 backdrop-blur">
@@ -96,6 +103,16 @@ export function SiteHeader() {
           <div className="flex items-center gap-2">
             <TextSizeToggle />
 
+            {/* Mobile Big Monitor Quick Launch */}
+            <Link
+              to="/monitor"
+              className="flex sm:hidden items-center gap-1 rounded border border-pickle/50 bg-pickle/15 px-2 py-1 text-[0.65rem] font-bold uppercase tracking-wider text-pickle hover:bg-pickle hover:text-charcoal transition-colors"
+              title="Open Public Big-Screen Arena Monitor"
+            >
+              <Monitor size={12} />
+              <span>TV</span>
+            </Link>
+
             {/* Desktop nav - Cleaned of public admin/register buttons */}
             <nav className="hidden items-center gap-3 text-sm font-semibold uppercase tracking-wide sm:flex">
               <Link
@@ -105,6 +122,15 @@ export function SiteHeader() {
                 activeProps={{ className: "text-sand font-bold" }}
               >
                 Tournaments
+              </Link>
+
+              <Link
+                to="/monitor"
+                className="flex items-center gap-1.5 rounded border border-pickle/50 bg-pickle/15 px-3 py-1.5 text-xs font-bold uppercase tracking-wider text-pickle hover:bg-pickle hover:text-charcoal transition-colors"
+                title="Open Public Big-Screen Arena Monitor (TV Display)"
+              >
+                <Monitor size={13} />
+                <span>Live Monitor</span>
               </Link>
 
               <button
@@ -174,6 +200,10 @@ export function SiteFooter() {
     select: (s) => s.location.pathname,
   });
   const isConsole = pathname.startsWith("/admin") || pathname.startsWith("/umpire");
+
+  if (pathname.startsWith("/monitor")) {
+    return null;
+  }
 
   return (
     <footer

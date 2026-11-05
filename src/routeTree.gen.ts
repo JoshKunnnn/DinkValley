@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AdminRouteImport } from './routes/admin'
 import { Route as LoginRouteImport } from './routes/login'
+import { Route as MonitorRouteImport } from './routes/monitor'
 import { Route as RegisterRouteImport } from './routes/register'
 import { Route as UmpireRouteImport } from './routes/umpire'
 import { Route as TournamentsSlugRouteImport } from './routes/tournaments.$slug'
@@ -29,6 +30,11 @@ const AdminRoute = AdminRouteImport.update({
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
   path: '/login',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const MonitorRoute = MonitorRouteImport.update({
+  id: '/monitor',
+  path: '/monitor',
   getParentRoute: () => rootRouteImport,
 } as any)
 const RegisterRoute = RegisterRouteImport.update({
@@ -51,6 +57,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
   '/login': typeof LoginRoute
+  '/monitor': typeof MonitorRoute
   '/register': typeof RegisterRoute
   '/umpire': typeof UmpireRoute
   '/tournaments/$slug': typeof TournamentsSlugRoute
@@ -59,6 +66,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
   '/login': typeof LoginRoute
+  '/monitor': typeof MonitorRoute
   '/register': typeof RegisterRoute
   '/umpire': typeof UmpireRoute
   '/tournaments/$slug': typeof TournamentsSlugRoute
@@ -68,6 +76,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
   '/login': typeof LoginRoute
+  '/monitor': typeof MonitorRoute
   '/register': typeof RegisterRoute
   '/umpire': typeof UmpireRoute
   '/tournaments/$slug': typeof TournamentsSlugRoute
@@ -75,14 +84,28 @@ export interface FileRoutesById {
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
-    '/' | '/admin' | '/login' | '/register' | '/umpire' | '/tournaments/$slug'
+    | '/'
+    | '/admin'
+    | '/login'
+    | '/monitor'
+    | '/register'
+    | '/umpire'
+    | '/tournaments/$slug'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/admin' | '/login' | '/register' | '/umpire' | '/tournaments/$slug'
+  to:
+    | '/'
+    | '/admin'
+    | '/login'
+    | '/monitor'
+    | '/register'
+    | '/umpire'
+    | '/tournaments/$slug'
   id:
     | '__root__'
     | '/'
     | '/admin'
     | '/login'
+    | '/monitor'
     | '/register'
     | '/umpire'
     | '/tournaments/$slug'
@@ -92,6 +115,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AdminRoute: typeof AdminRoute
   LoginRoute: typeof LoginRoute
+  MonitorRoute: typeof MonitorRoute
   RegisterRoute: typeof RegisterRoute
   UmpireRoute: typeof UmpireRoute
   TournamentsSlugRoute: typeof TournamentsSlugRoute
@@ -118,6 +142,13 @@ declare module '@tanstack/react-router' {
       path: '/login'
       fullPath: '/login'
       preLoaderRoute: typeof LoginRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/monitor': {
+      id: '/monitor'
+      path: '/monitor'
+      fullPath: '/monitor'
+      preLoaderRoute: typeof MonitorRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/register': {
@@ -148,6 +179,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AdminRoute: AdminRoute,
   LoginRoute: LoginRoute,
+  MonitorRoute: MonitorRoute,
   RegisterRoute: RegisterRoute,
   UmpireRoute: UmpireRoute,
   TournamentsSlugRoute: TournamentsSlugRoute,

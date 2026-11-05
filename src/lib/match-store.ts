@@ -64,6 +64,8 @@ export type LiveMatch = {
   tossWinner?: string | undefined;
   teamABase1Player?: string | undefined;
   teamBBase1Player?: string | undefined;
+  teamASide?: "left" | "right" | undefined;
+  courtPositionUpdatedAt?: number | undefined;
   resetAt?: number | undefined;
 };
 
@@ -583,6 +585,8 @@ function mergeMatchesSafely(cloudMatches: LiveMatch[], localMatches: LiveMatch[]
         tossWinner: lm.tossWinner,
         teamABase1Player: lm.teamABase1Player,
         teamBBase1Player: lm.teamBBase1Player,
+        teamASide: lm.teamASide,
+        courtPositionUpdatedAt: lm.courtPositionUpdatedAt,
         resetAt: lm.resetAt,
         winnerTeam: lm.winnerTeam,
         startedAt: lm.startedAt,
@@ -691,6 +695,40 @@ function mergeMatchesSafely(cloudMatches: LiveMatch[], localMatches: LiveMatch[]
     const rawCourt = (lm.court && lm.court !== "Queue" ? lm.court : cm.court) || "Queue";
     const chosenCourt = sanitizeCourtAssignment(rawCourt, lm, chosenStatus);
 
+    // Position & Side Conflict Resolution (Base 1/2 & Left/Right ends):
+    const localPosAt = lm.courtPositionUpdatedAt ?? 0;
+    const cloudPosAt = cm.courtPositionUpdatedAt ?? 0;
+    const preferCloudPosition =
+      cloudPosAt > localPosAt ||
+      (cloudPosAt === localPosAt &&
+        !isRecentLocalMutation &&
+        Boolean(cm.teamABase1Player || cm.teamBBase1Player || cm.teamASide));
+
+    const resolvedBase1A = preferCloudPosition
+      ? (cm.teamABase1Player ?? lm.teamABase1Player)
+      : (lm.teamABase1Player ?? cm.teamABase1Player);
+    const resolvedBase1B = preferCloudPosition
+      ? (cm.teamBBase1Player ?? lm.teamBBase1Player)
+      : (lm.teamBBase1Player ?? cm.teamBBase1Player);
+    const resolvedSide = preferCloudPosition
+      ? (cm.teamASide ?? lm.teamASide)
+      : (lm.teamASide ?? cm.teamASide);
+    const resolvedTossDone = preferCloudPosition
+      ? (cm.tossDone ?? lm.tossDone)
+      : (lm.tossDone ?? cm.tossDone);
+    const resolvedTossWinner = preferCloudPosition
+      ? (cm.tossWinner ?? lm.tossWinner)
+      : (lm.tossWinner ?? cm.tossWinner);
+    const resolvedPosAt = Math.max(localPosAt, cloudPosAt) || undefined;
+
+    if (preferCloudPosition && typeof localStorage !== "undefined") {
+      try {
+        if (resolvedBase1A) localStorage.setItem(`dv_base1_A_${lm.id}`, resolvedBase1A);
+        if (resolvedBase1B) localStorage.setItem(`dv_base1_B_${lm.id}`, resolvedBase1B);
+        if (resolvedSide) localStorage.setItem(`dv_court_side_${lm.id}`, resolvedSide);
+      } catch {}
+    }
+
     return {
       ...cm,
       id: lm.id,
@@ -703,10 +741,12 @@ function mergeMatchesSafely(cloudMatches: LiveMatch[], localMatches: LiveMatch[]
       teamBPlayers: lm.teamBPlayers?.length ? lm.teamBPlayers : cm.teamBPlayers,
       teamAClub: lm.teamAClub ?? cm.teamAClub,
       teamBClub: lm.teamBClub ?? cm.teamBClub,
-      tossDone: lm.tossDone ?? cm.tossDone,
-      tossWinner: lm.tossWinner ?? cm.tossWinner,
-      teamABase1Player: lm.teamABase1Player ?? cm.teamABase1Player,
-      teamBBase1Player: lm.teamBBase1Player ?? cm.teamBBase1Player,
+      tossDone: resolvedTossDone,
+      tossWinner: resolvedTossWinner,
+      teamABase1Player: resolvedBase1A,
+      teamBBase1Player: resolvedBase1B,
+      teamASide: resolvedSide,
+      courtPositionUpdatedAt: resolvedPosAt,
       officiatedBy: cm.officiatedBy || lm.officiatedBy,
       startedAt: cm.startedAt || lm.startedAt,
     };
@@ -1100,6 +1140,200 @@ export function deriveActiveServerBase(score: LiveScore): 1 | 2 {
 }
 
 /* ─────────────────────────────────────────────
+   Canonical 2D Court Player & Base Positioning
+───────────────────────────────────────────── */
+
+export interface CourtPlayerInfo {
+  name: string;
+  base: 1 | 2;
+  isServing: boolean;
+  isReceiver: boolean;
+}
+
+export interface TeamCourtPositions {
+  right: CourtPlayerInfo;
+  left: CourtPlayerInfo;
+  isSingles: boolean;
+}
+
+/**
+ * Resolves a team's player array cleanly even when players were entered as a single
+ * slash/ampersand-separated string (e.g. ["Gary / Janis"]) or omitted with a paired teamName.
+ */
+export function resolveMatchTeamPlayers(
+  players: string[] | undefined,
+  teamName: string | undefined,
+  fallbackLabel: string,
+): string[] {
+  const cleaned = (players || []).map((p) => p.trim()).filter(Boolean);
+  if (cleaned.length >= 2) {
+    return cleaned;
+  }
+  if (cleaned.length === 1 && /\s*[\/&]\s*/.test(cleaned[0]!)) {
+    const split = cleaned[0]!.split(/\s*[\/&]\s*/).map((s) => s.trim()).filter(Boolean);
+    if (split.length >= 2) return split;
+  }
+  const cleanTeam = (teamName || "").trim();
+  if (cleaned.length <= 1 && cleanTeam && /\s*[\/&]\s*/.test(cleanTeam)) {
+    const splitTeam = cleanTeam.split(/\s*[\/&]\s*/).map((s) => s.trim()).filter(Boolean);
+    if (splitTeam.length >= 2) {
+      if (cleaned.length === 0 || cleaned[0]!.toLowerCase() === cleanTeam.toLowerCase()) {
+        return splitTeam;
+      }
+    }
+  }
+  return cleaned.length > 0 ? cleaned : [cleanTeam || fallbackLabel];
+}
+
+/**
+ * Canonical 2D court position calculator shared identically across Umpire Console,
+ * Public Big-Screen Arena Monitor (/monitor), and Public Live Courts Board.
+ */
+export function computeCourtPositions(
+  match: LiveMatch,
+): { teamA: TeamCourtPositions; teamB: TeamCourtPositions } {
+  const s = match.score;
+  const isFinal = match.status === "final";
+  const norm = (str: string) => str.trim().toLowerCase();
+
+  // Team A
+  const rawAPlayers = resolveMatchTeamPlayers(match.teamAPlayers, match.teamAName, "Player A1");
+  const isSinglesA = rawAPlayers.length === 1;
+  const localBase1A =
+    typeof localStorage !== "undefined"
+      ? localStorage.getItem(`dv_base1_A_${match.id}`)
+      : null;
+
+  let candidateA1 = match.teamABase1Player?.trim() || "";
+  if (!candidateA1 && localBase1A) {
+    const matchedLocal = rawAPlayers.find((p) => norm(p) === norm(localBase1A));
+    if (matchedLocal) candidateA1 = matchedLocal;
+  }
+  const aBase1 =
+    (candidateA1 && (rawAPlayers.find((p) => norm(p) === norm(candidateA1)) || candidateA1)) ||
+    rawAPlayers[0] ||
+    "Player A1";
+  const aBase2 =
+    rawAPlayers.find((p) => norm(p) !== norm(aBase1)) || rawAPlayers[1] || aBase1;
+  const teamAScoreEven = s.teamAScore % 2 === 0;
+
+  // Team B
+  const rawBPlayers = resolveMatchTeamPlayers(match.teamBPlayers, match.teamBName, "Player B1");
+  const isSinglesB = rawBPlayers.length === 1;
+  const localBase1B =
+    typeof localStorage !== "undefined"
+      ? localStorage.getItem(`dv_base1_B_${match.id}`)
+      : null;
+
+  let candidateB1 = match.teamBBase1Player?.trim() || "";
+  if (!candidateB1 && localBase1B) {
+    const matchedLocal = rawBPlayers.find((p) => norm(p) === norm(localBase1B));
+    if (matchedLocal) candidateB1 = matchedLocal;
+  }
+  const bBase1 =
+    (candidateB1 && (rawBPlayers.find((p) => norm(p) === norm(candidateB1)) || candidateB1)) ||
+    rawBPlayers[0] ||
+    "Player B1";
+  const bBase2 =
+    rawBPlayers.find((p) => norm(p) !== norm(bBase1)) || rawBPlayers[1] || bBase1;
+  const teamBScoreEven = s.teamBScore % 2 === 0;
+
+  if (isSinglesA && isSinglesB) {
+    const aOnRight = teamAScoreEven;
+    const bOnRight = teamBScoreEven;
+    const singlesServingCourt: "right" | "left" =
+      s.servingTeam === "A"
+        ? (teamAScoreEven ? "right" : "left")
+        : (teamBScoreEven ? "right" : "left");
+    return {
+      teamA: {
+        isSingles: true,
+        right: {
+          name: aOnRight ? aBase1 : "-",
+          base: 1,
+          isServing: !isFinal && s.servingTeam === "A" && aOnRight,
+          isReceiver: !isFinal && s.servingTeam === "B" && singlesServingCourt === "right",
+        },
+        left: {
+          name: !aOnRight ? aBase1 : "-",
+          base: 1,
+          isServing: !isFinal && s.servingTeam === "A" && !aOnRight,
+          isReceiver: !isFinal && s.servingTeam === "B" && singlesServingCourt === "left",
+        },
+      },
+      teamB: {
+        isSingles: true,
+        right: {
+          name: bOnRight ? bBase1 : "-",
+          base: 1,
+          isServing: !isFinal && s.servingTeam === "B" && bOnRight,
+          isReceiver: !isFinal && s.servingTeam === "A" && singlesServingCourt === "right",
+        },
+        left: {
+          name: !bOnRight ? bBase1 : "-",
+          base: 1,
+          isServing: !isFinal && s.servingTeam === "B" && !bOnRight,
+          isReceiver: !isFinal && s.servingTeam === "A" && singlesServingCourt === "left",
+        },
+      },
+    };
+  }
+
+  // Doubles positioning:
+  // Score EVEN -> Base 1 on Right court, Base 2 on Left court.
+  // Score ODD  -> Base 2 on Right court, Base 1 on Left court.
+  const aRightPlayerName = teamAScoreEven ? aBase1 : aBase2;
+  const aRightBase: 1 | 2 = teamAScoreEven ? 1 : 2;
+  const aLeftPlayerName = teamAScoreEven ? aBase2 : aBase1;
+  const aLeftBase: 1 | 2 = teamAScoreEven ? 2 : 1;
+
+  const bRightPlayerName = teamBScoreEven ? bBase1 : bBase2;
+  const bRightBase: 1 | 2 = teamBScoreEven ? 1 : 2;
+  const bLeftPlayerName = teamBScoreEven ? bBase2 : bBase1;
+  const bLeftBase: 1 | 2 = teamBScoreEven ? 2 : 1;
+
+  const activeServerBase: 1 | 2 = deriveActiveServerBase(s);
+
+  const servingCourt: "right" | "left" =
+    s.servingTeam === "A"
+      ? (aRightBase === activeServerBase ? "right" : "left")
+      : (bRightBase === activeServerBase ? "right" : "left");
+
+  return {
+    teamA: {
+      isSingles: false,
+      right: {
+        name: aRightPlayerName,
+        base: aRightBase,
+        isServing: !isFinal && s.servingTeam === "A" && aRightBase === activeServerBase,
+        isReceiver: !isFinal && s.servingTeam === "B" && servingCourt === "right",
+      },
+      left: {
+        name: aLeftPlayerName,
+        base: aLeftBase,
+        isServing: !isFinal && s.servingTeam === "A" && aLeftBase === activeServerBase,
+        isReceiver: !isFinal && s.servingTeam === "B" && servingCourt === "left",
+      },
+    },
+    teamB: {
+      isSingles: false,
+      right: {
+        name: bRightPlayerName,
+        base: bRightBase,
+        isServing: !isFinal && s.servingTeam === "B" && bRightBase === activeServerBase,
+        isReceiver: !isFinal && s.servingTeam === "A" && servingCourt === "right",
+      },
+      left: {
+        name: bLeftPlayerName,
+        base: bLeftBase,
+        isServing: !isFinal && s.servingTeam === "B" && bLeftBase === activeServerBase,
+        isReceiver: !isFinal && s.servingTeam === "A" && servingCourt === "left",
+      },
+    },
+  };
+}
+
+/* ─────────────────────────────────────────────
    Scoring engine -- side-out pickleball rules
 ───────────────────────────────────────────── */
 
@@ -1306,6 +1540,8 @@ export function resetMatch(match: LiveMatch): LiveMatch {
     tossWinner: undefined,
     teamABase1Player: undefined,
     teamBBase1Player: undefined,
+    teamASide: undefined,
+    courtPositionUpdatedAt: Date.now(),
     resetAt: Date.now(),
   };
 }

@@ -15,6 +15,10 @@ import {
   deriveActiveServerBase,
   isMatchMatchingStation,
   getLocalMatchMutationAt,
+  computeCourtPositions,
+  resolveMatchTeamPlayers,
+  type TeamCourtPositions,
+  type CourtPlayerInfo,
   type LiveMatch,
 } from "@/lib/match-store";
 import {
@@ -60,31 +64,171 @@ export const Route = createFileRoute("/umpire")({
   component: Umpire,
 });
 
-type UmpireTab = "console" | "results" | "scoreboard" | "desk";
+type UmpireTab = "console" | "scoreboard" | "desk";
 
 let _lastHapticTime = 0;
-let _lastHapticWasPriority = false;
+let _iosSwitchLabel: HTMLLabelElement | null = null;
+let _iosSwitchInput: HTMLInputElement | null = null;
+let _hapticAudioCtx: AudioContext | null = null;
+
+function isIosDevice(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent || "";
+  const isApple = /iPad|iPhone|iPod/.test(ua);
+  const isIpadOS = navigator.platform === "MacIntel" && (navigator.maxTouchPoints || 0) > 1;
+  return isApple || isIpadOS;
+}
+
+export function ensureIosSwitch(): HTMLLabelElement | null {
+  if (typeof document === "undefined") return null;
+  if (_iosSwitchLabel && document.body.contains(_iosSwitchLabel)) {
+    return _iosSwitchLabel;
+  }
+  try {
+    let input = document.getElementById("dv-ios-haptic-switch") as HTMLInputElement | null;
+    let label = document.getElementById("dv-ios-haptic-label") as HTMLLabelElement | null;
+
+    if (!input) {
+      input = document.createElement("input");
+      input.type = "checkbox";
+      input.id = "dv-ios-haptic-switch";
+      input.setAttribute("switch", "");
+      input.style.position = "fixed";
+      input.style.top = "-9999px";
+      input.style.left = "-9999px";
+      input.style.opacity = "0.01";
+      input.style.pointerEvents = "none";
+      input.style.width = "1px";
+      input.style.height = "1px";
+      input.tabIndex = -1;
+      input.setAttribute("aria-hidden", "true");
+      document.body.appendChild(input);
+    }
+
+    if (!label) {
+      label = document.createElement("label");
+      label.id = "dv-ios-haptic-label";
+      label.htmlFor = "dv-ios-haptic-switch";
+      label.style.position = "fixed";
+      label.style.top = "-9999px";
+      label.style.left = "-9999px";
+      label.style.opacity = "0.01";
+      label.style.pointerEvents = "none";
+      label.style.width = "1px";
+      label.style.height = "1px";
+      label.setAttribute("aria-hidden", "true");
+      document.body.appendChild(label);
+    }
+
+    _iosSwitchInput = input;
+    _iosSwitchLabel = label;
+    return label;
+  } catch {
+    return null;
+  }
+}
+
+function playMicroTick(): void {
+  try {
+    const AudioContextClass =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    if (!AudioContextClass) return;
+    if (!_hapticAudioCtx) {
+      _hapticAudioCtx = new AudioContextClass();
+    }
+    if (_hapticAudioCtx.state === "suspended") {
+      _hapticAudioCtx.resume().catch(() => {});
+    }
+    const now = _hapticAudioCtx.currentTime;
+    const osc = _hapticAudioCtx.createOscillator();
+    const gain = _hapticAudioCtx.createGain();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(130, now);
+    osc.frequency.exponentialRampToValueAtTime(35, now + 0.008);
+    gain.gain.setValueAtTime(0.05, now);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.008);
+    osc.connect(gain);
+    gain.connect(_hapticAudioCtx.destination);
+    osc.start(now);
+    osc.stop(now + 0.008);
+  } catch {}
+}
+
+function triggerSingleIosTick(): void {
+  const label = ensureIosSwitch();
+  if (label) {
+    try {
+      label.click();
+    } catch {
+      if (_iosSwitchInput) {
+        try {
+          _iosSwitchInput.click();
+        } catch {}
+      }
+    }
+  }
+  playMicroTick();
+}
+
+function triggerIosHapticPattern(pattern: number | number[], skipFirst = false): void {
+  if (typeof pattern === "number" || !Array.isArray(pattern) || pattern.length === 0) {
+    if (!skipFirst) {
+      triggerSingleIosTick();
+    }
+    return;
+  }
+
+  let delay = 0;
+  for (let i = 0; i < pattern.length; i += 2) {
+    const currentDelay = delay;
+    if (i === 0 && skipFirst) {
+      // First pulse was already played by immediate click
+    } else if (currentDelay === 0) {
+      triggerSingleIosTick();
+    } else {
+      setTimeout(() => {
+        triggerSingleIosTick();
+      }, currentDelay);
+    }
+    const pulse = pattern[i] ?? 40;
+    const pause = pattern[i + 1] ?? 30;
+    delay += pulse + pause;
+  }
+}
 
 export function triggerUmpireHaptic(
   pattern: number | number[] = 35,
   priority = false
 ): void {
-  if (typeof navigator === "undefined" || typeof navigator.vibrate !== "function") {
-    return;
-  }
+  if (typeof window === "undefined") return;
+
   const now = Date.now();
-  if (!priority && now - _lastHapticTime < 25) {
+  const timeSinceLast = now - _lastHapticTime;
+
+  // Debounce rapid duplicate single clicks within 45ms
+  if (!priority && timeSinceLast < 45) {
     return;
   }
-  if (_lastHapticWasPriority && !priority && now - _lastHapticTime < 60) {
+
+  // If a generic click already ticked at t=0 and priority single-pulse fires, avoid duplicate stutter
+  if (priority && !Array.isArray(pattern) && timeSinceLast < 45) {
     return;
   }
+
   _lastHapticTime = now;
-  _lastHapticWasPriority = priority;
-  try {
-    navigator.vibrate(pattern);
-  } catch {
-    // Ignore vibration errors on unsupported devices or browser contexts
+
+  // 1. Android & browsers supporting W3C Vibration API
+  const hasVibration = typeof navigator !== "undefined" && typeof navigator.vibrate === "function";
+  if (hasVibration) {
+    try {
+      navigator.vibrate(pattern);
+    } catch {}
+  }
+
+  // 2. iOS Safari & WebKit devices (hardware switch Taptic Engine + micro-tick fallback)
+  if (!hasVibration || isIosDevice()) {
+    triggerIosHapticPattern(pattern, timeSinceLast < 45);
   }
 }
 
@@ -209,7 +353,8 @@ function Umpire() {
   useEffect(() => {
     let mounted = true;
 
-    // Initial hydration
+    // Prepare iOS Taptic Switch and initial hydration
+    ensureIosSwitch();
     hydrateCourtStationsFromCloud().then((hydrated) => {
       if (mounted) setStations(hydrated);
     });
@@ -303,11 +448,7 @@ function Umpire() {
         playDeskChime();
       } catch { }
 
-      if (typeof navigator !== "undefined" && navigator.vibrate) {
-        try {
-          navigator.vibrate([150, 75, 150]);
-        } catch { }
-      }
+      triggerUmpireHaptic([150, 75, 150], true);
 
       setDispatchNotice({
         court: detail.court,
@@ -397,7 +538,6 @@ function Umpire() {
 
   const tabs: { key: UmpireTab; label: string }[] = [
     { key: "console", label: "Court Supervision" },
-    { key: "results", label: "Match Results" },
   ];
 
   return (
@@ -557,16 +697,8 @@ function Umpire() {
             onUpdate={update}
             onSelectMatch={(id) => setSelectedMatchId(id || null)}
             onBack={() => setSelectedMatchId(null)}
-            onViewResults={() => setActiveTab("results")}
             onOpenDebug={() => setIsDebugOpen(true)}
             onRefreshStations={() => setStations(getCourtStations())}
-          />
-        )}
-        {activeTab === "results" && (
-          <UmpireMatchResults
-            matches={activeEventMatches}
-            activeTournament={activeTournament}
-            onSelectMatch={openConsole}
           />
         )}
       </div>
@@ -814,22 +946,44 @@ function TournamentDesk({
                           {courtMatch.stage}
                         </span>
                       )}
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-semibold text-foreground truncate mr-2">
-                          {courtMatch.teamAName}
-                        </span>
-                        <span className="font-display text-lg text-foreground">
-                          {courtMatch.score.teamAScore}
-                        </span>
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-semibold text-foreground truncate mr-2">
-                          {courtMatch.teamBName}
-                        </span>
-                        <span className="font-display text-lg text-foreground">
-                          {courtMatch.score.teamBScore}
-                        </span>
-                      </div>
+                      {(() => {
+                        const playersA = resolveMatchTeamPlayers(courtMatch.teamAPlayers, courtMatch.teamAName, "");
+                        const playersB = resolveMatchTeamPlayers(courtMatch.teamBPlayers, courtMatch.teamBName, "");
+                        return (
+                          <>
+                            <div className="flex items-center justify-between">
+                              <div className="min-w-0 mr-2">
+                                <span className="text-xs font-semibold text-foreground truncate block">
+                                  {courtMatch.teamAName}
+                                </span>
+                                {playersA.length > 0 && (
+                                  <span className="text-[0.62rem] text-muted-foreground font-mono truncate block">
+                                    {playersA.join(" & ")}
+                                  </span>
+                                )}
+                              </div>
+                              <span className="font-display text-lg text-foreground shrink-0">
+                                {courtMatch.score.teamAScore}
+                              </span>
+                            </div>
+                            <div className="flex items-center justify-between">
+                              <div className="min-w-0 mr-2">
+                                <span className="text-xs font-semibold text-foreground truncate block">
+                                  {courtMatch.teamBName}
+                                </span>
+                                {playersB.length > 0 && (
+                                  <span className="text-[0.62rem] text-muted-foreground font-mono truncate block">
+                                    {playersB.join(" & ")}
+                                  </span>
+                                )}
+                              </div>
+                              <span className="font-display text-lg text-foreground shrink-0">
+                                {courtMatch.score.teamBScore}
+                              </span>
+                            </div>
+                          </>
+                        );
+                      })()}
 
                       {courtMatch.status === "live" && (
                         <div className="pt-1.5 border-t border-border/50 text-[0.65rem] uppercase tracking-wider text-pickle font-bold">
@@ -1250,157 +1404,7 @@ export function isMatchTossDone(match: LiveMatch | null | undefined): boolean {
   return false;
 }
 
-export interface CourtPlayerInfo {
-  name: string;
-  base: 1 | 2;
-  isServing: boolean;
-  isReceiver: boolean;
-}
-
-export interface TeamCourtPositions {
-  right: CourtPlayerInfo;
-  left: CourtPlayerInfo;
-  isSingles: boolean;
-}
-
-export function computeCourtPositions(
-  match: LiveMatch
-): { teamA: TeamCourtPositions; teamB: TeamCourtPositions } {
-  const s = match.score;
-  const isFinal = match.status === "final";
-
-  // Team A
-  const rawAPlayers =
-    match.teamAPlayers && match.teamAPlayers.length > 0
-      ? match.teamAPlayers
-      : [match.teamAName || "Player A1"];
-  const isSinglesA = rawAPlayers.length === 1;
-  const localBase1A =
-    typeof localStorage !== "undefined"
-      ? localStorage.getItem(`dv_base1_A_${match.id}`)
-      : null;
-  const aBase1 =
-    match.teamABase1Player ||
-    (localBase1A && rawAPlayers.includes(localBase1A) ? localBase1A : rawAPlayers[0]) ||
-    "Player A1";
-  const aBase2 =
-    rawAPlayers.find((p) => p !== aBase1) || rawAPlayers[1] || aBase1;
-  const teamAScoreEven = s.teamAScore % 2 === 0;
-
-  // Team B
-  const rawBPlayers =
-    match.teamBPlayers && match.teamBPlayers.length > 0
-      ? match.teamBPlayers
-      : [match.teamBName || "Player B1"];
-  const isSinglesB = rawBPlayers.length === 1;
-  const localBase1B =
-    typeof localStorage !== "undefined"
-      ? localStorage.getItem(`dv_base1_B_${match.id}`)
-      : null;
-  const bBase1 =
-    match.teamBBase1Player ||
-    (localBase1B && rawBPlayers.includes(localBase1B) ? localBase1B : rawBPlayers[0]) ||
-    "Player B1";
-  const bBase2 =
-    rawBPlayers.find((p) => p !== bBase1) || rawBPlayers[1] || bBase1;
-  const teamBScoreEven = s.teamBScore % 2 === 0;
-
-  if (isSinglesA && isSinglesB) {
-    const aOnRight = teamAScoreEven;
-    const bOnRight = teamBScoreEven;
-    const singlesServingCourt: "right" | "left" =
-      s.servingTeam === "A"
-        ? (teamAScoreEven ? "right" : "left")
-        : (teamBScoreEven ? "right" : "left");
-    return {
-      teamA: {
-        isSingles: true,
-        right: {
-          name: aOnRight ? aBase1 : "-",
-          base: 1,
-          isServing: !isFinal && s.servingTeam === "A" && aOnRight,
-          isReceiver: !isFinal && s.servingTeam === "B" && singlesServingCourt === "right",
-        },
-        left: {
-          name: !aOnRight ? aBase1 : "-",
-          base: 1,
-          isServing: !isFinal && s.servingTeam === "A" && !aOnRight,
-          isReceiver: !isFinal && s.servingTeam === "B" && singlesServingCourt === "left",
-        },
-      },
-      teamB: {
-        isSingles: true,
-        right: {
-          name: bOnRight ? bBase1 : "-",
-          base: 1,
-          isServing: !isFinal && s.servingTeam === "B" && bOnRight,
-          isReceiver: !isFinal && s.servingTeam === "A" && singlesServingCourt === "right",
-        },
-        left: {
-          name: !bOnRight ? bBase1 : "-",
-          base: 1,
-          isServing: !isFinal && s.servingTeam === "B" && !bOnRight,
-          isReceiver: !isFinal && s.servingTeam === "A" && singlesServingCourt === "left",
-        },
-      },
-    };
-  }
-
-  // Doubles positioning:
-  // When score is even: Base 1 is on Right (Even) court, Base 2 on Left (Odd) court.
-  // When score is odd: Base 2 is on Right (Even) court, Base 1 on Left (Odd) court.
-  const aRightPlayerName = teamAScoreEven ? aBase1 : aBase2;
-  const aRightBase: 1 | 2 = teamAScoreEven ? 1 : 2;
-  const aLeftPlayerName = teamAScoreEven ? aBase2 : aBase1;
-  const aLeftBase: 1 | 2 = teamAScoreEven ? 2 : 1;
-
-  const bRightPlayerName = teamBScoreEven ? bBase1 : bBase2;
-  const bRightBase: 1 | 2 = teamBScoreEven ? 1 : 2;
-  const bLeftPlayerName = teamBScoreEven ? bBase2 : bBase1;
-  const bLeftBase: 1 | 2 = teamBScoreEven ? 2 : 1;
-
-  // Active Server in doubles:
-  const activeServerBase: 1 | 2 = deriveActiveServerBase(s);
-
-  // Serving court is whichever court the active server is currently standing on:
-  const servingCourt: "right" | "left" =
-    s.servingTeam === "A"
-      ? (aRightBase === activeServerBase ? "right" : "left")
-      : (bRightBase === activeServerBase ? "right" : "left");
-
-  return {
-    teamA: {
-      isSingles: false,
-      right: {
-        name: aRightPlayerName,
-        base: aRightBase,
-        isServing: !isFinal && s.servingTeam === "A" && aRightBase === activeServerBase,
-        isReceiver: !isFinal && s.servingTeam === "B" && servingCourt === "right",
-      },
-      left: {
-        name: aLeftPlayerName,
-        base: aLeftBase,
-        isServing: !isFinal && s.servingTeam === "A" && aLeftBase === activeServerBase,
-        isReceiver: !isFinal && s.servingTeam === "B" && servingCourt === "left",
-      },
-    },
-    teamB: {
-      isSingles: false,
-      right: {
-        name: bRightPlayerName,
-        base: bRightBase,
-        isServing: !isFinal && s.servingTeam === "B" && bRightBase === activeServerBase,
-        isReceiver: !isFinal && s.servingTeam === "A" && servingCourt === "right",
-      },
-      left: {
-        name: bLeftPlayerName,
-        base: bLeftBase,
-        isServing: !isFinal && s.servingTeam === "B" && bLeftBase === activeServerBase,
-        isReceiver: !isFinal && s.servingTeam === "A" && servingCourt === "left",
-      },
-    },
-  };
-}
+export { computeCourtPositions, type TeamCourtPositions, type CourtPlayerInfo };
 
 type CourtTeamPosition = NonNullable<ReturnType<typeof computeCourtPositions>>["teamA"];
 
@@ -1794,7 +1798,6 @@ function UmpireConsole({
   onSelectMatch,
   onBack,
   onOpenQuickMatch,
-  onViewResults,
   onOpenDebug,
   onRefreshStations,
 }: {
@@ -1807,7 +1810,6 @@ function UmpireConsole({
   onSelectMatch: (id: string) => void;
   onBack?: () => void;
   onOpenQuickMatch?: () => void;
-  onViewResults?: () => void;
   onOpenDebug?: () => void;
   onRefreshStations?: () => void;
 }) {
@@ -1830,6 +1832,9 @@ function UmpireConsole({
 
   // Physical court sides for players: "left" means Team A is on the left, "right" means Team A is on the right
   const [teamASide, setTeamASide] = useState<"left" | "right">(() => {
+    if (match?.teamASide === "left" || match?.teamASide === "right") {
+      return match.teamASide;
+    }
     if (typeof localStorage !== "undefined" && match) {
       const saved = localStorage.getItem(`dv_court_side_${match.id}`);
       if (saved === "right" || saved === "left") return saved;
@@ -1862,17 +1867,21 @@ function UmpireConsole({
 
   const handleToggleCourtSides = () => {
     triggerUmpireHaptic(45, true);
-    setTeamASide((prev) => {
-      const next = prev === "left" ? "right" : "left";
-      if (typeof localStorage !== "undefined" && match) {
-        try {
-          localStorage.setItem(`dv_court_side_${match.id}`, next);
-        } catch {
-          // ignore
-        }
+    if (!match) return;
+    const next = teamASide === "left" ? "right" : "left";
+    setTeamASide(next);
+    if (typeof localStorage !== "undefined") {
+      try {
+        localStorage.setItem(`dv_court_side_${match.id}`, next);
+      } catch {
+        // ignore
       }
-      return next;
-    });
+    }
+    onUpdate(match.id, (m) => ({
+      ...m,
+      teamASide: next,
+      courtPositionUpdatedAt: Date.now(),
+    }));
   };
 
   const handleRequestResetToss = () => {
@@ -2924,28 +2933,7 @@ function UmpireConsole({
           )}
         </div>
 
-        {/* Match Results Banner linking to dedicated Match Results tab */}
-        <div className="pt-4 border-t-2 border-border flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 bg-card p-4 border-2 border-border shadow-sm font-sans">
-          <div>
-            <span className="text-xs uppercase tracking-wider font-bold text-pickle block">
-              Match Results
-            </span>
-            <span className="text-xs text-foreground/80 font-medium">
-              {completedMatches.length > 0
-                ? `${completedMatches.length} match${completedMatches.length === 1 ? "" : "es"} concluded for ${activeTournament?.name || "this event"}.`
-                : `Official match results for ${activeTournament?.name || "this event"}.`}
-            </span>
-          </div>
-          {onViewResults && (
-            <button
-              type="button"
-              onClick={onViewResults}
-              className="px-4 py-2 text-xs font-bold uppercase tracking-wider bg-pickle text-sand hover:opacity-90 active:scale-[0.99] transition-all cursor-pointer w-fit shadow-sm font-sans"
-            >
-              View Match Results &rarr;
-            </button>
-          )}
-        </div>
+
 
         {/* Remove / Take Over Umpire Confirmation Modal */}
         {umpireToRemoveModal && (
@@ -3142,6 +3130,16 @@ function UmpireConsole({
   const rightTeamName = rightTeam === "A" ? match.teamAName : match.teamBName;
   const leftScore = leftTeam === "A" ? s.teamAScore : s.teamBScore;
   const rightScore = rightTeam === "A" ? s.teamAScore : s.teamBScore;
+  const leftPlayers = resolveMatchTeamPlayers(
+    leftTeam === "A" ? match.teamAPlayers : match.teamBPlayers,
+    leftTeamName,
+    ""
+  );
+  const rightPlayers = resolveMatchTeamPlayers(
+    rightTeam === "A" ? match.teamAPlayers : match.teamBPlayers,
+    rightTeamName,
+    ""
+  );
 
   const handleChangeCourt = async (newCourt: FacilityCourt) => {
     if (!match || match.court === newCourt) {
@@ -3245,13 +3243,11 @@ function UmpireConsole({
   const handleSwapTeamABase = () => {
     triggerUmpireHaptic(40, true);
     if (!match) return;
-    const raw =
-      match.teamAPlayers && match.teamAPlayers.length > 0
-        ? match.teamAPlayers
-        : [match.teamAName || "Player A1"];
+    const raw = resolveMatchTeamPlayers(match.teamAPlayers, match.teamAName, "Player A1");
     if (raw.length < 2) return;
+    const norm = (str: string) => str.trim().toLowerCase();
     const currentBase1 = match.teamABase1Player || raw[0] || "Player A1";
-    const newBase1 = raw.find((p) => p !== currentBase1) || raw[1] || raw[0] || "Player A1";
+    const newBase1 = raw.find((p) => norm(p) !== norm(currentBase1)) || raw[1] || raw[0] || "Player A1";
     if (typeof localStorage !== "undefined") {
       try {
         localStorage.setItem(`dv_base1_A_${match.id}`, newBase1);
@@ -3262,19 +3258,18 @@ function UmpireConsole({
     onUpdate(match.id, (m) => ({
       ...m,
       teamABase1Player: newBase1,
+      courtPositionUpdatedAt: Date.now(),
     }));
   };
 
   const handleSwapTeamBBase = () => {
     triggerUmpireHaptic(40, true);
     if (!match) return;
-    const raw =
-      match.teamBPlayers && match.teamBPlayers.length > 0
-        ? match.teamBPlayers
-        : [match.teamBName || "Player B1"];
+    const raw = resolveMatchTeamPlayers(match.teamBPlayers, match.teamBName, "Player B1");
     if (raw.length < 2) return;
+    const norm = (str: string) => str.trim().toLowerCase();
     const currentBase1 = match.teamBBase1Player || raw[0] || "Player B1";
-    const newBase1 = raw.find((p) => p !== currentBase1) || raw[1] || raw[0] || "Player B1";
+    const newBase1 = raw.find((p) => norm(p) !== norm(currentBase1)) || raw[1] || raw[0] || "Player B1";
     if (typeof localStorage !== "undefined") {
       try {
         localStorage.setItem(`dv_base1_B_${match.id}`, newBase1);
@@ -3285,6 +3280,7 @@ function UmpireConsole({
     onUpdate(match.id, (m) => ({
       ...m,
       teamBBase1Player: newBase1,
+      courtPositionUpdatedAt: Date.now(),
     }));
   };
 
@@ -3366,6 +3362,7 @@ function UmpireConsole({
       tossWinner: winnerName ?? m.tossWinner,
       teamABase1Player: bases?.teamABase1 ?? m.teamABase1Player ?? m.teamAPlayers?.[0],
       teamBBase1Player: bases?.teamBBase1 ?? m.teamBBase1Player ?? m.teamBPlayers?.[0],
+      courtPositionUpdatedAt: Date.now(),
       officiatedBy: m.officiatedBy ?? currentUmpire,
       score: { ...m.score, servingTeam: serving, serverNumber: 2, teamAScore: 0, teamBScore: 0, activeServerBase: 1, rallies: [] },
     }));
@@ -3556,8 +3553,13 @@ function UmpireConsole({
               <span className="block text-xs sm:text-sm font-bold text-sand truncate" title={leftTeamName}>
                 {leftTeamName}
               </span>
+              {leftPlayers.length > 0 && (
+                <span className="block text-[0.62rem] sm:text-xs font-mono text-sand/70 truncate">
+                  {leftPlayers.join(" & ")}
+                </span>
+              )}
               {s.servingTeam === leftTeam && (
-                <span className="text-[0.58rem] font-mono font-bold text-pickle uppercase tracking-wider">
+                <span className="text-[0.58rem] font-mono font-bold text-pickle uppercase tracking-wider block mt-0.5">
                   Server #{s.serverNumber}
                 </span>
               )}
@@ -3586,8 +3588,13 @@ function UmpireConsole({
               <span className="block text-xs sm:text-sm font-bold text-sand truncate" title={rightTeamName}>
                 {rightTeamName}
               </span>
+              {rightPlayers.length > 0 && (
+                <span className="block text-[0.62rem] sm:text-xs font-mono text-sand/70 truncate">
+                  {rightPlayers.join(" & ")}
+                </span>
+              )}
               {s.servingTeam === rightTeam && (
-                <span className="text-[0.58rem] font-mono font-bold text-pickle uppercase tracking-wider">
+                <span className="text-[0.58rem] font-mono font-bold text-pickle uppercase tracking-wider block mt-0.5">
                   Server #{s.serverNumber}
                 </span>
               )}
@@ -4041,275 +4048,6 @@ function UmpireConsole({
 }
 
 /* ═══════════════════════════════════════════════
-   TAB 2: MATCH RESULTS (ACTIVE EVENT ARCHIVE)
-═══════════════════════════════════════════════ */
-
-function UmpireMatchResults({
-  matches,
-  activeTournament,
-  onSelectMatch,
-}: {
-  matches: LiveMatch[];
-  activeTournament?: any;
-  onSelectMatch: (id: string) => void;
-}) {
-  const [courtFilter, setCourtFilter] = useState<string>("all");
-  const [bracketFilter, setBracketFilter] = useState<string>("all");
-
-  const completedMatches = useMemo(() => {
-    return matches
-      .filter((m) => m.status === "final")
-      .sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0));
-  }, [matches]);
-
-  const uniqueStages = useMemo(() => {
-    const set = new Set<string>();
-    for (const m of completedMatches) {
-      if (m.stage) set.add(m.stage);
-    }
-    return Array.from(set);
-  }, [completedMatches]);
-
-  const filteredMatches = useMemo(() => {
-    return completedMatches.filter((m) => {
-      if (courtFilter !== "all" && m.court !== courtFilter) return false;
-      if (bracketFilter !== "all" && m.stage !== bracketFilter) return false;
-      return true;
-    });
-  }, [completedMatches, courtFilter, bracketFilter]);
-
-  return (
-    <div className="space-y-6 font-sans">
-      {/* Header */}
-      <div className="border-b-2 border-border pb-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div>
-          <span className="text-xs font-bold uppercase tracking-wider text-pickle font-sans block">
-            Event Match Archive
-          </span>
-          <h2 className="font-display text-3xl sm:text-4xl text-foreground tracking-wide mt-1">
-            Match Results
-          </h2>
-          <p className="text-sm text-foreground/80 font-medium mt-1">
-            Official scores and match history for {activeTournament?.name || "the active event"}. Past event matches are excluded.
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="text-xs font-sans font-bold text-foreground px-3.5 py-1.5 bg-card border-2 border-border shadow-sm">
-            <span className="text-pickle font-black mr-1.5">{completedMatches.length}</span>
-            Matches Concluded
-          </span>
-        </div>
-      </div>
-
-      {/* Filters Bar */}
-      {completedMatches.length > 0 && (
-        <div className="flex flex-wrap items-center justify-between gap-3 bg-charcoal p-3.5 border-2 border-border/80 shadow-sm">
-          {/* Court Filter */}
-          <div className="flex items-center gap-2 overflow-x-auto">
-            <span className="text-xs font-bold uppercase tracking-wider text-sand mr-1 shrink-0 font-sans">
-              Court:
-            </span>
-            {["all", "Court 1", "Court 2", "Court 3", "Court 4"].map((c) => (
-              <button
-                key={c}
-                type="button"
-                onClick={() => setCourtFilter(c)}
-                className={`px-3 py-1.5 text-xs font-bold uppercase tracking-wider transition-all cursor-pointer font-sans ${courtFilter === c
-                    ? "bg-pickle text-sand shadow-sm"
-                    : "bg-charcoal text-sand/80 hover:text-white border border-white/20 hover:border-white/40"
-                  }`}
-              >
-                {c === "all" ? "All Courts" : c}
-              </button>
-            ))}
-          </div>
-
-          {/* Bracket Filter */}
-          {uniqueStages.length > 0 && (
-            <div className="flex items-center gap-2 overflow-x-auto">
-              <span className="text-xs font-bold uppercase tracking-wider text-sand mr-1 shrink-0 font-sans">
-                Bracket:
-              </span>
-              <button
-                type="button"
-                onClick={() => setBracketFilter("all")}
-                className={`px-3 py-1.5 text-xs font-bold uppercase tracking-wider transition-all cursor-pointer font-sans ${bracketFilter === "all"
-                    ? "bg-pickle text-sand shadow-sm"
-                    : "bg-charcoal text-sand/80 hover:text-white border border-white/20 hover:border-white/40"
-                  }`}
-              >
-                All
-              </button>
-              {uniqueStages.map((stg) => (
-                <button
-                  key={stg}
-                  type="button"
-                  onClick={() => setBracketFilter(stg)}
-                  className={`px-3 py-1.5 text-xs font-bold uppercase tracking-wider transition-all cursor-pointer font-sans ${bracketFilter === stg
-                      ? "bg-pickle text-sand shadow-sm"
-                      : "bg-charcoal text-sand/80 hover:text-white border border-white/20 hover:border-white/40"
-                    }`}
-                >
-                  {stg.replace(" (Pool Play)", "")}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Results Grid */}
-      {filteredMatches.length > 0 ? (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {filteredMatches.map((m) => (
-            <div
-              key={m.id}
-              className="bg-card p-4 border-2 border-border flex flex-col justify-between space-y-4 shadow-sm hover:border-pickle/60 transition-colors"
-            >
-              {/* Card Header */}
-              <div className="flex items-center justify-between border-b-2 border-border/60 pb-2.5">
-                <div className="flex items-center gap-2 min-w-0">
-                  <span className="text-xs font-bold uppercase tracking-wider text-foreground font-sans">
-                    {m.court}
-                  </span>
-                  {m.stage && (
-                    <span className="text-xs font-bold text-pickle bg-pickle/15 px-2 py-0.5 border border-pickle/30 truncate font-sans">
-                      {m.stage}
-                    </span>
-                  )}
-                </div>
-                <span className="text-[0.65rem] font-bold uppercase tracking-wider bg-brick/15 border border-brick/40 text-brick px-2 py-0.5 font-sans">
-                  Final
-                </span>
-              </div>
-
-              {/* Matchup & Scores */}
-              <div className="space-y-2.5">
-                {/* Team A */}
-                <div
-                  className={`p-3 border-2 transition-colors flex items-center justify-between ${m.winnerTeam === m.teamAName
-                      ? "bg-pickle/10 border-pickle/50"
-                      : "bg-muted/40 border-border/60"
-                    }`}
-                >
-                  <div className="min-w-0 mr-3">
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      <span
-                        className={`block text-sm font-bold truncate font-sans ${m.winnerTeam === m.teamAName ? "text-pickle" : "text-foreground"
-                          }`}
-                      >
-                        {m.teamAName}
-                      </span>
-                      {m.winnerTeam === m.teamAName && (
-                        <span className="text-[0.6rem] font-bold uppercase tracking-wider bg-pickle text-sand px-1.5 py-0.2 shrink-0 font-sans">
-                          Winner
-                        </span>
-                      )}
-                    </div>
-                    <span className="block text-xs text-foreground/80 font-medium truncate mt-0.5 font-sans">
-                      {m.teamAPlayers.join(" / ")}
-                    </span>
-                    {m.teamAClub && (
-                      <span className="inline-block mt-1 text-[0.6rem] font-bold px-2 py-0.5 bg-card text-foreground border border-border uppercase tracking-wider font-sans">
-                        {m.teamAClub}
-                      </span>
-                    )}
-                  </div>
-                  <span
-                    className={`font-display text-3xl font-bold ${m.winnerTeam === m.teamAName ? "text-pickle" : "text-foreground"
-                      }`}
-                  >
-                    {m.score.teamAScore}
-                  </span>
-                </div>
-
-                {/* Team B */}
-                <div
-                  className={`p-3 border-2 transition-colors flex items-center justify-between ${m.winnerTeam === m.teamBName
-                      ? "bg-pickle/10 border-pickle/50"
-                      : "bg-muted/40 border-border/60"
-                    }`}
-                >
-                  <div className="min-w-0 mr-3">
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      <span
-                        className={`block text-sm font-bold truncate font-sans ${m.winnerTeam === m.teamBName ? "text-pickle" : "text-foreground"
-                          }`}
-                      >
-                        {m.teamBName}
-                      </span>
-                      {m.winnerTeam === m.teamBName && (
-                        <span className="text-[0.6rem] font-bold uppercase tracking-wider bg-pickle text-sand px-1.5 py-0.2 shrink-0 font-sans">
-                          Winner
-                        </span>
-                      )}
-                    </div>
-                    <span className="block text-xs text-foreground/80 font-medium truncate mt-0.5 font-sans">
-                      {m.teamBPlayers.join(" / ")}
-                    </span>
-                    {m.teamBClub && (
-                      <span className="inline-block mt-1 text-[0.6rem] font-bold px-2 py-0.5 bg-card text-foreground border border-border uppercase tracking-wider font-sans">
-                        {m.teamBClub}
-                      </span>
-                    )}
-                  </div>
-                  <span
-                    className={`font-display text-3xl font-bold ${m.winnerTeam === m.teamBName ? "text-pickle" : "text-foreground"
-                      }`}
-                  >
-                    {m.score.teamBScore}
-                  </span>
-                </div>
-              </div>
-
-              {/* Card Footer: Official + Actions */}
-              <div className="pt-2 border-t-2 border-border/50 flex items-center justify-between text-xs font-sans">
-                <div className="text-xs text-foreground/80 font-medium">
-                  <span>Official: </span>
-                  <span className="font-bold text-foreground">{m.officiatedBy || "Unassigned"}</span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => onSelectMatch(m.id)}
-                  className="px-3 py-1.5 text-xs font-bold uppercase tracking-wider bg-pickle text-sand hover:opacity-90 transition-opacity cursor-pointer shadow-sm font-sans"
-                >
-                  View Details &rarr;
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <div className="bg-card p-12 text-center border-2 border-dashed border-border shadow-sm font-sans">
-          <span className="text-sm font-bold uppercase tracking-wider text-foreground block">
-            {courtFilter !== "all" || bracketFilter !== "all"
-              ? "No Matches Found For Selected Filters"
-              : "No Completed Matches Yet"}
-          </span>
-          <p className="text-xs text-foreground/80 font-medium mt-1.5 max-w-sm mx-auto leading-relaxed">
-            {courtFilter !== "all" || bracketFilter !== "all"
-              ? "Try resetting your court or bracket filter above to see all results."
-              : "Official match results for this active event will be archived here once matches conclude."}
-          </p>
-          {(courtFilter !== "all" || bracketFilter !== "all") && (
-            <button
-              type="button"
-              onClick={() => {
-                setCourtFilter("all");
-                setBracketFilter("all");
-              }}
-              className="mt-4 px-4 py-1.5 text-xs font-bold uppercase tracking-wider bg-pickle text-sand hover:opacity-90 transition-opacity cursor-pointer font-sans"
-            >
-              Reset Filters
-            </button>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* ═══════════════════════════════════════════════
    MODAL: QUICK MATCH DISPATCH
 ═══════════════════════════════════════════════ */
 
@@ -4695,20 +4433,27 @@ function CoinTossOverlay({
   const [choosingTeam, setChoosingTeam] = useState<"A" | "B" | null>(null);
   const [chosenServingTeam, setChosenServingTeam] = useState<"A" | "B">("A");
 
-  const rawA = teamAPlayers && teamAPlayers.length > 0 ? teamAPlayers : [teamAName || "Player A1"];
-  const rawB = teamBPlayers && teamBPlayers.length > 0 ? teamBPlayers : [teamBName || "Player B1"];
+  const rawA = resolveMatchTeamPlayers(teamAPlayers, teamAName, "Player A1");
+  const rawB = resolveMatchTeamPlayers(teamBPlayers, teamBName, "Player B1");
+  const norm = (str: string) => str.trim().toLowerCase();
 
   const [teamABase1, setTeamABase1] = useState<string>(() => {
-    if (initialTeamABase1 && rawA.includes(initialTeamABase1)) return initialTeamABase1;
+    if (initialTeamABase1) {
+      const matched = rawA.find((p) => norm(p) === norm(initialTeamABase1));
+      if (matched) return matched;
+    }
     return rawA[0] || "Player A1";
   });
   const [teamBBase1, setTeamBBase1] = useState<string>(() => {
-    if (initialTeamBBase1 && rawB.includes(initialTeamBBase1)) return initialTeamBBase1;
+    if (initialTeamBBase1) {
+      const matched = rawB.find((p) => norm(p) === norm(initialTeamBBase1));
+      if (matched) return matched;
+    }
     return rawB[0] || "Player B1";
   });
 
-  const teamABase2 = rawA.find((p) => p !== teamABase1) || rawA[1] || rawA[0] || "Player A2";
-  const teamBBase2 = rawB.find((p) => p !== teamBBase1) || rawB[1] || rawB[0] || "Player B2";
+  const teamABase2 = rawA.find((p) => norm(p) !== norm(teamABase1)) || rawA[1] || rawA[0] || "Player A2";
+  const teamBBase2 = rawB.find((p) => norm(p) !== norm(teamBBase1)) || rawB[1] || rawB[0] || "Player B2";
 
   const flipRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -5055,7 +4800,7 @@ function CoinTossOverlay({
                 <button
                   type="button"
                   onClick={() => {
-                    const next = rawA.find((p) => p !== teamABase1) || rawA[1] || rawA[0] || "Player A1";
+                    const next = rawA.find((p) => norm(p) !== norm(teamABase1)) || rawA[1] || rawA[0] || "Player A1";
                     setTeamABase1(next);
                   }}
                   className="w-full py-1.5 text-xs font-mono font-bold uppercase tracking-wider text-foreground hover:text-pickle border-2 border-border hover:border-pickle transition-colors cursor-pointer text-center rounded bg-card"
@@ -5111,7 +4856,7 @@ function CoinTossOverlay({
                 <button
                   type="button"
                   onClick={() => {
-                    const next = rawB.find((p) => p !== teamBBase1) || rawB[1] || rawB[0] || "Player B1";
+                    const next = rawB.find((p) => norm(p) !== norm(teamBBase1)) || rawB[1] || rawB[0] || "Player B1";
                     setTeamBBase1(next);
                   }}
                   className="w-full py-1.5 text-xs font-mono font-bold uppercase tracking-wider text-foreground hover:text-pickle border-2 border-border hover:border-pickle transition-colors cursor-pointer text-center rounded bg-card"
@@ -5190,45 +4935,61 @@ function ScoreboardCard({
       </div>
 
       <div className="p-4 sm:p-5">
-        <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-3">
-          {/* Team A */}
-          <div className="text-center">
-            <span
-              className={`block font-display text-3xl sm:text-4xl ${match.winnerTeam === match.teamAName ? "text-pickle" : "text-foreground"
-                }`}
-            >
-              {s.teamAScore}
-            </span>
-            <span className="block text-xs font-semibold text-foreground mt-1 truncate">
-              {match.teamAName}
-            </span>
-            {isLive && s.servingTeam === "A" && (
-              <span className="inline-block mt-1 text-[0.5rem] uppercase tracking-widest bg-pickle text-sand px-1.5 py-0.5 font-bold">
-                Serving (#{s.serverNumber})
-              </span>
-            )}
-          </div>
+        {(() => {
+          const playersA = resolveMatchTeamPlayers(match.teamAPlayers, match.teamAName, "");
+          const playersB = resolveMatchTeamPlayers(match.teamBPlayers, match.teamBName, "");
+          return (
+            <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-3">
+              {/* Team A */}
+              <div className="text-center min-w-0">
+                <span
+                  className={`block font-display text-3xl sm:text-4xl ${match.winnerTeam === match.teamAName ? "text-pickle" : "text-foreground"
+                    }`}
+                >
+                  {s.teamAScore}
+                </span>
+                <span className="block text-xs font-semibold text-foreground mt-1 truncate">
+                  {match.teamAName}
+                </span>
+                {playersA.length > 0 && (
+                  <span className="block text-[0.62rem] text-muted-foreground font-mono truncate mt-0.5">
+                    {playersA.join(" & ")}
+                  </span>
+                )}
+                {isLive && s.servingTeam === "A" && (
+                  <span className="inline-block mt-1 text-[0.5rem] uppercase tracking-widest bg-pickle text-sand px-1.5 py-0.5 font-bold">
+                    Serving (#{s.serverNumber})
+                  </span>
+                )}
+              </div>
 
-          <span className="font-display text-lg text-brick">VS</span>
+              <span className="font-display text-lg text-brick">VS</span>
 
-          {/* Team B */}
-          <div className="text-center">
-            <span
-              className={`block font-display text-3xl sm:text-4xl ${match.winnerTeam === match.teamBName ? "text-pickle" : "text-foreground"
-                }`}
-            >
-              {s.teamBScore}
-            </span>
-            <span className="block text-xs font-semibold text-foreground mt-1 truncate">
-              {match.teamBName}
-            </span>
-            {isLive && s.servingTeam === "B" && (
-              <span className="inline-block mt-1 text-[0.5rem] uppercase tracking-widest bg-pickle text-sand px-1.5 py-0.5 font-bold">
-                Serving (#{s.serverNumber})
-              </span>
-            )}
-          </div>
-        </div>
+              {/* Team B */}
+              <div className="text-center min-w-0">
+                <span
+                  className={`block font-display text-3xl sm:text-4xl ${match.winnerTeam === match.teamBName ? "text-pickle" : "text-foreground"
+                    }`}
+                >
+                  {s.teamBScore}
+                </span>
+                <span className="block text-xs font-semibold text-foreground mt-1 truncate">
+                  {match.teamBName}
+                </span>
+                {playersB.length > 0 && (
+                  <span className="block text-[0.62rem] text-muted-foreground font-mono truncate mt-0.5">
+                    {playersB.join(" & ")}
+                  </span>
+                )}
+                {isLive && s.servingTeam === "B" && (
+                  <span className="inline-block mt-1 text-[0.5rem] uppercase tracking-widest bg-pickle text-sand px-1.5 py-0.5 font-bold">
+                    Serving (#{s.serverNumber})
+                  </span>
+                )}
+              </div>
+            </div>
+          );
+        })()}
 
         {/* 3-number call for live matches */}
         {isLive && (

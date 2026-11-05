@@ -8,17 +8,11 @@ import { CategorySheet } from "@/components/public/CategorySheet";
 import {
   ChevronDown,
   ChevronUp,
-  ChevronLeft,
-  ChevronRight,
   MapPin,
   Navigation,
   ExternalLink,
   Clock,
-  Wifi,
-  ShoppingBag,
-  Droplets,
   Users,
-  MonitorPlay,
   ArrowRight,
   Trophy,
   Calendar,
@@ -28,7 +22,6 @@ import {
   CheckCircle2,
   Sparkles,
 } from "lucide-react";
-import { FacilityCarousel } from "@/components/FacilityCarousel";
 import { QualificationsCarousel } from "@/components/public/QualificationsCarousel";
 
 export const Route = createFileRoute("/")({
@@ -119,204 +112,6 @@ const FAQS = [
     a: "Dink Valley Pickleball Club is located at C. Ebersole St (near 3 I. Ancheta St), Santiago City, 3311 Isabela, Philippines.",
   },
 ];
-
-/* ── Facility Amenities Data (Free of Emojis and Emoticons) ── */
-const AMENITIES = [
-  {
-    icon: Activity,
-    title: "Open Play & Tournaments",
-    tag: "Court Sessions",
-    desc: "Open for booked training sessions, practice drills, and official tournament league play.",
-  },
-  {
-    icon: Trophy,
-    title: "Center Court Stadium",
-    tag: "Championship Court",
-    desc: "Elevated umpire station, broadcast LED illumination, and spectator corridors.",
-  },
-  {
-    icon: Users,
-    title: "Spectator Bleachers",
-    tag: "Viewing Zones",
-    desc: "Comfortable viewing zones offering complete line of sight for all 4 tournament courts.",
-  },
-  {
-    icon: ShoppingBag,
-    title: "Pro Equipment & Shop",
-    tag: "Gear & Apparel",
-    desc: "Performance paddle demos, tournament-approved balls, grips, and club apparel.",
-  },
-  {
-    icon: Droplets,
-    title: "Hydration & Staging Lounge",
-    tag: "Player Recovery",
-    desc: "Air-conditioned player recovery lounge with dedicated hydration and refreshment counter.",
-  },
-  {
-    icon: MonitorPlay,
-    title: "Live Match Monitors",
-    tag: "Digital Dispatch",
-    desc: "Digital court dispatch screens providing real-time match status and tournament brackets.",
-  },
-];
-
-function AmenitiesCarousel() {
-  const [index, setIndex] = useState(0);
-  const [isPaused, setIsPaused] = useState(false);
-  const touchStartX = useRef<number | null>(null);
-  const touchEndX = useRef<number | null>(null);
-
-  const total = AMENITIES.length;
-  const current = AMENITIES[index]!;
-  const Icon = current.icon;
-
-  const next = useCallback(() => {
-    setIndex((prev) => (prev + 1) % total);
-  }, [total]);
-
-  const prev = useCallback(() => {
-    setIndex((prev) => (prev - 1 + total) % total);
-  }, [total]);
-
-  useEffect(() => {
-    if (isPaused) return;
-    const interval = setInterval(next, 4500);
-    return () => clearInterval(interval);
-  }, [isPaused, next]);
-
-  const handleTouchStart = (e: React.TouchEvent) => {
-    setIsPaused(true);
-    const touch = e.targetTouches[0];
-    if (touch) {
-      touchStartX.current = touch.clientX;
-    }
-    touchEndX.current = null;
-  };
-
-  const handleTouchMove = (e: React.TouchEvent) => {
-    const touch = e.targetTouches[0];
-    if (touch) {
-      touchEndX.current = touch.clientX;
-    }
-  };
-
-  const handleTouchEnd = () => {
-    if (touchStartX.current === null || touchEndX.current === null) {
-      setIsPaused(false);
-      return;
-    }
-    const distance = touchStartX.current - touchEndX.current;
-    if (distance > 45) {
-      next();
-    } else if (distance < -45) {
-      prev();
-    }
-    touchStartX.current = null;
-    touchEndX.current = null;
-    setIsPaused(false);
-  };
-
-  return (
-    <div>
-      {/* Mobile (<md): Interactive Swipeable Carousel (Minimizes vertical height significantly) */}
-      <div
-        className="md:hidden relative rounded-2xl border-2 border-border bg-charcoal/90 p-4 sm:p-5 shadow-lg select-none"
-        onMouseEnter={() => setIsPaused(true)}
-        onMouseLeave={() => setIsPaused(false)}
-        onTouchStart={handleTouchStart}
-        onTouchMove={handleTouchMove}
-        onTouchEnd={handleTouchEnd}
-      >
-        <div className="flex items-center justify-between gap-2 border-b border-white/10 pb-3 mb-3">
-          <div className="flex items-center gap-2.5">
-            <div className="h-9 w-9 rounded-lg bg-pickle/15 border border-pickle/30 flex items-center justify-center shrink-0">
-              <Icon size={18} className="text-pickle" />
-            </div>
-            <div>
-              <span className="text-[0.65rem] font-bold uppercase tracking-wider text-pickle font-mono block">
-                {current.tag}
-              </span>
-              <h3 className="font-display text-lg text-sand leading-tight">
-                {current.title}
-              </h3>
-            </div>
-          </div>
-          <span className="text-xs font-mono text-sand/50 shrink-0">
-            {index + 1} / {total}
-          </span>
-        </div>
-
-        <p className="text-xs text-sand/80 leading-relaxed min-h-[2.5rem]">
-          {current.desc}
-        </p>
-
-        {/* Carousel Controls */}
-        <div className="mt-3 pt-3 border-t border-white/10 flex items-center justify-between">
-          {/* Dot Indicators */}
-          <div className="flex items-center gap-1.5">
-            {AMENITIES.map((_, i) => (
-              <button
-                key={i}
-                type="button"
-                onClick={() => setIndex(i)}
-                aria-label={`Go to amenity ${i + 1}`}
-                className={`h-2 transition-all rounded-full cursor-pointer ${i === index ? "w-6 bg-pickle" : "w-2 bg-sand/25 hover:bg-sand/40"
-                  }`}
-              />
-            ))}
-          </div>
-
-          {/* Navigation Buttons (Touch Friendly) */}
-          <div className="flex items-center gap-1">
-            <button
-              type="button"
-              onClick={prev}
-              aria-label="Previous amenity"
-              className="h-10 w-10 flex items-center justify-center rounded-lg border border-border bg-charcoal hover:bg-card text-sand hover:text-pickle transition-colors cursor-pointer active:scale-95"
-            >
-              <ChevronLeft size={18} />
-            </button>
-            <button
-              type="button"
-              onClick={next}
-              aria-label="Next amenity"
-              className="h-10 w-10 flex items-center justify-center rounded-lg border border-border bg-charcoal hover:bg-card text-sand hover:text-pickle transition-colors cursor-pointer active:scale-95"
-            >
-              <ChevronRight size={18} />
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* Desktop (md+): Compact 3-Column Grid */}
-      <div className="hidden md:grid md:grid-cols-3 gap-3.5">
-        {AMENITIES.map(({ icon: AmenityIcon, title, desc, tag }) => (
-          <div
-            key={title}
-            className="p-4 rounded-xl border-2 border-border bg-charcoal/90 flex flex-col justify-between space-y-2 hover:border-pickle/60 transition-colors"
-          >
-            <div className="flex items-center gap-3">
-              <div className="h-9 w-9 rounded-lg bg-pickle/15 border border-pickle/30 flex items-center justify-center shrink-0">
-                <AmenityIcon size={18} className="text-pickle" />
-              </div>
-              <div>
-                <span className="text-[0.65rem] font-bold uppercase tracking-wider text-pickle/90 font-mono block">
-                  {tag}
-                </span>
-                <h3 className="font-display text-lg text-sand leading-snug">
-                  {title}
-                </h3>
-              </div>
-            </div>
-            <p className="text-xs text-sand/70 leading-relaxed">
-              {desc}
-            </p>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
 
 function Index() {
   const loaderTournaments = Route.useLoaderData();
@@ -682,18 +477,8 @@ function Index() {
             </div>
           </div>
 
-          {/* Carousel */}
-          <div className="rounded-2xl overflow-hidden border-2 border-border shadow-2xl">
-            <FacilityCarousel />
-          </div>
-
-          {/* Amenities (Carousel on mobile, Compact Grid on desktop) */}
-          <div className="mt-6 sm:mt-8">
-            <AmenitiesCarousel />
-          </div>
-
           {/* Google Maps Location Card */}
-          <div className="mt-8 rounded-2xl border-2 border-border bg-charcoal/95 p-4 sm:p-6 shadow-xl">
+          <div className="mt-4 sm:mt-6 rounded-2xl border-2 border-border bg-charcoal/95 p-4 sm:p-6 shadow-xl">
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 pb-4 border-b border-white/10">
               <div className="space-y-1">
                 <div className="inline-flex items-center gap-2 text-xs font-bold font-mono uppercase tracking-wider text-pickle">

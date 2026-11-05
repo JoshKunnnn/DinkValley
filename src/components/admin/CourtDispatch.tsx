@@ -2282,6 +2282,16 @@ export function CourtDispatch({
     <div className="space-y-6">
       {/* ── Top Level Horizontal Navigation: Match History vs Facility Management ── */}
       <div className="flex items-center gap-2 border-b-2 border-border pb-3 overflow-x-auto no-scrollbar">
+        <a
+          href="/monitor"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="order-last ml-auto px-4 py-2.5 text-xs font-display tracking-wider uppercase border-2 border-pickle bg-charcoal text-pickle hover:bg-pickle hover:text-charcoal transition-all cursor-pointer flex items-center gap-2 shrink-0"
+          title="Open Public Big-Screen Arena Monitor in a new tab for TV display"
+        >
+          <span className="h-2 w-2 rounded-full bg-pickle animate-pulse" />
+          <span>Launch Big Monitor (TV)</span>
+        </a>
         <button
           type="button"
           onClick={() => setMainDispatchTab("history")}

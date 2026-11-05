@@ -695,13 +695,28 @@ export async function dbGetMatches(tournamentSlug?: string): Promise<LiveMatch[]
       if (error || !dbMatches) return [];
 
       const mapped: LiveMatch[] = dbMatches.map((m) => {
+        const rawRallies = m.rallies as any;
+        const isWrappedRallies =
+          Boolean(rawRallies && typeof rawRallies === "object" && !Array.isArray(rawRallies));
+        const parsedRallies = Array.isArray(rawRallies)
+          ? rawRallies
+          : isWrappedRallies && Array.isArray(rawRallies.events)
+            ? rawRallies.events
+            : [];
+        const matchMeta =
+          isWrappedRallies && rawRallies.meta && typeof rawRallies.meta === "object"
+            ? rawRallies.meta
+            : {};
         const score: LiveScore = {
           teamAScore: m.team_a_score,
           teamBScore: m.team_b_score,
           servingTeam: (m.serving_team as "A" | "B") || "A",
           serverNumber: (m.server_number as 1 | 2) || 2,
-          activeServerBase: 1,
-          rallies: Array.isArray(m.rallies) ? (m.rallies as any) : [],
+          activeServerBase:
+            matchMeta.activeServerBase === 1 || matchMeta.activeServerBase === 2
+              ? matchMeta.activeServerBase
+              : undefined,
+          rallies: parsedRallies,
         };
 
         const resolvedCat =
@@ -738,6 +753,19 @@ export async function dbGetMatches(tournamentSlug?: string): Promise<LiveMatch[]
           tournamentSlug: m.tournament_slug || tournamentSlug || undefined,
           categoryId: catSlug || undefined,
           stage: m.stage || undefined,
+          tossDone: typeof matchMeta.tossDone === "boolean" ? matchMeta.tossDone : undefined,
+          tossWinner: matchMeta.tossWinner || undefined,
+          teamABase1Player: matchMeta.teamABase1Player || undefined,
+          teamBBase1Player: matchMeta.teamBBase1Player || undefined,
+          teamASide:
+            matchMeta.teamASide === "left" || matchMeta.teamASide === "right"
+              ? matchMeta.teamASide
+              : undefined,
+          courtPositionUpdatedAt:
+            typeof matchMeta.courtPositionUpdatedAt === "number"
+              ? matchMeta.courtPositionUpdatedAt
+              : undefined,
+          resetAt: typeof matchMeta.resetAt === "number" ? matchMeta.resetAt : undefined,
         };
       });
 
@@ -923,7 +951,7 @@ export function isSameCategory(catA?: string | null, catB?: string | null): bool
 }
 
 function getMatchFingerprint(m: LiveMatch, slug?: string): string {
-  return `${m.id}|${slug || m.tournamentSlug || ""}|${m.categoryId || ""}|${m.court || ""}|${m.status}|${m.score?.teamAScore}|${m.score?.teamBScore}|${m.score?.servingTeam}|${m.score?.serverNumber}|${m.winnerTeam || ""}|${m.startedAt || 0}|${m.endedAt || 0}|${m.officiatedBy || ""}`;
+  return `${m.id}|${slug || m.tournamentSlug || ""}|${m.categoryId || ""}|${m.court || ""}|${m.status}|${m.score?.teamAScore}|${m.score?.teamBScore}|${m.score?.servingTeam}|${m.score?.serverNumber}|${m.score?.activeServerBase ?? ""}|${m.teamABase1Player || ""}|${m.teamBBase1Player || ""}|${m.teamASide || ""}|${m.tossDone ? "1" : "0"}|${m.tossWinner || ""}|${m.courtPositionUpdatedAt || 0}|${m.resetAt || 0}|${m.winnerTeam || ""}|${m.startedAt || 0}|${m.endedAt || 0}|${m.officiatedBy || ""}`;
 }
 
 function formatMatchRow(match: LiveMatch, tourneyId: string | null, slug: string | null) {
@@ -947,7 +975,30 @@ function formatMatchRow(match: LiveMatch, tourneyId: string | null, slug: string
     team_b_score: match.score.teamBScore,
     serving_team: match.score.servingTeam,
     server_number: match.score.serverNumber,
-    rallies: match.score.rallies as any,
+    rallies: (Boolean(
+      match.teamABase1Player ||
+      match.teamBBase1Player ||
+      match.teamASide ||
+      match.tossDone !== undefined ||
+      match.tossWinner ||
+      match.score?.activeServerBase !== undefined ||
+      match.courtPositionUpdatedAt ||
+      match.resetAt
+    )
+      ? {
+          events: match.score.rallies || [],
+          meta: {
+            teamABase1Player: match.teamABase1Player || undefined,
+            teamBBase1Player: match.teamBBase1Player || undefined,
+            teamASide: match.teamASide || undefined,
+            tossDone: match.tossDone,
+            tossWinner: match.tossWinner || undefined,
+            activeServerBase: match.score.activeServerBase,
+            courtPositionUpdatedAt: match.courtPositionUpdatedAt || undefined,
+            resetAt: match.resetAt || undefined,
+          },
+        }
+      : (match.score.rallies || [])) as any,
     winner_team: match.winnerTeam || null,
     started_at: match.startedAt ? new Date(match.startedAt).toISOString() : null,
     ended_at: match.endedAt ? new Date(match.endedAt).toISOString() : null,

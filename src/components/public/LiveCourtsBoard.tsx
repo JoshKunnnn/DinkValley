@@ -1,4 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
+import { Link } from "@tanstack/react-router";
+import { Monitor } from "lucide-react";
 import type { Category } from "@/data/tournaments";
 import { useMatchStore, type LiveMatch } from "@/lib/match-store";
 import {
@@ -137,7 +139,15 @@ export function LiveCourtsBoard({
           </p>
         </div>
 
-        <div className="flex items-center gap-2 self-start sm:self-auto">
+        <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
+          <Link
+            to="/monitor"
+            className="inline-flex items-center gap-1.5 text-[0.65rem] sm:text-xs font-mono font-bold uppercase tracking-wider border-2 border-pickle px-2.5 sm:px-3.5 py-0.5 sm:py-1 rounded-lg bg-pickle text-charcoal hover:bg-pickle-bright transition-colors shadow-xs"
+            title="Open Full-Screen Big Monitor TV View"
+          >
+            <Monitor size={13} />
+            <span>Big Monitor (TV)</span>
+          </Link>
           <span className="text-[0.65rem] sm:text-xs font-mono font-bold uppercase tracking-wider border-2 border-border px-2.5 sm:px-3 py-0.5 sm:py-1 rounded-lg bg-stone-100 dark:bg-stone-800 text-stone-800 dark:text-stone-200 shadow-xs">
             Auto-Sync Active
           </span>
