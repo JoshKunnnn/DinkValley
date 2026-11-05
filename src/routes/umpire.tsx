@@ -1209,9 +1209,14 @@ function TournamentDesk({
                     >
                       {match.teamAName}
                     </span>
-                    <span className="block text-[0.7rem] text-foreground/80 font-medium truncate">
-                      {match.teamAPlayers.join(" / ")}
-                    </span>
+                    {(() => {
+                      const pA = resolveMatchTeamPlayers(match.teamAPlayers, match.teamAName, "");
+                      return pA.length > 0 ? (
+                        <span className="block text-[0.7rem] text-foreground/80 font-medium font-mono truncate">
+                          {pA.join(" / ")}
+                        </span>
+                      ) : null;
+                    })()}
                   </div>
                   <span
                     className={`font-display text-2xl ${match.status !== "scheduled" ? "text-foreground" : "text-foreground/50"
@@ -1234,9 +1239,14 @@ function TournamentDesk({
                     >
                       {match.teamBName}
                     </span>
-                    <span className="block text-[0.7rem] text-foreground/80 font-medium truncate">
-                      {match.teamBPlayers.join(" / ")}
-                    </span>
+                    {(() => {
+                      const pB = resolveMatchTeamPlayers(match.teamBPlayers, match.teamBName, "");
+                      return pB.length > 0 ? (
+                        <span className="block text-[0.7rem] text-foreground/80 font-medium font-mono truncate">
+                          {pB.join(" / ")}
+                        </span>
+                      ) : null;
+                    })()}
                   </div>
                   <span
                     className={`font-display text-2xl ${match.status !== "scheduled" ? "text-foreground" : "text-foreground/50"
@@ -1533,6 +1543,16 @@ function CourtDiagramView({
   const rightPos = rightTeam === "A" ? teamAPos : teamBPos;
   const leftName = leftTeam === "A" ? match.teamAName : match.teamBName;
   const rightName = rightTeam === "A" ? match.teamAName : match.teamBName;
+  const leftPlayers = resolveMatchTeamPlayers(
+    leftTeam === "A" ? match.teamAPlayers : match.teamBPlayers,
+    leftName,
+    ""
+  );
+  const rightPlayers = resolveMatchTeamPlayers(
+    rightTeam === "A" ? match.teamAPlayers : match.teamBPlayers,
+    rightName,
+    ""
+  );
   const onSwapBaseLeft = leftTeam === "A" ? onSwapBaseA : onSwapBaseB;
   const onSwapBaseRight = rightTeam === "A" ? onSwapBaseA : onSwapBaseB;
 
@@ -1741,9 +1761,16 @@ function CourtDiagramView({
         <div className="mt-3 flex items-center justify-between text-xs gap-2">
           {/* Left Team Details & Swap Base */}
           <div className="flex-1 flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2 min-w-0">
-            <span className="font-bold text-sand text-xs sm:text-sm truncate" title={leftName}>
-              {leftName}
-            </span>
+            <div className="min-w-0">
+              <span className="font-bold text-sand text-xs sm:text-sm truncate block" title={leftName}>
+                {leftName}
+              </span>
+              {leftPlayers.length > 0 && (
+                <span className="text-[0.62rem] sm:text-xs text-sand/80 font-mono truncate block">
+                  {leftPlayers.join(" & ")}
+                </span>
+              )}
+            </div>
             {!leftPos.isSingles && !isFinal && onSwapBaseLeft && (
               <button
                 type="button"
@@ -1781,9 +1808,16 @@ function CourtDiagramView({
                 Swap Base
               </button>
             )}
-            <span className="font-bold text-sand text-xs sm:text-sm truncate" title={rightName}>
-              {rightName}
-            </span>
+            <div className="min-w-0">
+              <span className="font-bold text-sand text-xs sm:text-sm truncate block" title={rightName}>
+                {rightName}
+              </span>
+              {rightPlayers.length > 0 && (
+                <span className="text-[0.62rem] sm:text-xs text-sand/80 font-mono truncate block">
+                  {rightPlayers.join(" & ")}
+                </span>
+              )}
+            </div>
           </div>
         </div>
       </div>
@@ -2396,17 +2430,37 @@ function UmpireConsole({
                     {/* Tile Body: Matchup or Waiting */}
                     <div className="py-2 min-w-0">
                       {courtMatch ? (
-                        <div className="space-y-0.5 min-w-0">
-                          <div className="text-xs font-bold text-sand truncate">
-                            {courtMatch.teamAName}
-                          </div>
-                          <div className="text-[0.6rem] font-bold uppercase tracking-widest text-sand/50">
-                            vs
-                          </div>
-                          <div className="text-xs font-bold text-sand truncate">
-                            {courtMatch.teamBName}
-                          </div>
-                        </div>
+                        (() => {
+                          const pA = resolveMatchTeamPlayers(courtMatch.teamAPlayers, courtMatch.teamAName, "");
+                          const pB = resolveMatchTeamPlayers(courtMatch.teamBPlayers, courtMatch.teamBName, "");
+                          return (
+                            <div className="space-y-1 min-w-0">
+                              <div className="min-w-0">
+                                <div className="text-xs font-bold text-sand truncate">
+                                  {courtMatch.teamAName}
+                                </div>
+                                {pA.length > 0 && (
+                                  <div className="text-[0.62rem] text-sand/80 font-mono truncate">
+                                    {pA.join(" & ")}
+                                  </div>
+                                )}
+                              </div>
+                              <div className="text-[0.58rem] font-bold uppercase tracking-widest text-sand/50">
+                                vs
+                              </div>
+                              <div className="min-w-0">
+                                <div className="text-xs font-bold text-sand truncate">
+                                  {courtMatch.teamBName}
+                                </div>
+                                {pB.length > 0 && (
+                                  <div className="text-[0.62rem] text-sand/80 font-mono truncate">
+                                    {pB.join(" & ")}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })()
                       ) : (
                         <div className="text-center py-1">
                           <span className="text-[0.68rem] uppercase tracking-wider font-bold text-foreground/70 block">
@@ -2556,39 +2610,49 @@ function UmpireConsole({
                           </div>
 
                           {/* Horizontal Team Matchup */}
-                          <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto_1fr] items-center gap-2 bg-charcoal/80 p-2 sm:p-2.5 border border-white/10">
-                            <div className="min-w-0">
-                              <span className="block text-sm font-bold text-sand truncate">
-                                {courtMatch.teamAName}
-                              </span>
-                              <span className="block text-xs text-sand/80 font-medium truncate">
-                                {courtMatch.teamAPlayers.join(" / ")}
-                              </span>
-                              {courtMatch.teamAClub && (
-                                <span className="inline-block mt-0.5 text-[0.6rem] px-1.5 py-0.2 bg-pickle/20 text-pickle border border-pickle/40 uppercase tracking-wider font-bold">
-                                  {courtMatch.teamAClub}
-                                </span>
-                              )}
-                            </div>
+                          {(() => {
+                            const pA = resolveMatchTeamPlayers(courtMatch.teamAPlayers, courtMatch.teamAName, "");
+                            const pB = resolveMatchTeamPlayers(courtMatch.teamBPlayers, courtMatch.teamBName, "");
+                            return (
+                              <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto_1fr] items-center gap-2 bg-charcoal/80 p-2 sm:p-2.5 border border-white/10">
+                                <div className="min-w-0">
+                                  <span className="block text-sm font-bold text-sand truncate">
+                                    {courtMatch.teamAName}
+                                  </span>
+                                  {pA.length > 0 && (
+                                    <span className="block text-xs text-sand/80 font-medium font-mono truncate mt-0.5">
+                                      {pA.join(" & ")}
+                                    </span>
+                                  )}
+                                  {courtMatch.teamAClub && (
+                                    <span className="inline-block mt-0.5 text-[0.6rem] px-1.5 py-0.2 bg-pickle/20 text-pickle border border-pickle/40 uppercase tracking-wider font-bold">
+                                      {courtMatch.teamAClub}
+                                    </span>
+                                  )}
+                                </div>
 
-                            <div className="text-xs font-bold uppercase tracking-widest text-center text-sand/60 px-2 py-0.5 sm:border-x sm:border-white/10">
-                              vs
-                            </div>
+                                <div className="text-xs font-bold uppercase tracking-widest text-center text-sand/60 px-2 py-0.5 sm:border-x sm:border-white/10">
+                                  vs
+                                </div>
 
-                            <div className="min-w-0 sm:text-right">
-                              <span className="block text-sm font-bold text-sand truncate">
-                                {courtMatch.teamBName}
-                              </span>
-                              <span className="block text-xs text-sand/80 font-medium truncate">
-                                {courtMatch.teamBPlayers.join(" / ")}
-                              </span>
-                              {courtMatch.teamBClub && (
-                                <span className="inline-block mt-0.5 text-[0.6rem] px-1.5 py-0.2 bg-pickle/20 text-pickle border border-pickle/40 uppercase tracking-wider font-bold">
-                                  {courtMatch.teamBClub}
-                                </span>
-                              )}
-                            </div>
-                          </div>
+                                <div className="min-w-0 sm:text-right">
+                                  <span className="block text-sm font-bold text-sand truncate">
+                                    {courtMatch.teamBName}
+                                  </span>
+                                  {pB.length > 0 && (
+                                    <span className="block text-xs text-sand/80 font-medium font-mono truncate mt-0.5">
+                                      {pB.join(" & ")}
+                                    </span>
+                                  )}
+                                  {courtMatch.teamBClub && (
+                                    <span className="inline-block mt-0.5 text-[0.6rem] px-1.5 py-0.2 bg-pickle/20 text-pickle border border-pickle/40 uppercase tracking-wider font-bold">
+                                      {courtMatch.teamBClub}
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })()}
                         </div>
                       ) : (
                         <div className="py-2 space-y-1">
@@ -2777,41 +2841,51 @@ function UmpireConsole({
                           )}
 
                           {/* Matchup */}
-                          <div className="space-y-2.5">
-                            {/* Team A */}
-                            <div className="bg-charcoal/80 p-2.5 border border-white/10">
-                              <span className="block text-sm font-bold text-sand truncate">
-                                {courtMatch.teamAName}
-                              </span>
-                              <span className="block text-xs text-sand/80 font-medium truncate mt-0.5">
-                                {courtMatch.teamAPlayers.join(" / ")}
-                              </span>
-                              {courtMatch.teamAClub && (
-                                <span className="inline-block mt-1 text-[0.6rem] px-1.5 py-0.2 bg-pickle/20 text-pickle border border-pickle/40 uppercase tracking-wider font-bold font-sans">
-                                  {courtMatch.teamAClub}
-                                </span>
-                              )}
-                            </div>
+                          {(() => {
+                            const pA = resolveMatchTeamPlayers(courtMatch.teamAPlayers, courtMatch.teamAName, "");
+                            const pB = resolveMatchTeamPlayers(courtMatch.teamBPlayers, courtMatch.teamBName, "");
+                            return (
+                              <div className="space-y-2.5">
+                                {/* Team A */}
+                                <div className="bg-charcoal/80 p-2.5 border border-white/10">
+                                  <span className="block text-sm font-bold text-sand truncate">
+                                    {courtMatch.teamAName}
+                                  </span>
+                                  {pA.length > 0 && (
+                                    <span className="block text-xs text-sand/80 font-medium font-mono truncate mt-0.5">
+                                      {pA.join(" & ")}
+                                    </span>
+                                  )}
+                                  {courtMatch.teamAClub && (
+                                    <span className="inline-block mt-1 text-[0.6rem] px-1.5 py-0.2 bg-pickle/20 text-pickle border border-pickle/40 uppercase tracking-wider font-bold font-sans">
+                                      {courtMatch.teamAClub}
+                                    </span>
+                                  )}
+                                </div>
 
-                            <div className="text-xs font-bold uppercase tracking-widest text-center text-sand/60">
-                              vs
-                            </div>
+                                <div className="text-xs font-bold uppercase tracking-widest text-center text-sand/60">
+                                  vs
+                                </div>
 
-                            {/* Team B */}
-                            <div className="bg-charcoal/80 p-2.5 border border-white/10">
-                              <span className="block text-sm font-bold text-sand truncate">
-                                {courtMatch.teamBName}
-                              </span>
-                              <span className="block text-xs text-sand/80 font-medium truncate mt-0.5">
-                                {courtMatch.teamBPlayers.join(" / ")}
-                              </span>
-                              {courtMatch.teamBClub && (
-                                <span className="inline-block mt-1 text-[0.6rem] px-1.5 py-0.2 bg-pickle/20 text-pickle border border-pickle/40 uppercase tracking-wider font-bold font-sans">
-                                  {courtMatch.teamBClub}
-                                </span>
-                              )}
-                            </div>
-                          </div>
+                                {/* Team B */}
+                                <div className="bg-charcoal/80 p-2.5 border border-white/10">
+                                  <span className="block text-sm font-bold text-sand truncate">
+                                    {courtMatch.teamBName}
+                                  </span>
+                                  {pB.length > 0 && (
+                                    <span className="block text-xs text-sand/80 font-medium font-mono truncate mt-0.5">
+                                      {pB.join(" & ")}
+                                    </span>
+                                  )}
+                                  {courtMatch.teamBClub && (
+                                    <span className="inline-block mt-1 text-[0.6rem] px-1.5 py-0.2 bg-pickle/20 text-pickle border border-pickle/40 uppercase tracking-wider font-bold font-sans">
+                                      {courtMatch.teamBClub}
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })()}
 
                           {/* Official Info */}
                           <div className="text-xs uppercase tracking-wider text-sand/80 flex items-center justify-between pt-1">
@@ -3066,6 +3140,16 @@ function UmpireConsole({
               <div className="font-bold text-sand text-sm">
                 {match.teamAName} <span className="text-sand/50 font-normal">vs</span> {match.teamBName}
               </div>
+              {(() => {
+                const pA = resolveMatchTeamPlayers(match.teamAPlayers, match.teamAName, "");
+                const pB = resolveMatchTeamPlayers(match.teamBPlayers, match.teamBName, "");
+                if (pA.length === 0 && pB.length === 0) return null;
+                return (
+                  <div className="text-[0.7rem] text-sand/80 font-mono">
+                    {pA.length > 0 ? pA.join(" & ") : match.teamAName} vs {pB.length > 0 ? pB.join(" & ") : match.teamBName}
+                  </div>
+                );
+              })()}
               <div className="flex items-center justify-between pt-2 border-t border-border/50 text-[0.7rem]">
                 <span className="text-sand/70">Current Score:</span>
                 <span className="font-mono font-bold text-sand">
@@ -3882,6 +3966,14 @@ function UmpireConsole({
                   <span className="font-bold text-xs sm:text-sm text-foreground block truncate" title={match.teamAName}>
                     {match.teamAName}
                   </span>
+                  {(() => {
+                    const pA = resolveMatchTeamPlayers(match.teamAPlayers, match.teamAName, "");
+                    return pA.length > 0 ? (
+                      <span className="text-[0.68rem] text-foreground/80 font-mono block truncate">
+                        {pA.join(" & ")}
+                      </span>
+                    ) : null;
+                  })()}
                   <span className={`font-display text-3xl sm:text-4xl block mt-1 ${s.teamAScore > s.teamBScore ? "text-pickle font-bold" : "text-foreground"}`}>
                     {s.teamAScore}
                   </span>
@@ -3894,6 +3986,14 @@ function UmpireConsole({
                   <span className="font-bold text-xs sm:text-sm text-foreground block truncate" title={match.teamBName}>
                     {match.teamBName}
                   </span>
+                  {(() => {
+                    const pB = resolveMatchTeamPlayers(match.teamBPlayers, match.teamBName, "");
+                    return pB.length > 0 ? (
+                      <span className="text-[0.68rem] text-foreground/80 font-mono block truncate">
+                        {pB.join(" & ")}
+                      </span>
+                    ) : null;
+                  })()}
                   <span className={`font-display text-3xl sm:text-4xl block mt-1 ${s.teamBScore > s.teamAScore ? "text-pickle font-bold" : "text-foreground"}`}>
                     {s.teamBScore}
                   </span>

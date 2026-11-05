@@ -8,6 +8,7 @@ import {
   migrateMatchesToDeterministicIds,
   isMatchMatchingStation,
   markLocalMatchMutation,
+  resolveMatchTeamPlayers,
 } from "./match-store";
 import {
   dbUpdateCourtStation,
@@ -515,14 +516,22 @@ export async function dispatchMatchToCourt(
     (match.id ? currentQueue.find((q) => q.matchId === match.id) : undefined);
   const resolvedTeamAName = (match.teamAName || existingByExactId?.teamAName || "").trim();
   const resolvedTeamBName = (match.teamBName || existingByExactId?.teamBName || "").trim();
-  const resolvedTeamAPlayers =
+  const rawAPlayers =
     match.teamAPlayers && match.teamAPlayers.length > 0
       ? match.teamAPlayers
       : (existingByExactId?.teamAPlayers ?? []);
-  const resolvedTeamBPlayers =
+  const resolvedTeamAPlayers =
+    rawAPlayers.length > 0
+      ? rawAPlayers
+      : resolveMatchTeamPlayers([], resolvedTeamAName, "");
+  const rawBPlayers =
     match.teamBPlayers && match.teamBPlayers.length > 0
       ? match.teamBPlayers
       : (existingByExactId?.teamBPlayers ?? []);
+  const resolvedTeamBPlayers =
+    rawBPlayers.length > 0
+      ? rawBPlayers
+      : resolveMatchTeamPlayers([], resolvedTeamBName, "");
 
   if (!resolvedTeamAName || !resolvedTeamBName) {
     console.warn(`[Dispatch Rejected] Cannot dispatch match (${match.id || "unknown"}) with blank team names.`);

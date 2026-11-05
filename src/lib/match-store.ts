@@ -1182,7 +1182,53 @@ export function resolveMatchTeamPlayers(
       }
     }
   }
-  return cleaned.length > 0 ? cleaned : [cleanTeam || fallbackLabel];
+
+  // Fallback: Check registered tournament categories in localStorage cache if player names are missing
+  if (cleanTeam && typeof window !== "undefined") {
+    try {
+      const raw = localStorage.getItem("dv_tournaments_offline_cache") || localStorage.getItem("dv_tournaments");
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          const normTeam = cleanTeam.toLowerCase();
+          for (const t of parsed) {
+            for (const cat of (t.categories || [])) {
+              for (const tm of (cat.teams || [])) {
+                const tmName = (tm.name || "").trim().toLowerCase();
+                const tmId = (tm.id || "").trim().toLowerCase();
+                const tmClub = (tm.club || "").trim().toLowerCase();
+                const isMatch =
+                  tmName === normTeam ||
+                  tmId === normTeam ||
+                  (cleaned.length === 1 && (tmName === cleaned[0]!.toLowerCase() || tmId === cleaned[0]!.toLowerCase())) ||
+                  (tmClub && tmClub === normTeam);
+                if (isMatch && Array.isArray(tm.players) && tm.players.length > 0) {
+                  const tmClean = tm.players
+                    .flatMap((p: any) => String(p).split(/\s*[\/&]\s*/))
+                    .map((p: string) => p.trim())
+                    .filter(Boolean);
+                  if (tmClean.length >= 2) return tmClean;
+                  if (tmClean.length === 1 && tmClean[0]!.toLowerCase() !== normTeam) {
+                    return tmClean;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    } catch {
+      // ignore parsing or storage exceptions
+    }
+  }
+
+  if (cleaned.length > 0) {
+    if (fallbackLabel === "" && cleaned.length === 1 && cleaned[0]!.toLowerCase() === cleanTeam.toLowerCase()) {
+      return [];
+    }
+    return cleaned;
+  }
+  return fallbackLabel ? [cleanTeam || fallbackLabel] : [];
 }
 
 /**

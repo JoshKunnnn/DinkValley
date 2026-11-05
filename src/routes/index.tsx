@@ -6,8 +6,6 @@ import { dbGetTournaments } from "@/lib/supabase-service";
 import type { Tournament } from "@/data/tournaments";
 import { CategorySheet } from "@/components/public/CategorySheet";
 import {
-  ChevronDown,
-  ChevronUp,
   MapPin,
   Navigation,
   ExternalLink,
@@ -77,49 +75,12 @@ function getTournamentStatusDisplay(status: string) {
   };
 }
 
-/* ── FAQ Data (Free of Emojis and Emoticons) ── */
-const FAQS = [
-  {
-    q: "How do I register for a tournament?",
-    a: "Browse the tournaments section below, select your desired event, and choose your preferred division. You will be prompted to enter player details and submit proof of payment via GCash or bank transfer. Once reviewed by our tournament desk, your registration status is updated to Verified.",
-  },
-  {
-    q: "What is the entry fee and payment process?",
-    a: "Entry fees vary by tournament and category. Official payment instructions are displayed during registration. Please upload your transaction reference or receipt to guarantee your roster slot before the registration deadline.",
-  },
-  {
-    q: "How is player classification determined if I do not have a DUPR rating?",
-    a: "If you do not yet have an official DUPR rating, you may self-declare in accordance with our Category Qualifications guidelines below. The tournament committee reserves the authority to review and adjust category placement during warm-up observation on Day 1 to ensure competitive integrity.",
-  },
-  {
-    q: "What is the tournament format?",
-    a: "Standard Dink Valley tournaments feature a round-robin pool play phase to establish rankings, followed by a single-elimination playoff bracket. Playoff matches are typically best-of-3 games to 11 points, win by 2.",
-  },
-  {
-    q: "Can I enter multiple categories in the same tournament?",
-    a: "Yes. Players are permitted to register across distinct divisions (for example, Open Doubles and 40+ Mixed), provided the schedule allows and separate entry fees are paid. Double registration within the same skill rating is not permitted.",
-  },
-  {
-    q: "What happens if a match is interrupted due to injury or withdrawal?",
-    a: "In the event of an unavoidable mid-match withdrawal, a walkover is recorded in favor of the opposing team. Match regulations are governed strictly by the Tournament Director and certified match officials.",
-  },
-  {
-    q: "Are outside refreshments permitted in the facility?",
-    a: "Personal sealed hydration bottles and electrolyte packs are permitted. Outside prepared meals are not allowed in the court area. Dink Valley operates a fully stocked refreshment and hydration counter on site.",
-  },
-  {
-    q: "Where is Dink Valley located?",
-    a: "Dink Valley Pickleball Club is located at C. Ebersole St (near 3 I. Ancheta St), Santiago City, 3311 Isabela, Philippines.",
-  },
-];
-
 function Index() {
   const loaderTournaments = Route.useLoaderData();
   const { tournaments } = useTournamentStore();
   const displayTournaments =
     tournaments.length > 0 ? tournaments : (loaderTournaments ?? []);
 
-  const [openFaq, setOpenFaq] = useState<number | null>(null);
   const [statusFilter, setStatusFilter] = useState<"all" | "open" | "live" | "finished">("all");
   const [selectedTournament, setSelectedTournament] = useState<Tournament | null>(null);
 
@@ -220,7 +181,7 @@ function Index() {
               </div>
 
               {/* Core Metrics Strip */}
-              <div className="mt-10 pt-6 border-t border-white/10 grid grid-cols-3 gap-4 text-left">
+              <div className="mt-10 pt-6 border-t border-white/10 grid grid-cols-2 gap-6 max-w-xs text-left">
                 <div>
                   <span className="block font-display text-2xl sm:text-3xl text-sand leading-none font-bold">4</span>
                   <span className="text-[0.65rem] sm:text-xs uppercase tracking-wider text-sand/65 font-semibold mt-1 block">
@@ -231,12 +192,6 @@ function Index() {
                   <span className="block font-display text-2xl sm:text-3xl text-pickle leading-none font-bold">100%</span>
                   <span className="text-[0.65rem] sm:text-xs uppercase tracking-wider text-sand/65 font-semibold mt-1 block">
                     Cloud Synced
-                  </span>
-                </div>
-                <div>
-                  <span className="block font-display text-2xl sm:text-3xl text-sand leading-none font-bold">DUPR</span>
-                  <span className="text-[0.65rem] sm:text-xs uppercase tracking-wider text-sand/65 font-semibold mt-1 block">
-                    Rated Divisions
                   </span>
                 </div>
               </div>
@@ -543,7 +498,7 @@ function Index() {
         </div>
       </section>
 
-      {/* ── 5. OFFICIAL CATEGORY QUALIFICATIONS & DUPR CRITERIA ── */}
+      {/* ── 5. OFFICIAL CATEGORY QUALIFICATIONS ── */}
       <section id="qualifications" className="mx-auto max-w-6xl px-4 py-10 sm:py-14 md:py-16 scroll-mt-16 sm:scroll-mt-20 w-full">
         <div className="text-center max-w-2xl mx-auto mb-6 sm:mb-8">
           <span className="inline-block border border-pickle px-3 py-1 text-xs font-bold uppercase tracking-[0.28em] text-pickle">
@@ -583,7 +538,7 @@ function Index() {
               <span className="font-display text-4xl sm:text-5xl text-pickle font-bold opacity-70">01</span>
               <h3 className="font-display text-xl sm:text-2xl text-sand leading-snug">Pick Your Event &amp; Division</h3>
               <p className="text-xs text-sand/70 leading-relaxed">
-                Review active tournament dates, inspect division requirements (DUPR / age / level), and select where you and your partner will compete.
+                Review active tournament dates, inspect division requirements (skill level / age / division), and select where you and your partner will compete.
               </p>
             </div>
 
@@ -606,59 +561,7 @@ function Index() {
         </div>
       </section>
 
-      {/* ── 7. FREQUENTLY ASKED QUESTIONS (#faq) ── */}
-      <section id="faq" className="mx-auto max-w-3xl px-4 py-10 sm:py-14 md:py-16 scroll-mt-16 sm:scroll-mt-20 w-full">
-        <div className="text-center mb-10">
-          <span className="inline-block border border-pickle px-3 py-1 text-xs font-bold uppercase tracking-[0.28em] text-pickle">
-            Need Clarification?
-          </span>
-          <h2 className="mt-3 font-display text-4xl sm:text-5xl text-foreground">
-            Frequently Asked Questions
-          </h2>
-          <p className="mt-2 text-sm text-muted-foreground">
-            Common questions regarding registration rules, fees, qualifications, and court etiquette.
-          </p>
-        </div>
-
-        <div className="space-y-3">
-          {FAQS.map((faq, idx) => {
-            const isOpen = openFaq === idx;
-            return (
-              <div
-                key={idx}
-                className={`border-2 rounded-xl overflow-hidden transition-all duration-200 ${isOpen
-                    ? "border-pickle bg-card shadow-sm"
-                    : "border-border bg-card hover:border-pickle/50"
-                  }`}
-              >
-                <button
-                  id={`faq-${idx}`}
-                  type="button"
-                  onClick={() => setOpenFaq(isOpen ? null : idx)}
-                  aria-expanded={isOpen}
-                  className="w-full flex items-center justify-between gap-4 px-5 py-4 text-left cursor-pointer"
-                >
-                  <span className="text-sm sm:text-base font-bold text-foreground leading-snug">
-                    {faq.q}
-                  </span>
-                  {isOpen ? (
-                    <ChevronUp size={18} className="text-pickle shrink-0" />
-                  ) : (
-                    <ChevronDown size={18} className="text-muted-foreground shrink-0" />
-                  )}
-                </button>
-                {isOpen && (
-                  <div className="px-5 pb-5 pt-1 border-t border-border/50">
-                    <p className="text-sm text-foreground/80 leading-relaxed">{faq.a}</p>
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </section>
-
-      {/* ── 8. CLOSING CTA CALLOUT ── */}
+      {/* ── 7. CLOSING CTA CALLOUT ── */}
       <section className="mx-auto max-w-6xl px-4 pb-20 sm:px-6">
         <div className="rounded-3xl border-2 border-border bg-charcoal p-8 sm:p-12 text-center text-sand relative overflow-hidden shadow-2xl">
           <div className="relative max-w-xl mx-auto space-y-4">
