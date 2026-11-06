@@ -4,6 +4,7 @@ import { type LiveMatch, resolveMatchTeamPlayers } from "@/lib/match-store";
 import type { BracketGroup } from "@/components/admin/BracketDraw";
 import type { KnockoutMatch } from "@/components/admin/DrawsManager";
 import { isSameCategory } from "@/lib/supabase-service";
+import { KnockoutTreeVisualizer } from "./KnockoutTreeVisualizer";
 import {
   Trophy,
   ShieldCheck,
@@ -444,8 +445,161 @@ export function KnockoutBracketListView({
 
     const items: KnockoutCardItem[] = [];
 
-    // CASE 1: 16-Pair Bracket (e.g. 5 to 8 groups, or 17-32 participants)
-    if (totalExpected >= 9 || groups.length >= 5) {
+    // CASE 0: 10-Team / 5-Pool Bracket (2 Play-Ins in R16 + 6 BYEs directly to Quarterfinals)
+    if (groups.length === 5 || (rankedQualifiers.length === 10 && groups.length <= 5)) {
+      // 2 Play-In Matches (Round of 16)
+      items.push({
+        id: "proj-r16-1",
+        round: "Round of 16",
+        label: "Round of 16 - Match 1",
+        slotA: getBySeed(8),
+        slotB: getBySeed(9),
+        status: "projected",
+        advancesTo: "Winner advances to Quarterfinal 1",
+      });
+
+      items.push({
+        id: "proj-r16-2",
+        round: "Round of 16",
+        label: "Round of 16 - Match 2",
+        slotA: getBySeed(7),
+        slotB: getBySeed(10),
+        status: "projected",
+        advancesTo: "Winner advances to Quarterfinal 3",
+      });
+
+      // 4 Quarterfinals (Seeds #1, #4, #5, #2, #3, #6 hold BYEs)
+      const s1 = getBySeed(1);
+      items.push({
+        id: "proj-qf-1",
+        round: "Quarterfinal",
+        label: "Quarterfinal 1",
+        slotA: {
+          ...s1,
+          label: s1.team ? `${s1.label} (BYE)` : "Seed #1 (BYE - Direct to QF)",
+          isBye: true,
+        },
+        slotB: {
+          label: "Winner of R16 Match 1 (Seed #8 vs #9)",
+          seedNum: 8,
+          isLocked: false,
+          isProjected: false,
+        },
+        status: "projected",
+        advancesTo: "Winner advances to Semifinal 1",
+      });
+
+      const s4 = getBySeed(4);
+      const s5 = getBySeed(5);
+      items.push({
+        id: "proj-qf-2",
+        round: "Quarterfinal",
+        label: "Quarterfinal 2",
+        slotA: {
+          ...s4,
+          label: s4.team ? `${s4.label} (BYE)` : "Seed #4 (BYE - Direct to QF)",
+          isBye: true,
+        },
+        slotB: {
+          ...s5,
+          label: s5.team ? `${s5.label} (BYE)` : "Seed #5 (BYE - Direct to QF)",
+          isBye: true,
+        },
+        status: "projected",
+        advancesTo: "Winner advances to Semifinal 1",
+      });
+
+      const s2 = getBySeed(2);
+      items.push({
+        id: "proj-qf-3",
+        round: "Quarterfinal",
+        label: "Quarterfinal 3",
+        slotA: {
+          ...s2,
+          label: s2.team ? `${s2.label} (BYE)` : "Seed #2 (BYE - Direct to QF)",
+          isBye: true,
+        },
+        slotB: {
+          label: "Winner of R16 Match 2 (Seed #7 vs #10)",
+          seedNum: 7,
+          isLocked: false,
+          isProjected: false,
+        },
+        status: "projected",
+        advancesTo: "Winner advances to Semifinal 2",
+      });
+
+      const s3 = getBySeed(3);
+      const s6 = getBySeed(6);
+      items.push({
+        id: "proj-qf-4",
+        round: "Quarterfinal",
+        label: "Quarterfinal 4",
+        slotA: {
+          ...s3,
+          label: s3.team ? `${s3.label} (BYE)` : "Seed #3 (BYE - Direct to QF)",
+          isBye: true,
+        },
+        slotB: {
+          ...s6,
+          label: s6.team ? `${s6.label} (BYE)` : "Seed #6 (BYE - Direct to QF)",
+          isBye: true,
+        },
+        status: "projected",
+        advancesTo: "Winner advances to Semifinal 2",
+      });
+
+      // 2 Semifinals
+      items.push({
+        id: "proj-sf-1",
+        round: "Semifinal",
+        label: "Semifinal 1",
+        slotA: { label: "Winner of Quarterfinal 1", seedNum: 1, isLocked: false, isProjected: false },
+        slotB: { label: "Winner of Quarterfinal 2", seedNum: 4, isLocked: false, isProjected: false },
+        status: "projected",
+        advancesTo: "Winner advances to Championship Final",
+      });
+      items.push({
+        id: "proj-sf-2",
+        round: "Semifinal",
+        label: "Semifinal 2",
+        slotA: { label: "Winner of Quarterfinal 3", seedNum: 2, isLocked: false, isProjected: false },
+        slotB: { label: "Winner of Quarterfinal 4", seedNum: 3, isLocked: false, isProjected: false },
+        status: "projected",
+        advancesTo: "Winner advances to Championship Final",
+      });
+
+      // Championship Final & Bronze
+      items.push({
+        id: "proj-final",
+        round: "Final",
+        label: "Championship Final",
+        slotA: { label: "Winner of Semifinal 1", seedNum: 1, isLocked: false, isProjected: false },
+        slotB: { label: "Winner of Semifinal 2", seedNum: 2, isLocked: false, isProjected: false },
+        status: "projected",
+        advancesTo: "Tournament Champion",
+      });
+      items.push({
+        id: "proj-bronze",
+        round: "Bronze",
+        label: "3rd Place Match",
+        slotA: { label: "Runner-up of Semifinal 1", seedNum: 1, isLocked: false, isProjected: false },
+        slotB: { label: "Runner-up of Semifinal 2", seedNum: 2, isLocked: false, isProjected: false },
+        status: "projected",
+        advancesTo: "3rd Place Podium",
+      });
+
+      return {
+        bracketItems: items,
+        bracketCapacity: 10,
+        isPlayoffLive: false,
+        isPlayoffFinished: false,
+        championName: null,
+      };
+    }
+
+    // CASE 1: 16-Pair Bracket (e.g. 6 to 8 groups, or 17-32 participants)
+    if (totalExpected >= 11 || groups.length >= 6) {
       const r16Pairs = [
         { top: { p: "A", r: 1, s: 1 }, bot: { p: "B", r: 2, s: 16 }, qf: "Quarterfinal 1" },
         { top: { p: "C", r: 1, s: 8 }, bot: { p: "D", r: 2, s: 9 },  qf: "Quarterfinal 1" },
@@ -944,38 +1098,16 @@ export function KnockoutBracketListView({
         </div>
       )}
 
-      {/* ── TREE VIEW (Visual Progression) ── */}
+      {/* ── TREE VIEW (Visual Tournament Tree with Connecting Lines) ── */}
       {viewMode === "tree" && (
-        <div className="overflow-x-auto pb-4 pt-2">
-          <div className="flex items-start gap-6 min-w-max">
-            {rounds.map((roundName) => {
-              const roundMatches = bracketItems.filter((m) => m.round === roundName);
-              if (roundMatches.length === 0) return null;
-
-              return (
-                <div key={roundName} className="w-72 sm:w-80 flex-shrink-0 space-y-4">
-                  <div className="flex items-center gap-2 border-b-2 border-pickle pb-2">
-                    <span className="h-2 w-2 rounded-full bg-pickle" />
-                    <h5 className="font-display text-lg text-foreground uppercase tracking-wider truncate">
-                      {roundName === "Final" ? "Finals" : roundName}
-                    </h5>
-                  </div>
-
-                  <div className="space-y-4">
-                    {roundMatches.map((item) => (
-                      <KnockoutMatchCard
-                        key={item.id}
-                        item={item}
-                        highlightTeam={highlightTeam}
-                        onTeamTap={onTeamTap}
-                      />
-                    ))}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
+        <KnockoutTreeVisualizer
+          category={category}
+          bracketItems={bracketItems}
+          isAllRoundRobinComplete={isAllRoundRobinComplete}
+          highlightTeam={highlightTeam}
+          onTeamTap={onTeamTap}
+          poolCount={groups.length || 5}
+        />
       )}
     </div>
   );
