@@ -2325,6 +2325,8 @@ export function isMatchInCategory(
     if (!isDirectMatch) {
       return false;
     }
+    // If categoryId matches directly, this match definitively belongs to this category!
+    return true;
   }
 
   // 4. Reject if match ID explicitly belongs to another division/category
@@ -2345,11 +2347,11 @@ export function isMatchInCategory(
 
     const cleanMatchId = match.id.toLowerCase();
     const catText = `${category.id} ${category.category_slug || ""} ${category.label || ""}`.toLowerCase();
-    const isBegCat = catText.includes("beginner");
-    const isNovCat = catText.includes("novice");
     const isWomCat = catText.includes("women");
     const isMenCat = catText.includes("men") && !catText.includes("women");
     const isMixCat = catText.includes("mix");
+    const isBegCat = catText.includes("beginner") && !isWomCat && !isMixCat;
+    const isNovCat = catText.includes("novice") && !isWomCat && !isMixCat;
 
     if (isBegCat && (cleanMatchId.includes("novice") || cleanMatchId.includes("womens"))) {
       return false;
@@ -2525,6 +2527,8 @@ export function isQueueItemInCategory(
     if (!isDirectMatch) {
       return false;
     }
+    // If categoryId matches directly, this item definitively belongs to this category!
+    return true;
   }
 
   const nameA = item.teamAName?.trim().toLowerCase();
@@ -2543,11 +2547,11 @@ export function isQueueItemInCategory(
   if (item.matchId) {
     const cleanMatchId = item.matchId.toLowerCase();
     const catText = `${category.id} ${category.category_slug || ""} ${category.label || ""}`.toLowerCase();
-    const isBegCat = catText.includes("beginner");
-    const isNovCat = catText.includes("novice");
     const isWomCat = catText.includes("women");
     const isMenCat = catText.includes("men") && !catText.includes("women");
     const isMixCat = catText.includes("mix");
+    const isBegCat = catText.includes("beginner") && !isWomCat && !isMixCat;
+    const isNovCat = catText.includes("novice") && !isWomCat && !isMixCat;
 
     if (isBegCat && (cleanMatchId.includes("novice") || cleanMatchId.includes("womens"))) {
       return false;

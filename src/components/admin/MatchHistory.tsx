@@ -142,89 +142,91 @@ export function MatchHistory({
     return undefined;
   }
 
+/**
+ * Determines whether a completed match belongs to a tournament category.
+ * Prioritizes direct categoryId matching, match ID slug, team roster membership,
+ * and drawn groups before falling back to heuristic matching.
+ */
+function isMatchBelongsToCategory(
+  m: LiveMatch,
+  cat: Category,
+  tournamentSlug?: string,
+): boolean {
+  if (!m || !cat) return false;
+
+  // 1. Direct Category ID / Slug / UUID match (Definitive)
+  if (m.categoryId) {
+    const cleanMatchCat = m.categoryId.trim().toLowerCase();
+    const cleanCatId = cat.id.trim().toLowerCase();
+    const cleanSlug = (cat as any).category_slug?.trim().toLowerCase();
+    const cleanUuid = (cat as any).uuid?.trim().toLowerCase();
+
+    const isDirectMatch =
+      cleanMatchCat === cleanCatId ||
+      (cleanSlug && cleanMatchCat === cleanSlug) ||
+      (cleanUuid && cleanMatchCat === cleanUuid) ||
+      isSameCategory(m.categoryId, cat.id) ||
+      ((cat as any).uuid && isSameCategory(m.categoryId, (cat as any).uuid)) ||
+      ((cat as any).category_slug && isSameCategory(m.categoryId, (cat as any).category_slug));
+
+    if (isDirectMatch) {
+      return true;
+    }
+  }
+
+  // 2. Match ID prefix / slug matching
+  if (m.id) {
+    const cleanMatchId = m.id.toLowerCase();
+    const cleanCatId = cat.id.toLowerCase();
+    const cleanSlug = (cat as any).category_slug?.toLowerCase();
+    if (cleanCatId && cleanMatchId.includes(cleanCatId)) return true;
+    if (cleanSlug && cleanMatchId.includes(cleanSlug)) return true;
+    if (cat.label) {
+      const slugFromLabel = cat.label.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+      if (slugFromLabel && cleanMatchId.includes(slugFromLabel)) return true;
+    }
+  }
+
+  // 3. Team roster membership: Both teams registered under this category
+  if (cat.teams && cat.teams.length > 0 && m.teamAName && m.teamBName) {
+    const validTeams = new Set(cat.teams.map((t) => t.name.trim().toLowerCase()));
+    const hasA = validTeams.has(m.teamAName.trim().toLowerCase());
+    const hasB = validTeams.has(m.teamBName.trim().toLowerCase());
+    if (hasA && hasB) {
+      return true;
+    }
+  }
+
+  // 4. Drawn groups membership
+  const cachedDrawn =
+    getCachedDrawnGroups(tournamentSlug || "", cat.id) ||
+    getCachedDrawnGroups(tournamentSlug || "", (cat as any).category_slug);
+  if (cachedDrawn && Array.isArray(cachedDrawn) && m.teamAName && m.teamBName) {
+    const drawnTeams = new Set<string>();
+    for (const g of cachedDrawn) {
+      for (const s of g.slots || []) {
+        if (s.team?.name) drawnTeams.add(s.team.name.trim().toLowerCase());
+      }
+    }
+    if (
+      drawnTeams.has(m.teamAName.trim().toLowerCase()) &&
+      drawnTeams.has(m.teamBName.trim().toLowerCase())
+    ) {
+      return true;
+    }
+  }
+
+  // 5. Fallback to general court-dispatch isMatchInCategory
+  return isMatchInCategory(m, cat, tournamentSlug);
+}
+
   // Matches for the selected category
   const categoryMatches = useMemo(() => {
     if (selectedCategory === "ALL") return allCompletedMatches;
     const cat = categories.find((c) => c.id === selectedCategory || (c as any).category_slug === selectedCategory);
     if (!cat) return [];
 
-    // Valid team names in this category
-    const validTeamNames = cat.teams && cat.teams.length > 0
-      ? new Set(cat.teams.map((t) => t.name.trim().toLowerCase()))
-      : null;
-
-    // Determine valid bracket letters for this category from drawn groups or team roster count
-    const cachedDrawn = getCachedDrawnGroups(tournamentSlug, cat.id) || getCachedDrawnGroups(tournamentSlug, (cat as any).category_slug);
-    let validLetters: Set<string> | null = null;
-    if (cachedDrawn && Array.isArray(cachedDrawn) && cachedDrawn.length > 0) {
-      validLetters = new Set(
-        cachedDrawn
-          .map((g: any) => (g.letter || g.bracketLetter)?.toUpperCase())
-          .filter(Boolean),
-      );
-    } else if (cat.teams && cat.teams.length > 0) {
-      const numBrackets = Math.ceil(cat.teams.length / 4);
-      validLetters = new Set();
-      for (let i = 0; i < numBrackets; i++) {
-        validLetters.add(String.fromCharCode(65 + i));
-      }
-    }
-
-    return allCompletedMatches.filter((m) => {
-      // 1. Direct category ID check if match has categoryId
-      if (m.categoryId) {
-        const cleanMatchCat = m.categoryId.trim().toLowerCase();
-        const cleanCatId = cat.id.trim().toLowerCase();
-        const cleanSlug = (cat as any).category_slug?.trim().toLowerCase();
-        const cleanUuid = (cat as any).uuid?.trim().toLowerCase();
-        const isMatch =
-          cleanMatchCat === cleanCatId ||
-          (cleanSlug && cleanMatchCat === cleanSlug) ||
-          (cleanUuid && cleanMatchCat === cleanUuid) ||
-          isSameCategory(m.categoryId, cat.id) ||
-          ((cat as any).uuid && isSameCategory(m.categoryId, (cat as any).uuid)) ||
-          ((cat as any).category_slug && isSameCategory(m.categoryId, (cat as any).category_slug));
-        if (!isMatch) {
-          return false;
-        }
-      }
-
-      // 2. Strict roster and player check to disambiguate identical team names (e.g. nanomoly)
-      if (cat.teams && cat.teams.length > 0 && m.teamAName && m.teamBName) {
-        const isPlayoff = isPlayoffMatch(m);
-        const isPlaceholder = (name: string) => !name || name.includes("tbd") || name.includes("winner") || name.includes("bye");
-
-        const checkTeamRoster = (teamName: string, matchPlayers?: string[]) => {
-          const normName = teamName.trim().toLowerCase();
-          const matchingTeams = cat.teams!.filter((t) => t.name.trim().toLowerCase() === normName);
-          if (matchingTeams.length === 0) return false;
-          if (!matchPlayers || matchPlayers.length === 0) return true;
-          const hasPlayersDefined = matchingTeams.some((t) => t.players && t.players.length > 0);
-          if (!hasPlayersDefined) return true;
-          const normPlayers = new Set(matchPlayers.map((p) => p.trim().toLowerCase()));
-          return matchingTeams.some((t) => (t.players || []).some((p) => normPlayers.has(p.trim().toLowerCase())));
-        };
-
-        const okA = checkTeamRoster(m.teamAName, m.teamAPlayers) || (isPlayoff && isPlaceholder(m.teamAName));
-        const okB = checkTeamRoster(m.teamBName, m.teamBPlayers) || (isPlayoff && isPlaceholder(m.teamBName));
-
-        if (!okA || !okB) {
-          return false;
-        }
-      }
-
-      // 3. Fallback to general isMatchInCategory
-      if (!isMatchInCategory(m, cat, tournamentSlug)) return false;
-
-      // 4. Bracket letter bounds check
-      if (validLetters && !isPlayoffMatch(m)) {
-        const letter = getMatchBracketLetter(m);
-        if (letter && !validLetters.has(letter)) {
-          return false;
-        }
-      }
-      return true;
-    });
+    return allCompletedMatches.filter((m) => isMatchBelongsToCategory(m, cat, tournamentSlug));
   }, [allCompletedMatches, selectedCategory, categories, tournamentSlug]);
 
   // Available brackets for selected category
@@ -514,25 +516,9 @@ export function MatchHistory({
             All Divisions ({allCompletedMatches.length})
           </button>
           {categories.map((c) => {
-            const count = allCompletedMatches.filter((m) => {
-              if (m.categoryId) {
-                const cleanMatchCat = m.categoryId.trim().toLowerCase();
-                const cleanCatId = c.id.trim().toLowerCase();
-                const cleanSlug = (c as any).category_slug?.trim().toLowerCase();
-                const cleanUuid = (c as any).uuid?.trim().toLowerCase();
-                const isMatch =
-                  cleanMatchCat === cleanCatId ||
-                  (cleanSlug && cleanMatchCat === cleanSlug) ||
-                  (cleanUuid && cleanMatchCat === cleanUuid) ||
-                  isSameCategory(m.categoryId, c.id) ||
-                  ((c as any).uuid && isSameCategory(m.categoryId, (c as any).uuid)) ||
-                  ((c as any).category_slug && isSameCategory(m.categoryId, (c as any).category_slug));
-                if (!isMatch) {
-                  return false;
-                }
-              }
-              return isMatchInCategory(m, c, tournamentSlug);
-            }).length;
+            const count = allCompletedMatches.filter((m) =>
+              isMatchBelongsToCategory(m, c, tournamentSlug)
+            ).length;
             const isActive = selectedCategory === c.id || (c as any).category_slug === selectedCategory;
             return (
               <button
