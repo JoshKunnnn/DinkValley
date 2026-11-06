@@ -451,11 +451,19 @@ function TournamentPage() {
         <div className="mt-4">
           <TeamFinder
             categories={t.categories}
+            tournamentSlug={t.slug}
             onPick={(pickedTeam, catId) => {
+              // Jump to the player's category and bracket group, highlighting their team.
+              // SimpleBracketView auto-selects the group that contains the highlighted team.
               setActiveId(catId);
               setHighlightTeam(pickedTeam.name);
               setFriendlyMode(true);
-              setFindMatchesTeam(pickedTeam);
+              setFriendlySubTab("bracket");
+              setTimeout(() => {
+                document
+                  .getElementById("friendly-bracket-area")
+                  ?.scrollIntoView({ behavior: "smooth", block: "start" });
+              }, 150);
             }}
           />
         </div>
@@ -475,7 +483,7 @@ function TournamentPage() {
             />
 
             {/* Friendly Sub-view Switcher: Bracket Groups vs Knockout Stage vs All Match Results */}
-            <div className="flex items-center gap-2 overflow-x-auto pb-1 sm:pb-0">
+            <div id="friendly-bracket-area" className="flex items-center gap-2 overflow-x-auto pb-1 sm:pb-0 scroll-mt-20">
               <button
                 type="button"
                 onClick={() => setFriendlySubTab("bracket")}

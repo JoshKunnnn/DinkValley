@@ -7,7 +7,12 @@ import {
   createCategoryScopedMatchId,
   getMatches,
 } from "@/lib/match-store";
-import { bulkSetTeamsInCategory, deleteAllTeamsInCategory, getTournaments } from "@/lib/tournament-store";
+import {
+  bulkSetTeamsInCategory,
+  deleteAllTeamsInCategory,
+  getTournaments,
+  updateCategoryInTournament,
+} from "@/lib/tournament-store";
 import { generateMockTeams, generate32Teams } from "@/lib/team-generator";
 import {
   addMatchesToQueue,
@@ -317,9 +322,12 @@ function balancedDistribute(teams: Team[], numGroups: number): Team[][] {
   return buckets.map((b) => shuffle(b));
 }
 
-const LETTERS = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"];
+export const LETTERS = [
+  "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L",
+  "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"
+];
 
-function getBracketsForCapacity(cap: number): number {
+export function getBracketsForCapacity(cap: number): number {
   if (cap >= 48) return 12;
   if (cap >= 32) return 8;
   if (cap >= 24) return 6;
@@ -344,12 +352,13 @@ export function BracketDraw({
 
   const teams = rawTeams;
   const maxCapacity = category?.maxEntries || (teams.length >= 24 ? 32 : teams.length >= 12 ? 16 : 8);
-  const targetBrackets = getBracketsForCapacity(maxCapacity);
+  const targetBrackets = category?.bracketCount || getBracketsForCapacity(maxCapacity);
   const [numBrackets, setNumBrackets] = useState(targetBrackets);
   const [teamsByGroup, setTeamsByGroup] = useState<Team[][]>([]);
   const [drawnCount, setDrawnCount] = useState(0);
   const [drawingBracketIdx, setDrawingBracketIdx] = useState(-1);
   const [isAutoPlaying, setIsAutoPlaying] = useState(false);
+  const [bracketSaveNotice, setBracketSaveNotice] = useState<string | null>(null);
 
   // Drag and click swap state for manual rebalancing
   const [selectedSlot, setSelectedSlot] = useState<{
@@ -424,7 +433,7 @@ export function BracketDraw({
       const existingDrawn = getDrawnGroups(tournamentSlug, effectiveCategoryId);
       if (!existingDrawn || existingDrawn.length === 0) {
         const catCap = category?.maxEntries || (safeTeams.length >= 24 ? 32 : safeTeams.length >= 12 ? 16 : 8);
-        setNumBrackets(getBracketsForCapacity(catCap));
+        setNumBrackets(matchedCategory?.bracketCount || category?.bracketCount || getBracketsForCapacity(catCap));
       }
     }
 
@@ -474,7 +483,7 @@ export function BracketDraw({
       return;
     }
 
-    const n = Math.max(1, Math.min(numBrackets, Math.ceil(safeTeams.length / 2) || 1));
+    const n = Math.max(1, Math.min(numBrackets, 26));
 
     // Check if brackets were already drawn for this tournament & category
     if (existingDrawn && existingDrawn.length > 0) {
@@ -681,6 +690,31 @@ export function BracketDraw({
     isAutoPlayingRef.current = false;
   };
 
+  const handleSaveCategoryBracketCount = (count?: number) => {
+    const finalCount = count ?? numBrackets;
+    if (!tournamentSlug || !effectiveCategoryId) return;
+    updateCategoryInTournament(tournamentSlug, effectiveCategoryId, {
+      bracketCount: finalCount,
+    });
+    setBracketSaveNotice(
+      `Saved: ${category?.label || "Category"} will use ${finalCount} ${finalCount === 1 ? "bracket" : "brackets"}.`
+    );
+    setTimeout(() => setBracketSaveNotice(null), 3500);
+  };
+
+  const handleResetToAutoBrackets = () => {
+    if (!tournamentSlug || !effectiveCategoryId) return;
+    const autoCount = getBracketsForCapacity(maxCapacity);
+    updateCategoryInTournament(tournamentSlug, effectiveCategoryId, {
+      bracketCount: undefined,
+    });
+    setNumBrackets(autoCount);
+    setBracketSaveNotice(
+      `Reset: ${category?.label || "Category"} bracket count set to Auto (${autoCount} brackets).`
+    );
+    setTimeout(() => setBracketSaveNotice(null), 3500);
+  };
+
   // ── Reset everything & re-shuffle ─────────────────────────────────────────
   const handleReset = () => {
     animCancelRef.current = true;
@@ -710,7 +744,7 @@ export function BracketDraw({
       return;
     }
 
-    const n = Math.max(1, Math.min(numBrackets, Math.ceil(safeTeams.length / 2) || 1));
+    const n = Math.max(1, Math.min(numBrackets, 26));
 
     // Redistribute fresh roster on reset
     const buckets = balancedDistribute(safeTeams, n);
@@ -1130,23 +1164,92 @@ export function BracketDraw({
           </div>
 
           <div className="flex flex-col gap-1.5">
-            <span className="text-[0.65rem] font-bold uppercase tracking-widest text-muted-foreground">
-              Pools / Brackets
-            </span>
-            <select
-              value={numBrackets}
-              disabled={isAnimating}
-              onChange={(e) => setNumBrackets(parseInt(e.target.value, 10))}
-              className="w-full border border-input bg-background px-3 py-2 text-xs sm:text-sm focus:border-pickle focus:outline-none disabled:opacity-60 font-semibold text-pickle"
-            >
-              <option value={1}>1 Bracket (Single Pool - 3 Pairs Round Robin)</option>
-              <option value={2}>2 Brackets (A &amp; B - 8 Teams)</option>
-              <option value={3}>3 Brackets (A, B, C - 12 Teams)</option>
-              <option value={4}>4 Brackets (A, B, C, D - 16 Teams)</option>
-              <option value={6}>6 Brackets (A to F - 24 Teams)</option>
-              <option value={8}>8 Brackets (A to H - 32 Teams)</option>
-              <option value={12}>12 Brackets (A to L - 48 Teams)</option>
-            </select>
+            <div className="flex items-center justify-between flex-wrap gap-1">
+              <span className="text-[0.65rem] font-bold uppercase tracking-widest text-muted-foreground">
+                Pools / Brackets
+              </span>
+              <div className="flex items-center gap-1.5">
+                {matchedCategory?.bracketCount ? (
+                  <span className="text-[0.6rem] font-mono text-pickle font-bold bg-pickle/15 px-1.5 py-0.5 rounded border border-pickle/30">
+                    Category Default: {matchedCategory.bracketCount} Brackets (Manual)
+                  </span>
+                ) : (
+                  <span className="text-[0.6rem] font-mono text-muted-foreground bg-muted/40 px-1.5 py-0.5 rounded border border-border">
+                    Category Default: Auto ({targetBrackets})
+                  </span>
+                )}
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap">
+              <select
+                value={[1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 16].includes(numBrackets) ? numBrackets : "custom"}
+                disabled={isAnimating}
+                onChange={(e) => {
+                  if (e.target.value !== "custom") {
+                    setNumBrackets(parseInt(e.target.value, 10));
+                  }
+                }}
+                className="w-full border border-input bg-background px-3 py-2 text-xs sm:text-sm focus:border-pickle focus:outline-none disabled:opacity-60 font-semibold text-pickle"
+              >
+                <option value={1}>1 Bracket (Single Pool - Round Robin)</option>
+                <option value={2}>2 Brackets (Pools A &amp; B)</option>
+                <option value={3}>3 Brackets (Pools A, B, C)</option>
+                <option value={4}>4 Brackets (Pools A to D)</option>
+                <option value={5}>5 Brackets (Pools A to E)</option>
+                <option value={6}>6 Brackets (Pools A to F)</option>
+                <option value={7}>7 Brackets (Pools A to G)</option>
+                <option value={8}>8 Brackets (Pools A to H)</option>
+                <option value={10}>10 Brackets (Pools A to J)</option>
+                <option value={12}>12 Brackets (Pools A to L)</option>
+                <option value={16}>16 Brackets (Pools A to P)</option>
+                <option value="custom">Custom Bracket Count...</option>
+              </select>
+
+              {![1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 16].includes(numBrackets) && (
+                <div className="flex items-center gap-1 shrink-0">
+                  <input
+                    type="number"
+                    min="1"
+                    max="26"
+                    value={numBrackets}
+                    disabled={isAnimating}
+                    onChange={(e) => setNumBrackets(Math.max(1, Math.min(26, parseInt(e.target.value) || 1)))}
+                    className="w-16 border border-input bg-background px-2 py-2 text-xs sm:text-sm font-mono font-bold text-pickle focus:border-pickle focus:outline-none"
+                  />
+                  <span className="text-[0.65rem] text-muted-foreground">brackets</span>
+                </div>
+              )}
+
+              <button
+                type="button"
+                onClick={() => handleSaveCategoryBracketCount(numBrackets)}
+                disabled={isAnimating}
+                className="shrink-0 px-3 py-2 text-xs font-bold uppercase tracking-wider rounded border border-pickle bg-pickle/15 text-pickle hover:bg-pickle hover:text-sand transition-all cursor-pointer whitespace-nowrap shadow-xs"
+                title="Save this bracket count as the category's permanent setting"
+              >
+                Set for Category
+              </button>
+
+              {matchedCategory?.bracketCount && (
+                <button
+                  type="button"
+                  onClick={handleResetToAutoBrackets}
+                  disabled={isAnimating}
+                  className="shrink-0 px-2.5 py-2 text-xs font-mono text-muted-foreground hover:text-foreground border border-border bg-card rounded transition-colors cursor-pointer whitespace-nowrap"
+                  title="Reset category to automatic bracket count"
+                >
+                  Reset Auto
+                </button>
+              )}
+            </div>
+
+            {bracketSaveNotice && (
+              <div className="p-2 bg-pickle/20 border border-pickle rounded text-[0.72rem] text-pickle font-bold animate-in fade-in duration-200">
+                {bracketSaveNotice}
+              </div>
+            )}
+
             <div className="flex flex-wrap items-center gap-2 mt-1">
               {teams.length < maxCapacity && (
                 <button
@@ -1155,7 +1258,7 @@ export function BracketDraw({
                   disabled={isAnimating}
                   className="text-[0.65rem] text-pickle hover:text-foreground font-semibold uppercase tracking-wider underline cursor-pointer"
                 >
-                  + Auto-Populate {maxCapacity} Teams ({targetBrackets} Brackets)
+                  + Auto-Populate {maxCapacity} Teams ({numBrackets} Brackets)
                 </button>
               )}
               <button

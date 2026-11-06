@@ -234,6 +234,28 @@ export function deleteTournament(slug: string): boolean {
 /**
  * Add a category to a tournament.
  */
+/**
+ * Update a specific category within a tournament.
+ */
+export function updateCategoryInTournament(
+  tournamentSlug: string,
+  categoryId: string,
+  updates: Partial<Category>
+): Tournament | undefined {
+  const current = getTournaments();
+  const tournament = current.find((t) => t.slug === tournamentSlug);
+  if (!tournament) return undefined;
+
+  const categories = (tournament.categories || []).map((c) => {
+    if (c.id === categoryId || (c as any).category_slug === categoryId) {
+      return { ...c, ...updates };
+    }
+    return c;
+  });
+
+  return updateTournament(tournamentSlug, { categories });
+}
+
 export function addCategoryToTournament(tournamentSlug: string, category: Category): Tournament | undefined {
   const current = getTournaments();
   const tournament = current.find((t) => t.slug === tournamentSlug);

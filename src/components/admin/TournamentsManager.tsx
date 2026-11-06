@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { getBracketsForCapacity } from "./BracketDraw";
 import { Link } from "@tanstack/react-router";
 import type { Tournament, Category, CategoryId } from "@/data/tournaments";
 import {
@@ -18,6 +19,7 @@ interface TournamentsManagerProps {
 }
 
 const STANDARD_CAPACITY_OPTIONS = [8, 12, 16, 24, 32, 48] as const;
+const STANDARD_BRACKET_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 16] as const;
 
 type PresetCategory = {
   label: string;
@@ -112,6 +114,8 @@ export function TournamentsManager({
   const [customFee, setCustomFee] = useState("PHP 1,000 per team");
   const [customMaxEntries, setCustomMaxEntries] = useState<number>(16);
   const [isCustomMaxEntriesInput, setIsCustomMaxEntriesInput] = useState<boolean>(false);
+  const [customBracketCount, setCustomBracketCount] = useState<number | undefined>(undefined);
+  const [isCustomBracketInput, setIsCustomBracketInput] = useState<boolean>(false);
 
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -158,6 +162,7 @@ export function TournamentsManager({
         division: customDivision,
         fee: customFee.trim() || undefined,
         maxEntries: customMaxEntries || 16,
+        bracketCount: customBracketCount,
         teams: [],
         pools: [],
         standings: [],
@@ -277,6 +282,7 @@ export function TournamentsManager({
       (t.categories || []).map((c) => ({
         ...c,
         maxEntries: c.maxEntries || 16,
+        bracketCount: c.bracketCount,
         teams: c.teams || [],
         pools: c.pools || [],
         standings: c.standings || [],
@@ -789,8 +795,8 @@ export function TournamentsManager({
                   </div>
                 </div>
 
-                {/* Entry Capacity Selector for Custom Division */}
-                <div className="pt-1 flex flex-wrap items-center gap-3">
+                {/* Entry Capacity and Brackets Selector for Custom Division */}
+                <div className="pt-1 flex flex-wrap items-center gap-4">
                   <div className="w-full sm:w-auto">
                     <label className="block text-[0.65rem] uppercase tracking-wider text-muted-foreground mb-1 font-semibold">
                       Entries / Pairs Capacity
@@ -828,6 +834,57 @@ export function TournamentsManager({
                             className="w-20 rounded border border-input bg-background px-2 py-2 text-xs text-foreground font-mono font-bold focus:border-pickle focus:outline-none shadow-xs"
                           />
                           <span className="text-xs text-muted-foreground">pairs</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="w-full sm:w-auto">
+                    <label className="block text-[0.65rem] uppercase tracking-wider text-muted-foreground mb-1 font-semibold">
+                      Brackets / Pools Count
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <select
+                        value={customBracketCount !== undefined ? (isCustomBracketInput ? "custom" : String(customBracketCount)) : "auto"}
+                        onChange={(e) => {
+                          if (e.target.value === "auto") {
+                            setCustomBracketCount(undefined);
+                            setIsCustomBracketInput(false);
+                          } else if (e.target.value === "custom") {
+                            setIsCustomBracketInput(true);
+                            setCustomBracketCount(customBracketCount || 2);
+                          } else {
+                            setIsCustomBracketInput(false);
+                            setCustomBracketCount(Number(e.target.value));
+                          }
+                        }}
+                        className="rounded border border-input bg-background px-2.5 py-2 text-xs text-foreground focus:border-pickle focus:ring-1 focus:ring-pickle focus:outline-none shadow-xs font-medium"
+                      >
+                        <option value="auto">Auto ({getBracketsForCapacity(customMaxEntries)} Pools based on capacity)</option>
+                        <option value="1">1 Bracket (Single Pool - Round Robin)</option>
+                        <option value="2">2 Brackets (Pools A &amp; B)</option>
+                        <option value="3">3 Brackets (Pools A, B, C)</option>
+                        <option value="4">4 Brackets (Pools A to D)</option>
+                        <option value="5">5 Brackets (Pools A to E)</option>
+                        <option value="6">6 Brackets (Pools A to F)</option>
+                        <option value="7">7 Brackets (Pools A to G)</option>
+                        <option value="8">8 Brackets (Pools A to H)</option>
+                        <option value="10">10 Brackets (Pools A to J)</option>
+                        <option value="12">12 Brackets (Pools A to L)</option>
+                        <option value="custom">Custom...</option>
+                      </select>
+
+                      {isCustomBracketInput && (
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            type="number"
+                            min="1"
+                            max="26"
+                            value={customBracketCount || 1}
+                            onChange={(e) => setCustomBracketCount(Math.max(1, Math.min(26, parseInt(e.target.value) || 1)))}
+                            className="w-16 rounded border border-input bg-background px-2 py-2 text-xs text-foreground font-mono font-bold focus:border-pickle focus:outline-none shadow-xs"
+                          />
+                          <span className="text-xs text-muted-foreground">pools</span>
                         </div>
                       )}
                     </div>
@@ -922,7 +979,7 @@ export function TournamentsManager({
                             </div>
                           </div>
 
-                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
                             <div>
                               <label className="block text-[0.65rem] uppercase tracking-wider text-muted-foreground font-semibold mb-1">
                                 Skill Level
@@ -995,6 +1052,62 @@ export function TournamentsManager({
                                       className="w-full rounded border border-input bg-card px-2 py-1 text-xs text-foreground font-mono font-bold focus:border-pickle focus:outline-none shadow-xs"
                                     />
                                     <span className="text-[0.65rem] text-muted-foreground shrink-0">pairs</span>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+
+                            <div>
+                              <label className="block text-[0.65rem] uppercase tracking-wider text-muted-foreground font-semibold mb-1">
+                                Brackets / Pools
+                              </label>
+                              <div className="space-y-1">
+                                <select
+                                  value={c.bracketCount !== undefined ? (STANDARD_BRACKET_OPTIONS.includes(c.bracketCount as any) ? String(c.bracketCount) : "custom") : "auto"}
+                                  onChange={(e) => {
+                                    if (e.target.value === "auto") {
+                                      handleUpdateCategory(c.id, { bracketCount: undefined });
+                                    } else if (e.target.value === "custom") {
+                                      handleUpdateCategory(c.id, { bracketCount: c.bracketCount || 2 });
+                                    } else {
+                                      handleUpdateCategory(c.id, { bracketCount: Number(e.target.value) });
+                                    }
+                                  }}
+                                  className="w-full rounded border border-input bg-card px-2 py-1.5 text-xs text-foreground font-medium focus:border-pickle focus:outline-none shadow-xs"
+                                >
+                                  <option value="auto">Auto ({getBracketsForCapacity(maxCapacity)} pools)</option>
+                                  <option value="1">1 Pool (Round Robin)</option>
+                                  <option value="2">2 Pools (Pools A &amp; B)</option>
+                                  <option value="3">3 Pools (Pools A, B, C)</option>
+                                  <option value="4">4 Pools (Pools A to D)</option>
+                                  <option value="5">5 Pools (Pools A to E)</option>
+                                  <option value="6">6 Pools (Pools A to F)</option>
+                                  <option value="7">7 Pools (Pools A to G)</option>
+                                  <option value="8">8 Pools (Pools A to H)</option>
+                                  <option value="10">10 Pools (Pools A to J)</option>
+                                  <option value="12">12 Pools (Pools A to L)</option>
+                                  <option value="16">16 Pools (Pools A to P)</option>
+                                  <option value="custom">
+                                    {c.bracketCount !== undefined && !STANDARD_BRACKET_OPTIONS.includes(c.bracketCount as any)
+                                      ? `Custom (${c.bracketCount} Pools)`
+                                      : "Custom..."}
+                                  </option>
+                                </select>
+                                {c.bracketCount !== undefined && !STANDARD_BRACKET_OPTIONS.includes(c.bracketCount as any) && (
+                                  <div className="flex items-center gap-1.5">
+                                    <input
+                                      type="number"
+                                      min="1"
+                                      max="26"
+                                      value={c.bracketCount}
+                                      onChange={(e) =>
+                                        handleUpdateCategory(c.id, {
+                                          bracketCount: Math.max(1, Math.min(26, parseInt(e.target.value) || 1)),
+                                        })
+                                      }
+                                      className="w-full rounded border border-input bg-card px-2 py-1 text-xs text-foreground font-mono font-bold focus:border-pickle focus:outline-none shadow-xs"
+                                    />
+                                    <span className="text-[0.65rem] text-muted-foreground shrink-0">pools</span>
                                   </div>
                                 )}
                               </div>
