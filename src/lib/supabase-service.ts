@@ -892,25 +892,57 @@ export function resolveCategoryUuidForMatch(
     const fromSlug = _categoryUuidBySlug.get(match.categoryId.trim().toLowerCase());
     if (fromSlug) return fromSlug;
   }
-  // Check match ID substrings
+
+  // 1. Check team names against category rosters FIRST (ground truth)
+  if (match.teamAName && match.teamBName) {
+    const ta = match.teamAName.trim().toLowerCase();
+    const tb = match.teamBName.trim().toLowerCase();
+    if (ta !== "n/a" && tb !== "n/a") {
+      for (const [catUuid, teamSet] of _categoryTeamsMap.entries()) {
+        if (teamSet.has(ta) && teamSet.has(tb)) {
+          return catUuid;
+        }
+      }
+    }
+  }
+
+  // 2. Check match ID tokens (longest, most specific slug first)
   if (match.id) {
     const idLower = match.id.toLowerCase();
-    for (const [slug, uuid] of _categoryUuidBySlug.entries()) {
-      if (slug && idLower.includes(slug.toLowerCase())) {
+    const isIdWomen = idLower.includes("women");
+    const isIdMen = idLower.includes("men") && !isIdWomen;
+    const isIdMixed = idLower.includes("mix");
+    const isId45 = /\b45\+?|\b50\+?|\bsenior\b|\bmaster/i.test(idLower);
+
+    const sortedEntries = Array.from(_categoryUuidBySlug.entries()).sort(
+      (a, b) => b[0].length - a[0].length
+    );
+
+    for (const [slug, uuid] of sortedEntries) {
+      if (!slug || slug.length < 3) continue;
+      const slugLower = slug.toLowerCase();
+
+      // Enforce division and age compatibility
+      const isSlugWomen = slugLower.includes("women");
+      const isSlugMen = slugLower.includes("men") && !isSlugWomen;
+      const isSlugMixed = slugLower.includes("mix");
+      const isSlug45 = /\b45\+?|\b50\+?|\bsenior\b|\bmaster/i.test(slugLower);
+
+      if (isIdWomen && (isSlugMen || isSlugMixed)) continue;
+      if (isIdMen && (isSlugWomen || isSlugMixed)) continue;
+      if (isIdMixed && (isSlugMen || isSlugWomen)) continue;
+      if (isId45 && !isSlug45) continue;
+      if (!isId45 && isSlug45) continue;
+
+      // Token boundary match to prevent partial collisions (e.g. "womens" inside "45-womens")
+      const escaped = slugLower.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const regex = new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`, "i");
+      if (regex.test(idLower)) {
         return uuid;
       }
     }
   }
-  // Check team names against category rosters
-  if (match.teamAName && match.teamBName) {
-    const ta = match.teamAName.trim().toLowerCase();
-    const tb = match.teamBName.trim().toLowerCase();
-    for (const [catUuid, teamSet] of _categoryTeamsMap.entries()) {
-      if (teamSet.has(ta) && teamSet.has(tb)) {
-        return catUuid;
-      }
-    }
-  }
+
   return null;
 }
 
@@ -920,6 +952,43 @@ export function isSameCategory(catA?: string | null, catB?: string | null): bool
   const a = catA.trim().toLowerCase();
   const b = catB.trim().toLowerCase();
   if (a === b) return true;
+
+  // 1. Division / Gender Isolation
+  const isWomA = a.includes("women") || a.includes("female");
+  const isWomB = b.includes("women") || b.includes("female");
+  const isMenA = (a.includes("men") || a.includes("male")) && !isWomA;
+  const isMenB = (b.includes("men") || b.includes("male")) && !isWomB;
+  const isMixA = a.includes("mix");
+  const isMixB = b.includes("mix");
+
+  if (isWomA && (isMenB || isMixB)) return false;
+  if (isWomB && (isMenA || isMixA)) return false;
+  if (isMenA && (isWomB || isMixB)) return false;
+  if (isMenB && (isWomA || isMixA)) return false;
+  if (isMixA && (isMenB || isWomB)) return false;
+  if (isMixB && (isMenA || isWomA)) return false;
+
+  // 2. Age Group Isolation (45+, 50+, Senior)
+  const is45A = /\b45\+?|\b50\+?|\bsenior\b|\bmaster/i.test(a);
+  const is45B = /\b45\+?|\b50\+?|\bsenior\b|\bmaster/i.test(b);
+  if (is45A !== is45B) return false;
+
+  // 3. Skill Level Isolation
+  const isBegA = a.includes("beginner");
+  const isBegB = b.includes("beginner");
+  const isNovA = a.includes("novice");
+  const isNovB = b.includes("novice");
+  const isIntA = a.includes("intermediate");
+  const isIntB = b.includes("intermediate");
+
+  if (isBegA && (isNovB || isIntB)) return false;
+  if (isBegB && (isNovA || isIntA)) return false;
+  if (isNovA && (isBegB || isIntB)) return false;
+  if (isNovB && (isBegA || isIntA)) return false;
+
+  const catAWithoutDoubles = a.replace(/-(?:men|women|mixed|open)-doubles$/, "").replace(/-doubles$/, "");
+  const catBWithoutDoubles = b.replace(/-(?:men|women|mixed|open)-doubles$/, "").replace(/-doubles$/, "");
+  if (catAWithoutDoubles === catBWithoutDoubles) return true;
 
   const slugFromA = _categorySlugByUuid.get(catA) || _categorySlugByUuid.get(a);
   if (slugFromA && slugFromA.toLowerCase() === b) return true;
@@ -936,14 +1005,19 @@ export function isSameCategory(catA?: string | null, catB?: string | null): bool
   if (uuidFromA && uuidFromB && uuidFromA.toLowerCase() === uuidFromB.toLowerCase()) return true;
   if (slugFromA && slugFromB && slugFromA.toLowerCase() === slugFromB.toLowerCase()) return true;
 
-  // Prefix matching for duplicated slugs (e.g. novice-mixed vs novice-mixed-novice-mixed-doubles)
+  // 4. Exact token-set match for duplicated slugs (e.g. novice-mixed vs novice-mixed-novice-mixed-doubles)
   const isUuidA = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(a);
   const isUuidB = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(b);
   if (!isUuidA && !isUuidB) {
-    const normA = a.replace(/[^a-z0-9]/g, "");
-    const normB = b.replace(/[^a-z0-9]/g, "");
-    if (normA.startsWith(normB) || normB.startsWith(normA)) {
-      return true;
+    const tokensA = new Set(a.split(/[^a-z0-9]+/i).filter((t) => t && t !== "doubles"));
+    const tokensB = new Set(b.split(/[^a-z0-9]+/i).filter((t) => t && t !== "doubles"));
+    if (tokensA.size > 0 && tokensB.size > 0) {
+      const areTokensEqual =
+        tokensA.size === tokensB.size &&
+        Array.from(tokensA).every((token) => tokensB.has(token));
+      if (areTokensEqual) {
+        return true;
+      }
     }
   }
 

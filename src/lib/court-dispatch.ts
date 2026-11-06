@@ -2346,28 +2346,35 @@ export function isMatchInCategory(
     }
 
     const cleanMatchId = match.id.toLowerCase();
-    const catText = `${category.id} ${category.category_slug || ""} ${category.label || ""}`.toLowerCase();
-    const isWomCat = catText.includes("women");
-    const isMenCat = catText.includes("men") && !catText.includes("women");
+    const catText = `${category.id} ${category.category_slug || ""} ${category.label || ""} ${(category as any).division || ""} ${(category as any).level || ""}`.toLowerCase();
+    const isWomCat = catText.includes("women") || catText.includes("female");
+    const isMenCat = (catText.includes("men") || catText.includes("male")) && !isWomCat;
     const isMixCat = catText.includes("mix");
-    const isBegCat = catText.includes("beginner") && !isWomCat && !isMixCat;
-    const isNovCat = catText.includes("novice") && !isWomCat && !isMixCat;
+    const is45Cat = /\b45\+?|\b50\+?|\bsenior\b|\bmaster/i.test(catText);
+    const isBegCat = catText.includes("beginner") && !is45Cat;
+    const isNovCat = catText.includes("novice") && !is45Cat;
+    const isIntCat = catText.includes("intermediate") && !is45Cat;
 
-    if (isBegCat && (cleanMatchId.includes("novice") || cleanMatchId.includes("womens"))) {
-      return false;
-    }
-    if (isNovCat && (cleanMatchId.includes("beginner") || cleanMatchId.includes("womens"))) {
-      return false;
-    }
-    if (isMenCat && (cleanMatchId.includes("womens") || cleanMatchId.includes("mixed"))) {
-      return false;
-    }
-    if (isWomCat && (cleanMatchId.includes("beginners-mens") || cleanMatchId.includes("novice-mens") || cleanMatchId.includes("mixed"))) {
-      return false;
-    }
-    if (isMixCat && (cleanMatchId.includes("beginners-mens") || cleanMatchId.includes("novice-mens") || cleanMatchId.includes("womens"))) {
-      return false;
-    }
+    const isMatchWom = cleanMatchId.includes("women") || cleanMatchId.includes("female");
+    const isMatchMen = (cleanMatchId.includes("men") || cleanMatchId.includes("male")) && !isMatchWom;
+    const isMatchMix = cleanMatchId.includes("mix");
+    const isMatch45 = /\b45\+?|\b50\+?|\bsenior\b|\bmaster/i.test(cleanMatchId);
+    const isMatchBeg = cleanMatchId.includes("beginner");
+    const isMatchNov = cleanMatchId.includes("novice");
+    const isMatchInt = cleanMatchId.includes("intermediate");
+
+    // Strict division isolation
+    if (isWomCat && (isMatchMen || isMatchMix)) return false;
+    if (isMenCat && (isMatchWom || isMatchMix)) return false;
+    if (isMixCat && (isMatchMen || isMatchWom)) return false;
+
+    // Strict age group isolation
+    if (is45Cat && !isMatch45 && (isMatchBeg || isMatchNov || isMatchInt)) return false;
+    if (!is45Cat && isMatch45) return false;
+
+    // Strict skill level isolation
+    if (isBegCat && (isMatchNov || isMatchInt)) return false;
+    if (isNovCat && (isMatchBeg || isMatchInt)) return false;
   }
 
   // 5. Team roster membership: Both teams must belong to this category's roster!
@@ -2462,12 +2469,19 @@ export function isMatchInCategory(
 
   if (match.id) {
     const cleanMatchId = match.id.toLowerCase();
+    const checkToken = (token?: string) => {
+      if (!token || token.length < 3) return false;
+      const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const regex = new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`, "i");
+      return regex.test(cleanMatchId);
+    };
+
     let idMatched = false;
-    if (cleanMatchId.includes(category.id.toLowerCase())) idMatched = true;
-    if (category.category_slug && cleanMatchId.includes(category.category_slug.toLowerCase())) idMatched = true;
+    if (checkToken(category.id)) idMatched = true;
+    if (category.category_slug && checkToken(category.category_slug)) idMatched = true;
     if (category.label) {
       const slugFromLabel = category.label.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-      if (slugFromLabel && cleanMatchId.includes(slugFromLabel)) idMatched = true;
+      if (checkToken(slugFromLabel)) idMatched = true;
     }
     if (idMatched) {
       if (match.stage && /(?:bracket|pool)\s+[a-z]/i.test(match.stage)) {
@@ -2546,25 +2560,35 @@ export function isQueueItemInCategory(
 
   if (item.matchId) {
     const cleanMatchId = item.matchId.toLowerCase();
-    const catText = `${category.id} ${category.category_slug || ""} ${category.label || ""}`.toLowerCase();
-    const isWomCat = catText.includes("women");
-    const isMenCat = catText.includes("men") && !catText.includes("women");
+    const catText = `${category.id} ${category.category_slug || ""} ${category.label || ""} ${(category as any).division || ""} ${(category as any).level || ""}`.toLowerCase();
+    const isWomCat = catText.includes("women") || catText.includes("female");
+    const isMenCat = (catText.includes("men") || catText.includes("male")) && !isWomCat;
     const isMixCat = catText.includes("mix");
-    const isBegCat = catText.includes("beginner") && !isWomCat && !isMixCat;
-    const isNovCat = catText.includes("novice") && !isWomCat && !isMixCat;
+    const is45Cat = /\b45\+?|\b50\+?|\bsenior\b|\bmaster/i.test(catText);
+    const isBegCat = catText.includes("beginner") && !is45Cat;
+    const isNovCat = catText.includes("novice") && !is45Cat;
+    const isIntCat = catText.includes("intermediate") && !is45Cat;
 
-    if (isBegCat && (cleanMatchId.includes("novice") || cleanMatchId.includes("womens"))) {
-      return false;
-    }
-    if (isNovCat && (cleanMatchId.includes("beginner") || cleanMatchId.includes("womens"))) {
-      return false;
-    }
-    if (isMenCat && (cleanMatchId.includes("womens") || cleanMatchId.includes("mixed"))) {
-      return false;
-    }
-    if (isMixCat && (cleanMatchId.includes("beginners-mens") || cleanMatchId.includes("novice-mens") || cleanMatchId.includes("womens"))) {
-      return false;
-    }
+    const isMatchWom = cleanMatchId.includes("women") || cleanMatchId.includes("female");
+    const isMatchMen = (cleanMatchId.includes("men") || cleanMatchId.includes("male")) && !isMatchWom;
+    const isMatchMix = cleanMatchId.includes("mix");
+    const isMatch45 = /\b45\+?|\b50\+?|\bsenior\b|\bmaster/i.test(cleanMatchId);
+    const isMatchBeg = cleanMatchId.includes("beginner");
+    const isMatchNov = cleanMatchId.includes("novice");
+    const isMatchInt = cleanMatchId.includes("intermediate");
+
+    // Strict division isolation
+    if (isWomCat && (isMatchMen || isMatchMix)) return false;
+    if (isMenCat && (isMatchWom || isMatchMix)) return false;
+    if (isMixCat && (isMatchMen || isMatchWom)) return false;
+
+    // Strict age group isolation
+    if (is45Cat && !isMatch45 && (isMatchBeg || isMatchNov || isMatchInt)) return false;
+    if (!is45Cat && isMatch45) return false;
+
+    // Strict skill level isolation
+    if (isBegCat && (isMatchNov || isMatchInt)) return false;
+    if (isNovCat && (isMatchBeg || isMatchInt)) return false;
   }
 
   if (category.teams && category.teams.length > 0 && nameA && nameB) {
@@ -2616,12 +2640,19 @@ export function isQueueItemInCategory(
 
   if (item.matchId) {
     const cleanMatchId = item.matchId.toLowerCase();
+    const checkToken = (token?: string) => {
+      if (!token || token.length < 3) return false;
+      const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const regex = new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`, "i");
+      return regex.test(cleanMatchId);
+    };
+
     let idMatched = false;
-    if (cleanMatchId.includes(category.id.toLowerCase())) idMatched = true;
-    if (category.category_slug && cleanMatchId.includes(category.category_slug.toLowerCase())) idMatched = true;
+    if (checkToken(category.id)) idMatched = true;
+    if (category.category_slug && checkToken(category.category_slug)) idMatched = true;
     if (category.label) {
       const slugFromLabel = category.label.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-      if (slugFromLabel && cleanMatchId.includes(slugFromLabel)) idMatched = true;
+      if (checkToken(slugFromLabel)) idMatched = true;
     }
     if (idMatched) {
       if (item.stage && /(?:bracket|pool)\s+[a-z]/i.test(item.stage)) {
