@@ -1231,6 +1231,73 @@ export function resolveMatchTeamPlayers(
   return fallbackLabel ? [cleanTeam || fallbackLabel] : [];
 }
 
+export interface MatchTeamDisplayInfo {
+  primary: string;
+  secondary?: string;
+  combined: string;
+  players: string[];
+  hasDistinctPlayers: boolean;
+}
+
+export function isGenericTeamName(teamName?: string | null): boolean {
+  if (!teamName) return true;
+  const t = teamName.trim().toLowerCase();
+  return ["n/a", "na", "tbd", "tba", "null", "undefined", "none", "-", "team a", "team b"].includes(t);
+}
+
+export function getMatchTeamDisplay(
+  teamName: string | undefined | null,
+  players: string[] | undefined | null,
+  fallbackLabel: string = "Team"
+): MatchTeamDisplayInfo {
+  const cleanTeam = (teamName || "").trim();
+  const generic = isGenericTeamName(cleanTeam);
+
+  const resolvedPlayers = resolveMatchTeamPlayers(players ?? undefined, cleanTeam, "");
+  const playersString = resolvedPlayers.join(" / ");
+  const hasDistinctPlayers =
+    resolvedPlayers.length > 0 &&
+    resolvedPlayers.some((p) => p.toLowerCase() !== cleanTeam.toLowerCase());
+
+  const isTeamNameSameAsPlayers =
+    cleanTeam.toLowerCase() === playersString.toLowerCase() ||
+    cleanTeam.replace(/\s*[\/&]\s*/g, " / ").toLowerCase() === playersString.toLowerCase();
+
+  if (generic) {
+    if (resolvedPlayers.length > 0) {
+      return {
+        primary: playersString,
+        combined: playersString,
+        players: resolvedPlayers,
+        hasDistinctPlayers: true,
+      };
+    }
+    return {
+      primary: fallbackLabel,
+      combined: fallbackLabel,
+      players: [],
+      hasDistinctPlayers: false,
+    };
+  }
+
+  if (hasDistinctPlayers && !isTeamNameSameAsPlayers) {
+    return {
+      primary: cleanTeam,
+      secondary: playersString,
+      combined: `${cleanTeam} (${playersString})`,
+      players: resolvedPlayers,
+      hasDistinctPlayers: true,
+    };
+  }
+
+  return {
+    primary: cleanTeam || fallbackLabel,
+    combined: cleanTeam || fallbackLabel,
+    players: resolvedPlayers,
+    hasDistinctPlayers: false,
+  };
+}
+
 /**
  * Canonical 2D court position calculator shared identically across Umpire Console,
  * Public Big-Screen Arena Monitor (/monitor), and Public Live Courts Board.

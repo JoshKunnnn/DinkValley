@@ -17,6 +17,9 @@ import {
   getLocalMatchMutationAt,
   computeCourtPositions,
   resolveMatchTeamPlayers,
+  getMatchTeamDisplay,
+  isGenericTeamName,
+  type MatchTeamDisplayInfo,
   type TeamCourtPositions,
   type CourtPlayerInfo,
   type LiveMatch,
@@ -947,18 +950,19 @@ function TournamentDesk({
                         </span>
                       )}
                       {(() => {
-                        const playersA = resolveMatchTeamPlayers(courtMatch.teamAPlayers, courtMatch.teamAName, "");
-                        const playersB = resolveMatchTeamPlayers(courtMatch.teamBPlayers, courtMatch.teamBName, "");
+                        const displayA = getMatchTeamDisplay(courtMatch.teamAName, courtMatch.teamAPlayers, "Team A");
+                        const displayB = getMatchTeamDisplay(courtMatch.teamBName, courtMatch.teamBPlayers, "Team B");
+                        const servingDisplay = courtMatch.score.servingTeam === "A" ? displayA : displayB;
                         return (
                           <>
                             <div className="flex items-center justify-between">
                               <div className="min-w-0 mr-2">
-                                <span className="text-xs font-semibold text-foreground truncate block">
-                                  {courtMatch.teamAName}
+                                <span className="text-xs font-semibold text-foreground truncate block" title={displayA.primary}>
+                                  {displayA.primary}
                                 </span>
-                                {playersA.length > 0 && (
+                                {displayA.secondary && (
                                   <span className="text-[0.62rem] text-muted-foreground font-mono truncate block">
-                                    {playersA.join(" & ")}
+                                    {displayA.secondary}
                                   </span>
                                 )}
                               </div>
@@ -968,12 +972,12 @@ function TournamentDesk({
                             </div>
                             <div className="flex items-center justify-between">
                               <div className="min-w-0 mr-2">
-                                <span className="text-xs font-semibold text-foreground truncate block">
-                                  {courtMatch.teamBName}
+                                <span className="text-xs font-semibold text-foreground truncate block" title={displayB.primary}>
+                                  {displayB.primary}
                                 </span>
-                                {playersB.length > 0 && (
+                                {displayB.secondary && (
                                   <span className="text-[0.62rem] text-muted-foreground font-mono truncate block">
-                                    {playersB.join(" & ")}
+                                    {displayB.secondary}
                                   </span>
                                 )}
                               </div>
@@ -981,15 +985,15 @@ function TournamentDesk({
                                 {courtMatch.score.teamBScore}
                               </span>
                             </div>
+
+                            {courtMatch.status === "live" && (
+                              <div className="pt-1.5 border-t border-border/50 text-[0.65rem] uppercase tracking-wider text-pickle font-bold truncate">
+                                Serving: {servingDisplay.primary} (#{courtMatch.score.serverNumber})
+                              </div>
+                            )}
                           </>
                         );
                       })()}
-
-                      {courtMatch.status === "live" && (
-                        <div className="pt-1.5 border-t border-border/50 text-[0.65rem] uppercase tracking-wider text-pickle font-bold">
-                          Serving: {courtMatch.score.servingTeam === "A" ? courtMatch.teamAName : courtMatch.teamBName} (#{courtMatch.score.serverNumber})
-                        </div>
-                      )}
                     </div>
                   ) : (
                     <div className="py-4 text-center">
@@ -1198,70 +1202,78 @@ function TournamentDesk({
 
               {/* Teams & Score */}
               <div className="p-4 space-y-3">
-                {/* Team A */}
-                <div className="flex items-center justify-between">
-                  <div className="min-w-0 mr-3">
-                    <span
-                      className={`block text-sm font-semibold truncate ${match.winnerTeam === match.teamAName
-                        ? "text-pickle"
-                        : "text-foreground"
-                        }`}
-                    >
-                      {match.teamAName}
-                    </span>
-                    {(() => {
-                      const pA = resolveMatchTeamPlayers(match.teamAPlayers, match.teamAName, "");
-                      return pA.length > 0 ? (
-                        <span className="block text-[0.7rem] text-foreground/80 font-medium font-mono truncate">
-                          {pA.join(" / ")}
+                {(() => {
+                  const displayA = getMatchTeamDisplay(match.teamAName, match.teamAPlayers, "Team A");
+                  const displayB = getMatchTeamDisplay(match.teamBName, match.teamBPlayers, "Team B");
+                  const isAWinner = match.winnerTeam ? match.winnerTeam === match.teamAName || match.winnerTeam === displayA.primary : false;
+                  const isBWinner = match.winnerTeam ? match.winnerTeam === match.teamBName || match.winnerTeam === displayB.primary : false;
+                  const servingDisplay = match.score.servingTeam === "A" ? displayA : displayB;
+
+                  return (
+                    <>
+                      {/* Team A */}
+                      <div className="flex items-center justify-between">
+                        <div className="min-w-0 mr-3">
+                          <span
+                            className={`block text-sm font-semibold truncate ${isAWinner
+                              ? "text-pickle"
+                              : "text-foreground"
+                              }`}
+                            title={displayA.primary}
+                          >
+                            {displayA.primary}
+                          </span>
+                          {displayA.secondary && (
+                            <span className="block text-[0.7rem] text-foreground/80 font-medium font-mono truncate">
+                              {displayA.secondary}
+                            </span>
+                          )}
+                        </div>
+                        <span
+                          className={`font-display text-2xl ${match.status !== "scheduled" ? "text-foreground" : "text-foreground/50"
+                            }`}
+                        >
+                          {match.score.teamAScore}
                         </span>
-                      ) : null;
-                    })()}
-                  </div>
-                  <span
-                    className={`font-display text-2xl ${match.status !== "scheduled" ? "text-foreground" : "text-foreground/50"
-                      }`}
-                  >
-                    {match.score.teamAScore}
-                  </span>
-                </div>
+                      </div>
 
-                <div className="h-px bg-border" />
+                      <div className="h-px bg-border" />
 
-                {/* Team B */}
-                <div className="flex items-center justify-between">
-                  <div className="min-w-0 mr-3">
-                    <span
-                      className={`block text-sm font-semibold truncate ${match.winnerTeam === match.teamBName
-                        ? "text-pickle"
-                        : "text-foreground"
-                        }`}
-                    >
-                      {match.teamBName}
-                    </span>
-                    {(() => {
-                      const pB = resolveMatchTeamPlayers(match.teamBPlayers, match.teamBName, "");
-                      return pB.length > 0 ? (
-                        <span className="block text-[0.7rem] text-foreground/80 font-medium font-mono truncate">
-                          {pB.join(" / ")}
+                      {/* Team B */}
+                      <div className="flex items-center justify-between">
+                        <div className="min-w-0 mr-3">
+                          <span
+                            className={`block text-sm font-semibold truncate ${isBWinner
+                              ? "text-pickle"
+                              : "text-foreground"
+                              }`}
+                            title={displayB.primary}
+                          >
+                            {displayB.primary}
+                          </span>
+                          {displayB.secondary && (
+                            <span className="block text-[0.7rem] text-foreground/80 font-medium font-mono truncate">
+                              {displayB.secondary}
+                            </span>
+                          )}
+                        </div>
+                        <span
+                          className={`font-display text-2xl ${match.status !== "scheduled" ? "text-foreground" : "text-foreground/50"
+                            }`}
+                        >
+                          {match.score.teamBScore}
                         </span>
-                      ) : null;
-                    })()}
-                  </div>
-                  <span
-                    className={`font-display text-2xl ${match.status !== "scheduled" ? "text-foreground" : "text-foreground/50"
-                      }`}
-                  >
-                    {match.score.teamBScore}
-                  </span>
-                </div>
+                      </div>
 
-                {/* Serving indicator for live matches */}
-                {match.status === "live" && (
-                  <div className="pt-2 border-t border-border/60 text-[0.65rem] uppercase tracking-widest text-pickle font-bold">
-                    Serving: {match.score.servingTeam === "A" ? match.teamAName : match.teamBName} (#{match.score.serverNumber})
-                  </div>
-                )}
+                      {/* Serving indicator for live matches */}
+                      {match.status === "live" && (
+                        <div className="pt-2 border-t border-border/60 text-[0.65rem] uppercase tracking-widest text-pickle font-bold truncate">
+                          Serving: {servingDisplay.primary} (#{match.score.serverNumber})
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
 
                 {/* Winner for final matches */}
                 {match.status === "final" && match.winnerTeam && (
@@ -1369,7 +1381,7 @@ function TournamentDesk({
               </h3>
             </div>
             <p className="text-sm text-foreground/80">
-              This will reset the score to 0-0 for <strong>{matchToReset.teamAName}</strong> vs <strong>{matchToReset.teamBName}</strong>, clear all recorded rallies, and launch the pre-match coin toss.
+              This will reset the score to 0-0 for <strong>{getMatchTeamDisplay(matchToReset.teamAName, matchToReset.teamAPlayers, "Team A").combined}</strong> vs <strong>{getMatchTeamDisplay(matchToReset.teamBName, matchToReset.teamBPlayers, "Team B").combined}</strong>, clear all recorded rallies, and launch the pre-match coin toss.
             </p>
             <div className="flex gap-3 justify-end pt-2">
               <button
@@ -1541,18 +1553,20 @@ function CourtDiagramView({
   const rightTeam = teamASide === "right" ? "A" : "B";
   const leftPos = leftTeam === "A" ? teamAPos : teamBPos;
   const rightPos = rightTeam === "A" ? teamAPos : teamBPos;
-  const leftName = leftTeam === "A" ? match.teamAName : match.teamBName;
-  const rightName = rightTeam === "A" ? match.teamAName : match.teamBName;
-  const leftPlayers = resolveMatchTeamPlayers(
+  const leftDisplay = getMatchTeamDisplay(
+    leftTeam === "A" ? match.teamAName : match.teamBName,
     leftTeam === "A" ? match.teamAPlayers : match.teamBPlayers,
-    leftName,
-    ""
+    "Team " + leftTeam
   );
-  const rightPlayers = resolveMatchTeamPlayers(
+  const rightDisplay = getMatchTeamDisplay(
+    rightTeam === "A" ? match.teamAName : match.teamBName,
     rightTeam === "A" ? match.teamAPlayers : match.teamBPlayers,
-    rightName,
-    ""
+    "Team " + rightTeam
   );
+  const leftName = leftDisplay.primary;
+  const rightName = rightDisplay.primary;
+  const leftPlayers = leftDisplay.players;
+  const rightPlayers = rightDisplay.players;
   const onSwapBaseLeft = leftTeam === "A" ? onSwapBaseA : onSwapBaseB;
   const onSwapBaseRight = rightTeam === "A" ? onSwapBaseA : onSwapBaseB;
 
@@ -1765,9 +1779,9 @@ function CourtDiagramView({
               <span className="font-bold text-sand text-xs sm:text-sm truncate block" title={leftName}>
                 {leftName}
               </span>
-              {leftPlayers.length > 0 && (
+              {leftDisplay.secondary && (
                 <span className="text-[0.62rem] sm:text-xs text-sand/80 font-mono truncate block">
-                  {leftPlayers.join(" & ")}
+                  {leftDisplay.secondary}
                 </span>
               )}
             </div>
@@ -1812,9 +1826,9 @@ function CourtDiagramView({
               <span className="font-bold text-sand text-xs sm:text-sm truncate block" title={rightName}>
                 {rightName}
               </span>
-              {rightPlayers.length > 0 && (
+              {rightDisplay.secondary && (
                 <span className="text-[0.62rem] sm:text-xs text-sand/80 font-mono truncate block">
-                  {rightPlayers.join(" & ")}
+                  {rightDisplay.secondary}
                 </span>
               )}
             </div>
@@ -2431,17 +2445,17 @@ function UmpireConsole({
                     <div className="py-2 min-w-0">
                       {courtMatch ? (
                         (() => {
-                          const pA = resolveMatchTeamPlayers(courtMatch.teamAPlayers, courtMatch.teamAName, "");
-                          const pB = resolveMatchTeamPlayers(courtMatch.teamBPlayers, courtMatch.teamBName, "");
+                          const displayA = getMatchTeamDisplay(courtMatch.teamAName, courtMatch.teamAPlayers, "Team A");
+                          const displayB = getMatchTeamDisplay(courtMatch.teamBName, courtMatch.teamBPlayers, "Team B");
                           return (
                             <div className="space-y-1 min-w-0">
                               <div className="min-w-0">
-                                <div className="text-xs font-bold text-sand truncate">
-                                  {courtMatch.teamAName}
+                                <div className="text-xs font-bold text-sand truncate" title={displayA.primary}>
+                                  {displayA.primary}
                                 </div>
-                                {pA.length > 0 && (
+                                {displayA.secondary && (
                                   <div className="text-[0.62rem] text-sand/80 font-mono truncate">
-                                    {pA.join(" & ")}
+                                    {displayA.secondary}
                                   </div>
                                 )}
                               </div>
@@ -2449,12 +2463,12 @@ function UmpireConsole({
                                 vs
                               </div>
                               <div className="min-w-0">
-                                <div className="text-xs font-bold text-sand truncate">
-                                  {courtMatch.teamBName}
+                                <div className="text-xs font-bold text-sand truncate" title={displayB.primary}>
+                                  {displayB.primary}
                                 </div>
-                                {pB.length > 0 && (
+                                {displayB.secondary && (
                                   <div className="text-[0.62rem] text-sand/80 font-mono truncate">
-                                    {pB.join(" & ")}
+                                    {displayB.secondary}
                                   </div>
                                 )}
                               </div>
@@ -2611,17 +2625,17 @@ function UmpireConsole({
 
                           {/* Horizontal Team Matchup */}
                           {(() => {
-                            const pA = resolveMatchTeamPlayers(courtMatch.teamAPlayers, courtMatch.teamAName, "");
-                            const pB = resolveMatchTeamPlayers(courtMatch.teamBPlayers, courtMatch.teamBName, "");
+                            const displayA = getMatchTeamDisplay(courtMatch.teamAName, courtMatch.teamAPlayers, "Team A");
+                            const displayB = getMatchTeamDisplay(courtMatch.teamBName, courtMatch.teamBPlayers, "Team B");
                             return (
                               <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto_1fr] items-center gap-2 bg-charcoal/80 p-2 sm:p-2.5 border border-white/10">
                                 <div className="min-w-0">
-                                  <span className="block text-sm font-bold text-sand truncate">
-                                    {courtMatch.teamAName}
+                                  <span className="block text-sm font-bold text-sand truncate" title={displayA.primary}>
+                                    {displayA.primary}
                                   </span>
-                                  {pA.length > 0 && (
+                                  {displayA.secondary && (
                                     <span className="block text-xs text-sand/80 font-medium font-mono truncate mt-0.5">
-                                      {pA.join(" & ")}
+                                      {displayA.secondary}
                                     </span>
                                   )}
                                   {courtMatch.teamAClub && (
@@ -2636,12 +2650,12 @@ function UmpireConsole({
                                 </div>
 
                                 <div className="min-w-0 sm:text-right">
-                                  <span className="block text-sm font-bold text-sand truncate">
-                                    {courtMatch.teamBName}
+                                  <span className="block text-sm font-bold text-sand truncate" title={displayB.primary}>
+                                    {displayB.primary}
                                   </span>
-                                  {pB.length > 0 && (
+                                  {displayB.secondary && (
                                     <span className="block text-xs text-sand/80 font-medium font-mono truncate mt-0.5">
-                                      {pB.join(" & ")}
+                                      {displayB.secondary}
                                     </span>
                                   )}
                                   {courtMatch.teamBClub && (
@@ -2842,18 +2856,18 @@ function UmpireConsole({
 
                           {/* Matchup */}
                           {(() => {
-                            const pA = resolveMatchTeamPlayers(courtMatch.teamAPlayers, courtMatch.teamAName, "");
-                            const pB = resolveMatchTeamPlayers(courtMatch.teamBPlayers, courtMatch.teamBName, "");
+                            const displayA = getMatchTeamDisplay(courtMatch.teamAName, courtMatch.teamAPlayers, "Team A");
+                            const displayB = getMatchTeamDisplay(courtMatch.teamBName, courtMatch.teamBPlayers, "Team B");
                             return (
                               <div className="space-y-2.5">
                                 {/* Team A */}
                                 <div className="bg-charcoal/80 p-2.5 border border-white/10">
-                                  <span className="block text-sm font-bold text-sand truncate">
-                                    {courtMatch.teamAName}
+                                  <span className="block text-sm font-bold text-sand truncate" title={displayA.primary}>
+                                    {displayA.primary}
                                   </span>
-                                  {pA.length > 0 && (
+                                  {displayA.secondary && (
                                     <span className="block text-xs text-sand/80 font-medium font-mono truncate mt-0.5">
-                                      {pA.join(" & ")}
+                                      {displayA.secondary}
                                     </span>
                                   )}
                                   {courtMatch.teamAClub && (
@@ -2869,12 +2883,12 @@ function UmpireConsole({
 
                                 {/* Team B */}
                                 <div className="bg-charcoal/80 p-2.5 border border-white/10">
-                                  <span className="block text-sm font-bold text-sand truncate">
-                                    {courtMatch.teamBName}
+                                  <span className="block text-sm font-bold text-sand truncate" title={displayB.primary}>
+                                    {displayB.primary}
                                   </span>
-                                  {pB.length > 0 && (
+                                  {displayB.secondary && (
                                     <span className="block text-xs text-sand/80 font-medium font-mono truncate mt-0.5">
-                                      {pB.join(" & ")}
+                                      {displayB.secondary}
                                     </span>
                                   )}
                                   {courtMatch.teamBClub && (
@@ -3051,9 +3065,22 @@ function UmpireConsole({
                     <span>{umpireToRemoveModal.court}</span>
                     <span>{umpireToRemoveModal.match.stage || "Tournament Match"}</span>
                   </div>
-                  <div className="font-bold text-sm text-sand">
-                    {umpireToRemoveModal.match.teamAName} vs {umpireToRemoveModal.match.teamBName}
-                  </div>
+                  {(() => {
+                    const dispA = getMatchTeamDisplay(umpireToRemoveModal.match.teamAName, umpireToRemoveModal.match.teamAPlayers, "Team A");
+                    const dispB = getMatchTeamDisplay(umpireToRemoveModal.match.teamBName, umpireToRemoveModal.match.teamBPlayers, "Team B");
+                    return (
+                      <div>
+                        <div className="font-bold text-sm text-sand">
+                          {dispA.primary} vs {dispB.primary}
+                        </div>
+                        {(dispA.secondary || dispB.secondary) && (
+                          <div className="text-[0.65rem] text-sand/70 font-mono">
+                            {dispA.secondary || dispA.primary} vs {dispB.secondary || dispB.primary}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
                   <div className="font-mono text-xs text-pickle font-bold">
                     Score: {umpireToRemoveModal.match.score.teamAScore} - {umpireToRemoveModal.match.score.teamBScore}
                   </div>
@@ -3137,16 +3164,19 @@ function UmpireConsole({
                 <span>{match.court || "Active Court"}</span>
                 <span>{match.stage || "Tournament Match"}</span>
               </div>
-              <div className="font-bold text-sand text-sm">
-                {match.teamAName} <span className="text-sand/50 font-normal">vs</span> {match.teamBName}
-              </div>
               {(() => {
-                const pA = resolveMatchTeamPlayers(match.teamAPlayers, match.teamAName, "");
-                const pB = resolveMatchTeamPlayers(match.teamBPlayers, match.teamBName, "");
-                if (pA.length === 0 && pB.length === 0) return null;
+                const dispA = getMatchTeamDisplay(match.teamAName, match.teamAPlayers, "Team A");
+                const dispB = getMatchTeamDisplay(match.teamBName, match.teamBPlayers, "Team B");
                 return (
-                  <div className="text-[0.7rem] text-sand/80 font-mono">
-                    {pA.length > 0 ? pA.join(" & ") : match.teamAName} vs {pB.length > 0 ? pB.join(" & ") : match.teamBName}
+                  <div>
+                    <div className="font-bold text-sand text-sm">
+                      {dispA.primary} <span className="text-sand/50 font-normal">vs</span> {dispB.primary}
+                    </div>
+                    {(dispA.secondary || dispB.secondary) && (
+                      <div className="text-[0.7rem] text-sand/80 font-mono mt-0.5">
+                        {dispA.secondary || dispA.primary} vs {dispB.secondary || dispB.primary}
+                      </div>
+                    )}
                   </div>
                 );
               })()}
@@ -3205,7 +3235,8 @@ function UmpireConsole({
   const isLiveOrScheduled = match.status !== "final";
   const needsToss = match.status !== "final" && !tossDone && !isMatchTossDone(match);
   const s = match.score;
-  const servingTeamName = s.servingTeam === "A" ? match.teamAName : match.teamBName;
+  const matchDisplayA = getMatchTeamDisplay(match.teamAName, match.teamAPlayers, "Team A");
+  const matchDisplayB = getMatchTeamDisplay(match.teamBName, match.teamBPlayers, "Team B");
   const effectiveUmpire = match.officiatedBy ?? currentUmpire;
 
   const serverScore = s.servingTeam === "A" ? s.teamAScore : s.teamBScore;
@@ -3213,20 +3244,19 @@ function UmpireConsole({
 
   const leftTeam = teamASide === "right" ? "B" : "A";
   const rightTeam = teamASide === "right" ? "A" : "B";
-  const leftTeamName = leftTeam === "A" ? match.teamAName : match.teamBName;
-  const rightTeamName = rightTeam === "A" ? match.teamAName : match.teamBName;
+  const leftDisplay = leftTeam === "A" ? matchDisplayA : matchDisplayB;
+  const rightDisplay = rightTeam === "A" ? matchDisplayA : matchDisplayB;
+  const servingDisplay = s.servingTeam === "A" ? matchDisplayA : matchDisplayB;
+  const timeoutDisplay = timeoutTeam === "A" ? matchDisplayA : matchDisplayB;
+  const winnerDisplay = s.teamAScore > s.teamBScore ? matchDisplayA : matchDisplayB;
+
+  const leftTeamName = leftDisplay.primary;
+  const rightTeamName = rightDisplay.primary;
+  const servingTeamName = servingDisplay.primary;
   const leftScore = leftTeam === "A" ? s.teamAScore : s.teamBScore;
   const rightScore = rightTeam === "A" ? s.teamAScore : s.teamBScore;
-  const leftPlayers = resolveMatchTeamPlayers(
-    leftTeam === "A" ? match.teamAPlayers : match.teamBPlayers,
-    leftTeamName,
-    ""
-  );
-  const rightPlayers = resolveMatchTeamPlayers(
-    rightTeam === "A" ? match.teamAPlayers : match.teamBPlayers,
-    rightTeamName,
-    ""
-  );
+  const leftPlayers = leftDisplay.players;
+  const rightPlayers = rightDisplay.players;
 
   const handleChangeCourt = async (newCourt: FacilityCourt) => {
     if (!match || match.court === newCourt) {
@@ -3442,7 +3472,9 @@ function UmpireConsole({
         // ignore
       }
     }
-    const winnerName = winner === "A" ? match.teamAName : winner === "B" ? match.teamBName : undefined;
+    const tossDispA = getMatchTeamDisplay(match.teamAName, match.teamAPlayers, "Team A");
+    const tossDispB = getMatchTeamDisplay(match.teamBName, match.teamBPlayers, "Team B");
+    const winnerName = winner === "A" ? tossDispA.combined : winner === "B" ? tossDispB.combined : undefined;
     onUpdate(match.id, (m) => ({
       ...m,
       tossDone: true,
@@ -3483,8 +3515,13 @@ function UmpireConsole({
                 Official Timeout (60s)
               </span>
               <h3 className="font-display text-2xl text-foreground mt-1">
-                {timeoutTeam === "A" ? match.teamAName : match.teamBName}
+                {timeoutDisplay.primary}
               </h3>
+              {timeoutDisplay.secondary && (
+                <span className="text-xs text-muted-foreground font-mono block mt-0.5">
+                  {timeoutDisplay.secondary}
+                </span>
+              )}
             </div>
 
             {/* Countdown Display */}
@@ -3580,8 +3617,13 @@ function UmpireConsole({
               Pre-Match Required
             </span>
             <span className="block text-sm font-semibold text-foreground mt-0.5">
-              Conduct coin toss before scoring begins
+              Conduct coin toss for {matchDisplayA.primary} vs {matchDisplayB.primary}
             </span>
+            {(matchDisplayA.secondary || matchDisplayB.secondary) && (
+              <span className="block text-[0.65rem] text-muted-foreground font-mono mt-0.5">
+                {matchDisplayA.secondary || matchDisplayA.primary} vs {matchDisplayB.secondary || matchDisplayB.primary}
+              </span>
+            )}
           </div>
           <button
             onClick={() => setShowToss(true)}
@@ -3640,9 +3682,9 @@ function UmpireConsole({
               <span className="block text-xs sm:text-sm font-bold text-sand truncate" title={leftTeamName}>
                 {leftTeamName}
               </span>
-              {leftPlayers.length > 0 && (
+              {leftDisplay.secondary && (
                 <span className="block text-[0.62rem] sm:text-xs font-mono text-sand/70 truncate">
-                  {leftPlayers.join(" & ")}
+                  {leftDisplay.secondary}
                 </span>
               )}
               {s.servingTeam === leftTeam && (
@@ -3675,9 +3717,9 @@ function UmpireConsole({
               <span className="block text-xs sm:text-sm font-bold text-sand truncate" title={rightTeamName}>
                 {rightTeamName}
               </span>
-              {rightPlayers.length > 0 && (
+              {rightDisplay.secondary && (
                 <span className="block text-[0.62rem] sm:text-xs font-mono text-sand/70 truncate">
-                  {rightPlayers.join(" & ")}
+                  {rightDisplay.secondary}
                 </span>
               )}
               {s.servingTeam === rightTeam && (
@@ -3696,10 +3738,10 @@ function UmpireConsole({
         </div>
 
         {/* Winner banner if final */}
-        {match.status === "final" && match.winnerTeam && (
+        {match.status === "final" && (match.winnerTeam || winnerDisplay.combined) && (
           <div className="bg-pickle/20 px-3 py-2 text-center border-t border-pickle/40">
             <span className="text-[0.62rem] uppercase tracking-widest font-bold text-pickle">
-              Winner: {match.winnerTeam}
+              Winner: {winnerDisplay.combined}
             </span>
           </div>
         )}
@@ -3859,14 +3901,24 @@ function UmpireConsole({
                 Adjust the 2D court diagram and scoreboard to mirror your physical vantage point from the umpire chair.
               </p>
               <div className="flex items-center justify-between gap-2 p-2 bg-black/40 border border-sand/20 rounded text-xs font-mono">
-                <div className="flex-1 text-center">
+                <div className="flex-1 text-center min-w-0">
                   <span className="text-[0.6rem] uppercase tracking-wider text-sand/60 block">Left Side</span>
-                  <span className="font-bold text-pickle truncate block">{leftTeamName}</span>
+                  <span className="font-bold text-pickle truncate block">{leftDisplay.primary}</span>
+                  {leftDisplay.secondary && (
+                    <span className="text-[0.6rem] text-sand/70 font-mono truncate block">
+                      {leftDisplay.secondary}
+                    </span>
+                  )}
                 </div>
                 <span className="text-sand/40 font-bold">&harr;</span>
-                <div className="flex-1 text-center">
+                <div className="flex-1 text-center min-w-0">
                   <span className="text-[0.6rem] uppercase tracking-wider text-sand/60 block">Right Side</span>
-                  <span className="font-bold text-brick truncate block">{rightTeamName}</span>
+                  <span className="font-bold text-brick truncate block">{rightDisplay.primary}</span>
+                  {rightDisplay.secondary && (
+                    <span className="text-[0.6rem] text-sand/70 font-mono truncate block">
+                      {rightDisplay.secondary}
+                    </span>
+                  )}
                 </div>
               </div>
               <button
@@ -3963,17 +4015,14 @@ function UmpireConsole({
               <div className="flex items-center justify-between gap-3 text-center py-1">
                 {/* Team A */}
                 <div className={`flex-1 p-2 rounded-lg ${s.teamAScore > s.teamBScore ? "bg-pickle/15 ring-2 ring-pickle/40" : "bg-card border border-border"}`}>
-                  <span className="font-bold text-xs sm:text-sm text-foreground block truncate" title={match.teamAName}>
-                    {match.teamAName}
+                  <span className="font-bold text-xs sm:text-sm text-foreground block truncate" title={matchDisplayA.primary}>
+                    {matchDisplayA.primary}
                   </span>
-                  {(() => {
-                    const pA = resolveMatchTeamPlayers(match.teamAPlayers, match.teamAName, "");
-                    return pA.length > 0 ? (
-                      <span className="text-[0.68rem] text-foreground/80 font-mono block truncate">
-                        {pA.join(" & ")}
-                      </span>
-                    ) : null;
-                  })()}
+                  {matchDisplayA.secondary && (
+                    <span className="text-[0.68rem] text-foreground/80 font-mono block truncate">
+                      {matchDisplayA.secondary}
+                    </span>
+                  )}
                   <span className={`font-display text-3xl sm:text-4xl block mt-1 ${s.teamAScore > s.teamBScore ? "text-pickle font-bold" : "text-foreground"}`}>
                     {s.teamAScore}
                   </span>
@@ -3983,17 +4032,14 @@ function UmpireConsole({
 
                 {/* Team B */}
                 <div className={`flex-1 p-2 rounded-lg ${s.teamBScore > s.teamAScore ? "bg-pickle/15 ring-2 ring-pickle/40" : "bg-card border border-border"}`}>
-                  <span className="font-bold text-xs sm:text-sm text-foreground block truncate" title={match.teamBName}>
-                    {match.teamBName}
+                  <span className="font-bold text-xs sm:text-sm text-foreground block truncate" title={matchDisplayB.primary}>
+                    {matchDisplayB.primary}
                   </span>
-                  {(() => {
-                    const pB = resolveMatchTeamPlayers(match.teamBPlayers, match.teamBName, "");
-                    return pB.length > 0 ? (
-                      <span className="text-[0.68rem] text-foreground/80 font-mono block truncate">
-                        {pB.join(" & ")}
-                      </span>
-                    ) : null;
-                  })()}
+                  {matchDisplayB.secondary && (
+                    <span className="text-[0.68rem] text-foreground/80 font-mono block truncate">
+                      {matchDisplayB.secondary}
+                    </span>
+                  )}
                   <span className={`font-display text-3xl sm:text-4xl block mt-1 ${s.teamBScore > s.teamAScore ? "text-pickle font-bold" : "text-foreground"}`}>
                     {s.teamBScore}
                   </span>
@@ -4006,7 +4052,7 @@ function UmpireConsole({
                   <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-pickle/15 text-pickle text-xs font-bold uppercase tracking-wider">
                     <Trophy size={14} />
                     <span>
-                      Declared Winner: {s.teamAScore > s.teamBScore ? match.teamAName : match.teamBName}
+                      Declared Winner: {s.teamAScore > s.teamBScore ? matchDisplayA.combined : matchDisplayB.combined}
                     </span>
                   </div>
                 ) : (
@@ -4056,7 +4102,7 @@ function UmpireConsole({
               </h3>
             </div>
             <p className="text-sm text-foreground/80">
-              This will reset the score to 0-0 for <strong>{match.teamAName}</strong> vs <strong>{match.teamBName}</strong>, clear all rally history, and launch the pre-match coin toss.
+              This will reset the score to 0-0 for <strong>{matchDisplayA.combined}</strong> vs <strong>{matchDisplayB.combined}</strong>, clear all rally history, and launch the pre-match coin toss.
             </p>
             <div className="flex gap-3 justify-end pt-2">
               <button
@@ -4139,7 +4185,7 @@ function UmpireConsole({
               >
                 <span>{m.court}</span>
                 <span className="opacity-70 truncate max-w-[120px]">
-                  {m.teamAName} vs {m.teamBName}
+                  {getMatchTeamDisplay(m.teamAName, m.teamAPlayers, "Team A").primary} vs {getMatchTeamDisplay(m.teamBName, m.teamBPlayers, "Team B").primary}
                 </span>
               </button>
             ))}
@@ -4324,7 +4370,7 @@ function QuickMatchModal({
                   <option value="">-- Choose a match from drawn brackets --</option>
                   {availableMatches.map((m) => (
                     <option key={m.id} value={m.id}>
-                      {m.stage ? `[${m.stage}] ` : ""}{m.teamAName} vs {m.teamBName} ({m.court})
+                      {m.stage ? `[${m.stage}] ` : ""}{getMatchTeamDisplay(m.teamAName, m.teamAPlayers, "Team A").combined} vs {getMatchTeamDisplay(m.teamBName, m.teamBPlayers, "Team B").combined} ({m.court})
                     </option>
                   ))}
                 </select>
@@ -4560,8 +4606,10 @@ function CoinTossOverlay({
 
   const flipRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const callingTeamName = callingTeam === "A" ? teamAName : teamBName;
-  const otherTeamName = callingTeam === "A" ? teamBName : teamAName;
+  const displayA = getMatchTeamDisplay(teamAName, teamAPlayers, "Team A");
+  const displayB = getMatchTeamDisplay(teamBName, teamBPlayers, "Team B");
+  const callingDisplay = callingTeam === "A" ? displayA : displayB;
+  const otherDisplay = callingTeam === "A" ? displayB : displayA;
   const otherChoice = callingChoice === "heads" ? "tails" : "heads";
 
   const startToss = () => {
@@ -4610,7 +4658,55 @@ function CoinTossOverlay({
     }, 400);
   };
 
-  const winnerName = winnerTeam === "A" ? teamAName : teamBName;
+  const winnerDisplay = winnerTeam === "A" ? displayA : winnerTeam === "B" ? displayB : callingDisplay;
+
+  const renderCallingTeamButton = (teamKey: "A" | "B", display: MatchTeamDisplayInfo) => {
+    const isSelected = callingTeam === teamKey;
+    const isGeneric = isGenericTeamName(teamKey === "A" ? teamAName : teamBName);
+    const showTwoPlayerLines = isGeneric && display.players.length >= 2;
+
+    return (
+      <button
+        type="button"
+        onClick={() => setCallingTeam(teamKey)}
+        className={`p-2 sm:p-2.5 text-xs font-bold uppercase tracking-wider border-2 transition-all text-center cursor-pointer rounded flex flex-col items-center justify-center min-h-[58px] ${
+          isSelected
+            ? "bg-pickle text-sand border-pickle shadow-sm"
+            : "bg-card text-foreground border-border hover:border-pickle hover:text-pickle"
+        }`}
+      >
+        {showTwoPlayerLines ? (
+          <>
+            <span className="truncate max-w-full block leading-tight font-bold text-xs sm:text-sm">
+              {display.players[0]}
+            </span>
+            <span
+              className={`truncate max-w-full block leading-tight font-bold text-xs sm:text-sm mt-0.5 ${
+                isSelected ? "text-sand" : "text-foreground"
+              }`}
+            >
+              {display.players[1]}
+            </span>
+          </>
+        ) : (
+          <>
+            <span className="truncate max-w-full block leading-tight font-bold text-xs sm:text-sm">
+              {display.primary}
+            </span>
+            {display.secondary && (
+              <span
+                className={`text-[0.62rem] sm:text-xs normal-case font-mono font-medium truncate max-w-full block mt-0.5 ${
+                  isSelected ? "text-sand/90" : "text-muted-foreground"
+                }`}
+              >
+                {display.secondary}
+              </span>
+            )}
+          </>
+        )}
+      </button>
+    );
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-charcoal/96 backdrop-blur-sm p-4">
@@ -4635,9 +4731,20 @@ function CoinTossOverlay({
           <h2 className="font-display text-2xl sm:text-3xl text-foreground">
             {phase === "positioning" ? "Player Positions" : "Coin Toss"}
           </h2>
-          <p className="text-xs text-foreground/70 mt-0.5 font-medium truncate">
-            {teamAName} vs {teamBName}
-          </p>
+          <div className="text-xs text-foreground/80 mt-1 font-medium px-1 flex flex-col items-center justify-center gap-0.5">
+            <div className="flex items-center justify-center flex-wrap gap-x-1.5 gap-y-0.5 text-center leading-snug">
+              <span className="font-bold text-foreground">{displayA.primary}</span>
+              <span className="text-pickle font-bold font-mono text-[0.65rem] px-0.5">VS</span>
+              <span className="font-bold text-foreground">{displayB.primary}</span>
+            </div>
+            {(displayA.secondary || displayB.secondary) && (
+              <div className="text-[0.65rem] text-muted-foreground font-mono flex items-center justify-center flex-wrap gap-x-1.5 text-center leading-tight">
+                <span>{displayA.secondary || displayA.primary}</span>
+                <span className="opacity-40">&bull;</span>
+                <span>{displayB.secondary || displayB.primary}</span>
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Coin representation (hidden during positioning phase to preserve focus and space) */}
@@ -4697,33 +4804,15 @@ function CoinTossOverlay({
                   Calling Team
                 </span>
                 <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setCallingTeam("A")}
-                    className={`p-2.5 text-xs font-bold uppercase tracking-wider border-2 transition-all text-center cursor-pointer truncate rounded ${callingTeam === "A"
-                        ? "bg-pickle text-sand border-pickle shadow-sm"
-                        : "bg-card text-foreground border-border hover:border-pickle hover:text-pickle"
-                      }`}
-                  >
-                    {teamAName}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setCallingTeam("B")}
-                    className={`p-2.5 text-xs font-bold uppercase tracking-wider border-2 transition-all text-center cursor-pointer truncate rounded ${callingTeam === "B"
-                        ? "bg-pickle text-sand border-pickle shadow-sm"
-                        : "bg-card text-foreground border-border hover:border-pickle hover:text-pickle"
-                      }`}
-                  >
-                    {teamBName}
-                  </button>
+                  {renderCallingTeamButton("A", displayA)}
+                  {renderCallingTeamButton("B", displayB)}
                 </div>
               </div>
 
               {/* Call Choice (Heads or Tails) */}
               <div className="space-y-1">
-                <span className="block text-[0.6rem] uppercase tracking-wider text-muted-foreground font-mono font-bold">
-                  {callingTeamName}&apos;s Call
+                <span className="block text-[0.6rem] uppercase tracking-wider text-muted-foreground font-mono font-bold truncate">
+                  {callingDisplay.primary}&apos;s Call
                 </span>
                 <div className="grid grid-cols-2 gap-2">
                   <button
@@ -4751,9 +4840,9 @@ function CoinTossOverlay({
 
               {/* Call Summary Pill */}
               <div className="p-2 bg-card border-2 border-border text-[0.65rem] text-center text-foreground font-mono leading-relaxed mt-1 rounded">
-                <span className="text-pickle font-bold">{callingTeamName}</span> chose{" "}
+                <span className="text-pickle font-bold">{callingDisplay.primary}</span> chose{" "}
                 <span className="text-foreground font-bold uppercase tracking-wide">{callingChoice}</span>.{" "}
-                <span className="text-muted-foreground">({otherTeamName} has {otherChoice})</span>
+                <span className="text-muted-foreground">({otherDisplay.primary} has {otherChoice})</span>
               </div>
             </div>
 
@@ -4772,7 +4861,7 @@ function CoinTossOverlay({
               Flipping...
             </span>
             <span className="text-xs text-foreground/80 font-bold font-sans">
-              {callingTeamName} called {callingChoice.toUpperCase()}
+              {callingDisplay.primary} called {callingChoice.toUpperCase()}
             </span>
           </div>
         )}
@@ -4792,12 +4881,17 @@ function CoinTossOverlay({
                 Toss Winner
               </span>
               <span className="block font-display text-2xl text-foreground font-bold">
-                {winnerName}
+                {winnerDisplay.primary}
               </span>
+              {winnerDisplay.secondary && (
+                <span className="block text-xs text-muted-foreground font-mono">
+                  {winnerDisplay.secondary}
+                </span>
+              )}
               <span className="block text-xs text-foreground/90 font-medium">
-                {winnerName === callingTeamName
-                  ? `${winnerName} called ${callingChoice} correctly!`
-                  : `${winnerName} won as coin landed on ${face}!`}
+                {winnerTeam === callingTeam
+                  ? `${winnerDisplay.primary} called ${callingChoice} correctly!`
+                  : `${winnerDisplay.primary} won as coin landed on ${face}!`}
               </span>
             </div>
 
@@ -4825,8 +4919,13 @@ function CoinTossOverlay({
                 Winner Choice
               </span>
               <p className="text-xs text-foreground/80 font-medium mt-0.5">
-                What does <strong>{winnerName}</strong> choose?
+                What does <strong>{winnerDisplay.primary}</strong> choose?
               </p>
+              {winnerDisplay.secondary && (
+                <p className="text-[0.65rem] text-muted-foreground font-mono mt-0.5">
+                  {winnerDisplay.secondary}
+                </p>
+              )}
             </div>
             <div className="grid grid-cols-2 gap-3">
               <button
@@ -4859,12 +4958,19 @@ function CoinTossOverlay({
 
             {/* Team A Box */}
             <div className="p-3 border-2 border-border bg-card rounded-lg space-y-2.5">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-sm font-bold uppercase tracking-wider text-foreground truncate">
-                  {teamAName}
-                </span>
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1">
+                <div className="min-w-0">
+                  <span className="text-sm font-bold uppercase tracking-wider text-foreground truncate block">
+                    {displayA.primary}
+                  </span>
+                  {displayA.secondary && (
+                    <span className="text-[0.65rem] font-mono text-muted-foreground truncate block">
+                      {displayA.secondary}
+                    </span>
+                  )}
+                </div>
                 <span
-                  className={`text-[0.6rem] font-bold uppercase px-2 py-0.5 rounded font-mono shrink-0 ${chosenServingTeam === "A"
+                  className={`text-[0.6rem] font-bold uppercase px-2 py-0.5 rounded font-mono shrink-0 w-fit ${chosenServingTeam === "A"
                       ? "bg-pickle text-sand"
                       : "bg-muted text-foreground border border-border"
                     }`}
@@ -4915,12 +5021,19 @@ function CoinTossOverlay({
 
             {/* Team B Box */}
             <div className="p-3 border-2 border-border bg-card rounded-lg space-y-2.5">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-sm font-bold uppercase tracking-wider text-foreground truncate">
-                  {teamBName}
-                </span>
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1">
+                <div className="min-w-0">
+                  <span className="text-sm font-bold uppercase tracking-wider text-foreground truncate block">
+                    {displayB.primary}
+                  </span>
+                  {displayB.secondary && (
+                    <span className="text-[0.65rem] font-mono text-muted-foreground truncate block">
+                      {displayB.secondary}
+                    </span>
+                  )}
+                </div>
                 <span
-                  className={`text-[0.6rem] font-bold uppercase px-2 py-0.5 rounded font-mono shrink-0 ${chosenServingTeam === "B"
+                  className={`text-[0.6rem] font-bold uppercase px-2 py-0.5 rounded font-mono shrink-0 w-fit ${chosenServingTeam === "B"
                       ? "bg-pickle text-sand"
                       : "bg-muted text-foreground border border-border"
                     }`}
@@ -5039,24 +5152,26 @@ function ScoreboardCard({
 
       <div className="p-4 sm:p-5">
         {(() => {
-          const playersA = resolveMatchTeamPlayers(match.teamAPlayers, match.teamAName, "");
-          const playersB = resolveMatchTeamPlayers(match.teamBPlayers, match.teamBName, "");
+          const displayA = getMatchTeamDisplay(match.teamAName, match.teamAPlayers, "Team A");
+          const displayB = getMatchTeamDisplay(match.teamBName, match.teamBPlayers, "Team B");
+          const isAWinner = match.winnerTeam ? match.winnerTeam === match.teamAName || match.winnerTeam === displayA.primary : false;
+          const isBWinner = match.winnerTeam ? match.winnerTeam === match.teamBName || match.winnerTeam === displayB.primary : false;
           return (
             <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-3">
               {/* Team A */}
               <div className="text-center min-w-0">
                 <span
-                  className={`block font-display text-3xl sm:text-4xl ${match.winnerTeam === match.teamAName ? "text-pickle" : "text-foreground"
+                  className={`block font-display text-3xl sm:text-4xl ${isAWinner ? "text-pickle" : "text-foreground"
                     }`}
                 >
                   {s.teamAScore}
                 </span>
-                <span className="block text-xs font-semibold text-foreground mt-1 truncate">
-                  {match.teamAName}
+                <span className="block text-xs font-semibold text-foreground mt-1 truncate" title={displayA.primary}>
+                  {displayA.primary}
                 </span>
-                {playersA.length > 0 && (
+                {displayA.secondary && (
                   <span className="block text-[0.62rem] text-muted-foreground font-mono truncate mt-0.5">
-                    {playersA.join(" & ")}
+                    {displayA.secondary}
                   </span>
                 )}
                 {isLive && s.servingTeam === "A" && (
@@ -5071,17 +5186,17 @@ function ScoreboardCard({
               {/* Team B */}
               <div className="text-center min-w-0">
                 <span
-                  className={`block font-display text-3xl sm:text-4xl ${match.winnerTeam === match.teamBName ? "text-pickle" : "text-foreground"
+                  className={`block font-display text-3xl sm:text-4xl ${isBWinner ? "text-pickle" : "text-foreground"
                     }`}
                 >
                   {s.teamBScore}
                 </span>
-                <span className="block text-xs font-semibold text-foreground mt-1 truncate">
-                  {match.teamBName}
+                <span className="block text-xs font-semibold text-foreground mt-1 truncate" title={displayB.primary}>
+                  {displayB.primary}
                 </span>
-                {playersB.length > 0 && (
+                {displayB.secondary && (
                   <span className="block text-[0.62rem] text-muted-foreground font-mono truncate mt-0.5">
-                    {playersB.join(" & ")}
+                    {displayB.secondary}
                   </span>
                 )}
                 {isLive && s.servingTeam === "B" && (

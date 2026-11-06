@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from "react";
 import type { Category } from "@/data/tournaments";
 import type { LiveMatch } from "@/lib/match-store";
-import { clearCompletedMatches } from "@/lib/match-store";
+import { clearCompletedMatches, getMatchTeamDisplay } from "@/lib/match-store";
 import { isMatchInCategory } from "@/lib/court-dispatch";
 import { getCachedDrawnGroups, isSameCategory } from "@/lib/supabase-service";
 import { Search, ChevronDown, ChevronUp, Trash2, AlertTriangle, Loader2, Check } from "lucide-react";
@@ -532,10 +532,10 @@ function isMatchBelongsToCategory(
         targetMatch: matchToDelete,
         purgeAllCompletedInScope: false,
       });
-      const nameA = matchToDelete.teamAName || "Team A";
-      const nameB = matchToDelete.teamBName || "Team B";
+      const dispA = getMatchTeamDisplay(matchToDelete.teamAName, matchToDelete.teamAPlayers, "Team A");
+      const dispB = getMatchTeamDisplay(matchToDelete.teamBName, matchToDelete.teamBPlayers, "Team B");
       setMatchToDelete(null);
-      setClearNotice(`Deleted match record: ${nameA} vs ${nameB}.`);
+      setClearNotice(`Deleted match record: ${dispA.combined} vs ${dispB.combined}.`);
       setTimeout(() => setClearNotice(null), 4000);
     } catch (err) {
       console.error("Failed to delete single match:", err);
@@ -774,9 +774,23 @@ function isMatchBelongsToCategory(
           {displayedMatches.map((m, idx) => {
             const scoreA = m.score?.teamAScore ?? 0;
             const scoreB = m.score?.teamBScore ?? 0;
-            const winner = m.winnerTeam || (scoreA > scoreB ? m.teamAName : scoreB > scoreA ? m.teamBName : null);
-            const isAWinner = winner && m.teamAName && winner.trim().toLowerCase() === m.teamAName.trim().toLowerCase();
-            const isBWinner = winner && m.teamBName && winner.trim().toLowerCase() === m.teamBName.trim().toLowerCase();
+            const displayA = getMatchTeamDisplay(m.teamAName, m.teamAPlayers, "Team A");
+            const displayB = getMatchTeamDisplay(m.teamBName, m.teamBPlayers, "Team B");
+            const winner = m.winnerTeam || (scoreA > scoreB ? (displayA.primary || m.teamAName) : scoreB > scoreA ? (displayB.primary || m.teamBName) : null);
+            const isAWinner = Boolean(
+              winner && (
+                winner.trim().toLowerCase() === (m.teamAName || "").trim().toLowerCase() ||
+                winner.trim().toLowerCase() === displayA.primary.trim().toLowerCase() ||
+                winner.trim().toLowerCase() === displayA.combined.trim().toLowerCase()
+              )
+            );
+            const isBWinner = Boolean(
+              winner && (
+                winner.trim().toLowerCase() === (m.teamBName || "").trim().toLowerCase() ||
+                winner.trim().toLowerCase() === displayB.primary.trim().toLowerCase() ||
+                winner.trim().toLowerCase() === displayB.combined.trim().toLowerCase()
+              )
+            );
             const rallies = m.score?.rallies || [];
             const isRalliesExpanded = expandedRalliesMatchId === m.id;
 
@@ -841,8 +855,8 @@ function isMatchBelongsToCategory(
                   >
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-1.5">
-                        <span className={`text-sm font-bold truncate ${isAWinner ? "text-pickle" : "text-foreground"}`}>
-                          {m.teamAName}
+                        <span className={`text-sm font-bold truncate ${isAWinner ? "text-pickle" : "text-foreground"}`} title={displayA.primary}>
+                          {displayA.primary}
                         </span>
                         {isAWinner && (
                           <span className="px-1.5 py-0.2 text-[0.55rem] font-bold uppercase tracking-wider bg-pickle text-sand rounded shrink-0">
@@ -850,9 +864,9 @@ function isMatchBelongsToCategory(
                           </span>
                         )}
                       </div>
-                      {m.teamAPlayers && m.teamAPlayers.length > 0 && (
+                      {displayA.secondary && (
                         <span className="text-[0.65rem] text-muted-foreground block truncate">
-                          {m.teamAPlayers.join(" / ")}
+                          {displayA.secondary}
                         </span>
                       )}
                     </div>
@@ -871,8 +885,8 @@ function isMatchBelongsToCategory(
                   >
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-1.5">
-                        <span className={`text-sm font-bold truncate ${isBWinner ? "text-pickle" : "text-foreground"}`}>
-                          {m.teamBName}
+                        <span className={`text-sm font-bold truncate ${isBWinner ? "text-pickle" : "text-foreground"}`} title={displayB.primary}>
+                          {displayB.primary}
                         </span>
                         {isBWinner && (
                           <span className="px-1.5 py-0.2 text-[0.55rem] font-bold uppercase tracking-wider bg-pickle text-sand rounded shrink-0">
@@ -880,9 +894,9 @@ function isMatchBelongsToCategory(
                           </span>
                         )}
                       </div>
-                      {m.teamBPlayers && m.teamBPlayers.length > 0 && (
+                      {displayB.secondary && (
                         <span className="text-[0.65rem] text-muted-foreground block truncate">
-                          {m.teamBPlayers.join(" / ")}
+                          {displayB.secondary}
                         </span>
                       )}
                     </div>
@@ -1051,7 +1065,7 @@ function isMatchBelongsToCategory(
                   Permanently delete this match from history and database:
                 </p>
                 <p className="text-xs font-bold text-foreground">
-                  {matchToDelete.teamAName} vs {matchToDelete.teamBName}
+                  {getMatchTeamDisplay(matchToDelete.teamAName, matchToDelete.teamAPlayers, "Team A").combined} vs {getMatchTeamDisplay(matchToDelete.teamBName, matchToDelete.teamBPlayers, "Team B").combined}
                 </p>
                 <p className="text-[0.65rem] text-muted-foreground font-mono">
                   {matchToDelete.stage || "Completed Match"}
