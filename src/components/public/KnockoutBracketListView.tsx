@@ -1,6 +1,12 @@
 import { useState, useMemo } from "react";
 import type { Category, Team } from "@/data/tournaments";
-import { type LiveMatch, resolveMatchTeamPlayers } from "@/lib/match-store";
+import {
+  type LiveMatch,
+  resolveMatchTeamPlayers,
+  getMatchTeamDisplay,
+  findMatchForPair,
+  isGenericTeamName,
+} from "@/lib/match-store";
 import type { BracketGroup } from "@/components/admin/BracketDraw";
 import type { KnockoutMatch } from "@/components/admin/DrawsManager";
 import { isSameCategory } from "@/lib/supabase-service";
@@ -295,13 +301,29 @@ export function KnockoutBracketListView({
       let hasLive = false;
       let allDone = true;
 
+      const normPlayers = (arr?: string[]) =>
+        (arr || [])
+          .flatMap((p) => String(p).split(/\s*[\/&]\s*/))
+          .map((p) => p.replace(/\s+/g, " ").trim().toLowerCase())
+          .filter((p) => Boolean(p) && !isGenericTeamName(p))
+          .sort()
+          .join("|");
+
       const items: KnockoutCardItem[] = mainDrawMatches.map((m) => {
         const stage = `${m.round} - ${m.label}`;
         const matched =
-          koMatches.find(
-            (lm) => lm.id === m.id && lm.categoryId && isSameCategory(lm.categoryId, category.id)
-          ) ||
-          koMatches.find((lm) => lm.stage === stage);
+          m.teamA && m.teamB
+            ? findMatchForPair(
+                koMatches,
+                m.teamA.name,
+                m.teamB.name,
+                undefined,
+                category.id,
+                stage,
+                m.teamA.players,
+                m.teamB.players,
+              )
+            : undefined;
 
         const isLive = matched?.status === "live";
         if (isLive) hasLive = true;
@@ -316,36 +338,63 @@ export function KnockoutBracketListView({
 
         if (!isFinal) allDone = false;
 
-        const scoreA = matched ? matched.score.teamAScore : (m.scoreA ?? null);
-        const scoreB = matched ? matched.score.teamBScore : (m.scoreB ?? null);
+        let isSameOrder = true;
+        if (matched && m.teamA && m.teamB) {
+          const pA = normPlayers(m.teamA.players);
+          const pB = normPlayers(m.teamB.players);
+          const lpA = normPlayers(matched.teamAPlayers);
+          const lpB = normPlayers(matched.teamBPlayers);
+          const nA = m.teamA.name.replace(/\s+/g, " ").trim().toLowerCase();
+          const nB = m.teamB.name.replace(/\s+/g, " ").trim().toLowerCase();
+          const liveA = (matched.teamAName || "").replace(/\s+/g, " ").trim().toLowerCase();
+          if (pA && lpA && (pA !== pB || lpA !== lpB)) {
+            if (pA === lpA || (pB && lpB && pB === lpB)) isSameOrder = true;
+            else if (pA === lpB || (pB && pB === lpA)) isSameOrder = false;
+          } else if (nA !== nB) {
+            isSameOrder = liveA !== nB;
+          }
+        }
 
-        let winnerName = m.winner?.name ?? matched?.winnerTeam ?? null;
-        if (!winnerName && isFinal && scoreA !== null && scoreB !== null && scoreA !== scoreB) {
-          winnerName = scoreA > scoreB ? m.teamA?.name ?? null : m.teamB?.name ?? null;
+        const scoreA = matched
+          ? isSameOrder
+            ? matched.score.teamAScore
+            : matched.score.teamBScore
+          : (m.scoreA ?? null);
+        const scoreB = matched
+          ? isSameOrder
+            ? matched.score.teamBScore
+            : matched.score.teamAScore
+          : (m.scoreB ?? null);
+
+        const dispTeamA = m.teamA ? getMatchTeamDisplay(m.teamA.name, m.teamA.players, m.teamA.name) : null;
+        const dispTeamB = m.teamB ? getMatchTeamDisplay(m.teamB.name, m.teamB.players, m.teamB.name) : null;
+        const dispWinner = m.winner ? getMatchTeamDisplay(m.winner.name, m.winner.players, m.winner.name) : null;
+
+        let winnerName = dispWinner?.primary ?? matched?.winnerTeam ?? null;
+        if (isFinal && scoreA !== null && scoreB !== null && scoreA !== scoreB) {
+          winnerName = scoreA > scoreB ? (dispTeamA?.primary ?? null) : (dispTeamB?.primary ?? null);
         }
 
         if (m.round === "Final" && winnerName) {
           finalChamp = winnerName;
         }
 
-        const isLiveOrDone = isLive || isFinal || Boolean(matched);
-
         const slotA: ProjectedSlot = {
-          label: m.seedA || (m.teamA?.name ? m.teamA.name : "TBD"),
+          label: m.seedA || (dispTeamA ? dispTeamA.primary : "TBD"),
           seedNum: 1,
           team: m.teamA ?? null,
-          isLocked: Boolean(m.teamA && (isAllRoundRobinComplete || isLiveOrDone || m.winner)),
+          isLocked: Boolean(m.teamA),
           isProjected: false,
-          provisionalTeamName: m.teamA?.name ?? null,
+          provisionalTeamName: dispTeamA ? dispTeamA.primary : null,
         };
 
         const slotB: ProjectedSlot = {
-          label: m.seedB || (m.teamB?.name ? m.teamB.name : "TBD"),
+          label: m.seedB || (dispTeamB ? dispTeamB.primary : "TBD"),
           seedNum: 2,
           team: m.teamB ?? null,
-          isLocked: Boolean(m.teamB && (isAllRoundRobinComplete || isLiveOrDone || m.winner)),
+          isLocked: Boolean(m.teamB),
           isProjected: false,
-          provisionalTeamName: m.teamB?.name ?? null,
+          provisionalTeamName: dispTeamB ? dispTeamB.primary : null,
         };
 
         let cardStatus: KnockoutCardItem["status"] = "scheduled";
@@ -1134,6 +1183,13 @@ function KnockoutMatchCard({
     highlightTeam && item.slotB.team && item.slotB.team.name.toLowerCase() === highlightTeam.toLowerCase()
   );
 
+  const dispA = item.slotA.team
+    ? getMatchTeamDisplay(item.slotA.team.name, item.slotA.team.players, item.slotA.team.name)
+    : null;
+  const dispB = item.slotB.team
+    ? getMatchTeamDisplay(item.slotB.team.name, item.slotB.team.players, item.slotB.team.name)
+    : null;
+
   const playersA = item.slotA.team
     ? resolveMatchTeamPlayers(item.slotA.team.players, item.slotA.team.name, "")
     : [];
@@ -1141,8 +1197,28 @@ function KnockoutMatchCard({
     ? resolveMatchTeamPlayers(item.slotB.team.players, item.slotB.team.name, "")
     : [];
 
-  const wonA = isDone && item.winnerTeamName && item.slotA.team?.name === item.winnerTeamName;
-  const wonB = isDone && item.winnerTeamName && item.slotB.team?.name === item.winnerTeamName;
+  const hasDecisiveScores =
+    typeof item.scoreA === "number" &&
+    typeof item.scoreB === "number" &&
+    item.scoreA !== item.scoreB;
+
+  const wonA = Boolean(
+    isDone &&
+      (hasDecisiveScores
+        ? (item.scoreA ?? 0) > (item.scoreB ?? 0)
+        : item.winnerTeamName &&
+          (dispA?.primary === item.winnerTeamName ||
+            (!isGenericTeamName(item.slotA.team?.name) && item.slotA.team?.name === item.winnerTeamName))),
+  );
+  const wonB = Boolean(
+    isDone &&
+      !wonA &&
+      (hasDecisiveScores
+        ? (item.scoreB ?? 0) > (item.scoreA ?? 0)
+        : item.winnerTeamName &&
+          (dispB?.primary === item.winnerTeamName ||
+            (!isGenericTeamName(item.slotB.team?.name) && item.slotB.team?.name === item.winnerTeamName))),
+  );
 
   return (
     <div
@@ -1201,20 +1277,24 @@ function KnockoutMatchCard({
 
           {/* Team Name */}
           <div className="mt-1">
-            {item.slotA.isLocked && item.slotA.team ? (
+            {item.slotA.isLocked && item.slotA.team && dispA ? (
               <>
                 <span
                   className={`text-sm font-bold block truncate ${
                     wonA ? "text-pickle" : "text-foreground"
                   }`}
                 >
-                  {item.slotA.team.name}
+                  {dispA.primary}
                 </span>
-                {playersA.length > 0 && (
+                {dispA.secondary ? (
+                  <span className="text-[0.68rem] text-muted-foreground font-mono block truncate">
+                    {dispA.secondary}
+                  </span>
+                ) : playersA.length > 0 && !isGenericTeamName(item.slotA.team.name) ? (
                   <span className="text-[0.68rem] text-muted-foreground font-mono block truncate">
                     {playersA.join(" & ")}
                   </span>
-                )}
+                ) : null}
               </>
             ) : (
               <div className="space-y-0.5">
@@ -1280,20 +1360,24 @@ function KnockoutMatchCard({
               <span className="text-sm font-bold text-muted-foreground font-mono block truncate">
                 No Match (BYE Advance)
               </span>
-            ) : item.slotB.isLocked && item.slotB.team ? (
+            ) : item.slotB.isLocked && item.slotB.team && dispB ? (
               <>
                 <span
                   className={`text-sm font-bold block truncate ${
                     wonB ? "text-pickle" : "text-foreground"
                   }`}
                 >
-                  {item.slotB.team.name}
+                  {dispB.primary}
                 </span>
-                {playersB.length > 0 && (
+                {dispB.secondary ? (
+                  <span className="text-[0.68rem] text-muted-foreground font-mono block truncate">
+                    {dispB.secondary}
+                  </span>
+                ) : playersB.length > 0 && !isGenericTeamName(item.slotB.team.name) ? (
                   <span className="text-[0.68rem] text-muted-foreground font-mono block truncate">
                     {playersB.join(" & ")}
                   </span>
-                )}
+                ) : null}
               </>
             ) : (
               <div className="space-y-0.5">
@@ -1333,7 +1417,7 @@ function KnockoutMatchCard({
           <span>{item.advancesTo}</span>
           {wonA || wonB ? (
             <span className="text-pickle font-bold flex items-center gap-1">
-              <span>{wonA ? item.slotA.team?.name : item.slotB.team?.name} Won</span>
+              <span>{wonA ? dispA?.primary : dispB?.primary} Won</span>
             </span>
           ) : null}
         </div>

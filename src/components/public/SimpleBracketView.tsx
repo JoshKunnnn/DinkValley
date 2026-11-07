@@ -51,22 +51,27 @@ function isMatchSameOrder(
   teamA: { name: string; players?: string[] },
   teamB: { name: string; players?: string[] },
 ): boolean {
-  const aName = teamA.name.trim().toLowerCase();
-  const bName = teamB.name.trim().toLowerCase();
-  const liveA = (live.teamAName || "").trim().toLowerCase();
-  const liveB = (live.teamBName || "").trim().toLowerCase();
+  const normP = (arr?: string[]) =>
+    (arr || [])
+      .flatMap((p) => String(p).split(/\s*[\/&]\s*/))
+      .map((p) => p.replace(/\s+/g, " ").trim().toLowerCase())
+      .filter(Boolean)
+      .sort()
+      .join("|");
+  const pA = normP(teamA.players);
+  const pB = normP(teamB.players);
+  const lpA = normP(live.teamAPlayers);
+  const lpB = normP(live.teamBPlayers);
+  if (pA && lpA && (pA !== pB || lpA !== lpB)) {
+    if (pA === lpA || (pB && lpB && pB === lpB)) return true;
+    if (pA === lpB || (pB && pB === lpA)) return false;
+  }
+  const aName = teamA.name.replace(/\s+/g, " ").trim().toLowerCase();
+  const bName = teamB.name.replace(/\s+/g, " ").trim().toLowerCase();
+  const liveA = (live.teamAName || "").replace(/\s+/g, " ").trim().toLowerCase();
+  const liveB = (live.teamBName || "").replace(/\s+/g, " ").trim().toLowerCase();
   if (liveA !== bName && liveA === aName && aName !== bName) return true;
   if (liveA === bName && liveB === aName && aName !== bName) return false;
-  if (teamA.players?.length && live.teamAPlayers?.length) {
-    const pA = [...teamA.players].map((p) => p.trim().toLowerCase()).sort().join(",");
-    const lpA = [...live.teamAPlayers].map((p) => p.trim().toLowerCase()).sort().join(",");
-    return pA === lpA;
-  }
-  if (teamB.players?.length && live.teamBPlayers?.length) {
-    const pB = [...teamB.players].map((p) => p.trim().toLowerCase()).sort().join(",");
-    const lpB = [...live.teamBPlayers].map((p) => p.trim().toLowerCase()).sort().join(",");
-    return pB === lpB;
-  }
   return true;
 }
 
@@ -299,19 +304,28 @@ export function SimpleBracketView({
       .filter((t): t is Team => t !== null);
 
     const categoryTeams = category?.teams || [];
+    const normPlayerStr = (arr?: string[]) =>
+      (arr || [])
+        .flatMap((p) => String(p).split(/\s*[\/&]\s*/))
+        .map((p) => p.replace(/\s+/g, " ").trim().toLowerCase())
+        .filter(Boolean)
+        .sort()
+        .join("|");
+    const isGenTeam = (n: string) =>
+      ["n/a", "na", "tbd", "tba", "null", "undefined", "none", "-"].includes(n);
     const resolveCategoryTeam = (t: Team): Team => {
       const byId = categoryTeams.find((ct) => ct.id === t.id);
       if (byId) return byId;
-      const tPlayers = (t.players || []).map((p) => p.trim().toLowerCase()).sort().join(",");
+      const tPlayers = normPlayerStr(t.players);
       if (tPlayers) {
-        const byNameAndPlayers = categoryTeams.find(
-          (ct) =>
-            ct.name.trim().toLowerCase() === t.name.trim().toLowerCase() &&
-            (ct.players || []).map((p) => p.trim().toLowerCase()).sort().join(",") === tPlayers,
+        const byPlayers = categoryTeams.find(
+          (ct) => normPlayerStr(ct.players) === tPlayers,
         );
-        return byNameAndPlayers || t;
+        return byPlayers || t;
       }
-      return categoryTeams.find((ct) => ct.name.trim().toLowerCase() === t.name.trim().toLowerCase()) || t;
+      const cleanTName = t.name.replace(/\s+/g, " ").trim().toLowerCase();
+      if (isGenTeam(cleanTName)) return t;
+      return categoryTeams.find((ct) => ct.name.replace(/\s+/g, " ").trim().toLowerCase() === cleanTName) || t;
     };
 
     const items: SimpleMatchItem[] = [];
@@ -352,22 +366,17 @@ export function SimpleBracketView({
       const scopedMatchId = (a.id && b.id)
         ? createCategoryScopedMatchId(category.id, currentGroup.letter, a.id, b.id)
         : null;
-      const live =
-        (scopedMatchId
-          ? matches.find(
-              (m) => m.id === scopedMatchId && (!m.categoryId || isSameCategory(m.categoryId, category.id)),
-            )
-          : null) ||
-        findMatchForPair(
-          matches,
-          a.name,
-          b.name,
-          undefined,
-          category.id,
-          currentGroup.letter,
-          teamAModel.players,
-          teamBModel.players,
-        );
+      const live = findMatchForPair(
+        matches,
+        a.name,
+        b.name,
+        undefined,
+        category.id,
+        currentGroup.letter,
+        teamAModel.players,
+        teamBModel.players,
+        scopedMatchId,
+      );
       const sameOrder = live ? isMatchSameOrder(live, teamAModel, teamBModel) : true;
       const scoreA = live ? (sameOrder ? live.score.teamAScore : live.score.teamBScore) : 0;
       const scoreB = live ? (sameOrder ? live.score.teamBScore : live.score.teamAScore) : 0;

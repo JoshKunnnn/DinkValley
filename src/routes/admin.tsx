@@ -3,6 +3,7 @@ import { useState, useEffect, useMemo, useRef } from "react";
 import type { Team, Tournament, Category } from "@/data/tournaments";
 import { DrawsManager } from "@/components/admin/DrawsManager";
 import { BracketDraw } from "@/components/admin/BracketDraw";
+import { CategoryPlayerList } from "@/components/admin/CategoryPlayerList";
 import { CourtDispatch } from "@/components/admin/CourtDispatch";
 import { TournamentsManager } from "@/components/admin/TournamentsManager";
 import { MasterlistManager } from "@/components/admin/MasterlistManager";
@@ -127,12 +128,13 @@ function AdminErrorComponent({ error, reset }: { error: Error; reset: () => void
 const levels = ["Beginners", "Novice", "Intermediate", "Advance", "Open"];
 const divisions = ["Men's", "Women's", "Mixed"];
 
-type TabKey = "draw" | "dispatch" | "setup" | "teams" | "masterlist" | "access-codes";
+type TabKey = "draw" | "players" | "dispatch" | "setup" | "teams" | "masterlist" | "access-codes";
 type DrawSubTab = "bracket-draw" | "brackets";
 type SetupSection = "tournaments" | "teams" | "access-codes";
 
 const tabs: { key: TabKey; label: string }[] = [
   { key: "draw", label: "Draw" },
+  { key: "players", label: "Players" },
   { key: "dispatch", label: "Dispatch" },
   { key: "setup", label: "Setup" },
   { key: "teams", label: "Teams & Payments" },
@@ -155,7 +157,7 @@ function Admin() {
   const [activeTab, setActiveTabState] = useState<TabKey>(() => {
     if (typeof localStorage !== "undefined") {
       const saved = localStorage.getItem("dv_admin_active_tab");
-      if (saved && ["draw", "dispatch", "setup", "teams", "masterlist", "access-codes"].includes(saved)) {
+      if (saved && ["draw", "players", "dispatch", "setup", "teams", "masterlist", "access-codes"].includes(saved)) {
         return saved as TabKey;
       }
     }
@@ -520,8 +522,12 @@ function Admin() {
             <div className="min-w-0">
               <h1 className="font-display text-xl leading-tight text-foreground sm:text-3xl md:text-4xl truncate font-bold">
                 {activeTab === "draw"
-                  ? drawSubTab === "bracket-draw" ? "Bracket Draw" : "Brackets"
-                  : tabs.find((t) => t.key === activeTab)?.label}
+                  ? drawSubTab === "bracket-draw"
+                    ? "Bracket Draw"
+                    : "Brackets"
+                  : activeTab === "players"
+                    ? "Players per Category"
+                    : tabs.find((t) => t.key === activeTab)?.label}
               </h1>
               <p className="text-[0.65rem] uppercase tracking-widest text-foreground/80 sm:text-xs font-mono font-bold">
                 Organizer Console
@@ -554,7 +560,7 @@ function Admin() {
               <div className="grid grid-cols-2 p-1 bg-card rounded-lg border-2 border-border sm:flex sm:w-auto sm:border-0 sm:bg-transparent sm:p-0 sm:border-b-2 sm:border-border sm:rounded-none sm:gap-1">
                 <button
                   onClick={() => setDrawSubTab("bracket-draw")}
-                  className={`py-2 px-3 sm:px-5 sm:py-2.5 text-xs font-bold uppercase tracking-widest text-center transition-all cursor-pointer rounded sm:rounded-none sm:border-b-2 ${drawSubTab === "bracket-draw"
+                  className={`py-2 px-4 sm:px-5 sm:py-2.5 text-xs font-bold uppercase tracking-widest text-center transition-all cursor-pointer rounded sm:rounded-none sm:border-b-2 ${drawSubTab === "bracket-draw"
                       ? "bg-brick text-white sm:bg-transparent sm:border-brick sm:text-brick font-bold shadow-sm"
                       : "text-foreground hover:text-pickle sm:border-transparent font-bold"
                     }`}
@@ -563,7 +569,7 @@ function Admin() {
                 </button>
                 <button
                   onClick={() => setDrawSubTab("brackets")}
-                  className={`py-2 px-3 sm:px-5 sm:py-2.5 text-xs font-bold uppercase tracking-widest text-center transition-all cursor-pointer rounded sm:rounded-none sm:border-b-2 ${drawSubTab === "brackets"
+                  className={`py-2 px-4 sm:px-5 sm:py-2.5 text-xs font-bold uppercase tracking-widest text-center transition-all cursor-pointer rounded sm:rounded-none sm:border-b-2 ${drawSubTab === "brackets"
                       ? "bg-brick text-white sm:bg-transparent sm:border-brick sm:text-brick font-bold shadow-sm"
                       : "text-foreground hover:text-pickle sm:border-transparent font-bold"
                     }`}
@@ -643,6 +649,70 @@ function Admin() {
                   categoryId={categoryId}
                   setCategoryId={setCategoryId}
                   onSwitchToBracketDraw={() => setDrawSubTab("bracket-draw")}
+                />
+              )}
+            </div>
+          )}
+
+          {/* ── PLAYERS PER CATEGORY TAB ── */}
+          {activeTab === "players" && (
+            <div className="max-w-5xl space-y-4">
+              {effectiveTournaments.length === 0 && isLoading && (
+                <div className="surface-card p-10 sm:p-14 text-center max-w-xl mx-auto border border-border mt-8">
+                  <div className="flex flex-col items-center justify-center gap-3">
+                    <div className="h-6 w-6 border-2 border-pickle border-t-transparent rounded-full animate-spin" />
+                    <span className="text-xs uppercase tracking-[0.28em] text-pickle font-bold">Loading Players</span>
+                  </div>
+                </div>
+              )}
+
+              {effectiveTournaments.length === 0 && !isLoading && (
+                <div className="surface-card p-10 sm:p-14 text-center max-w-xl mx-auto border border-border mt-8">
+                  <span className="text-xs uppercase tracking-[0.28em] text-pickle font-bold">Setup Required</span>
+                  <h3 className="font-display text-3xl text-foreground mt-2">No Tournaments Created Yet</h3>
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    Create your first tournament in the Setup tab before viewing players.
+                  </p>
+                  <button
+                    onClick={() => { setActiveTab("setup"); setOpenSetupSections(new Set(["tournaments"])); }}
+                    className="mt-6 bg-brick px-6 py-2.5 font-display text-xl tracking-wider text-sand hover:bg-brick-deep transition-colors cursor-pointer"
+                  >
+                    Go to Setup
+                  </button>
+                </div>
+              )}
+
+              {effectiveTournaments.length > 0 && (!tournament || (tournament.categories || []).length === 0) && (
+                <div className="surface-card p-10 sm:p-14 text-center max-w-xl mx-auto border border-border mt-8">
+                  <span className="text-xs uppercase tracking-[0.28em] text-pickle font-bold">Divisions Required</span>
+                  <h3 className="font-display text-3xl text-foreground mt-2">No Categories Configured</h3>
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    The selected tournament has no categories configured yet.
+                  </p>
+                  <button
+                    onClick={() => { setActiveTab("setup"); setOpenSetupSections(new Set(["tournaments"])); }}
+                    className="mt-6 bg-brick px-6 py-2.5 font-display text-xl tracking-wider text-sand hover:bg-brick-deep transition-colors cursor-pointer"
+                  >
+                    Configure Categories
+                  </button>
+                </div>
+              )}
+
+              {tournament && (tournament.categories || []).length > 0 && (
+                <CategoryPlayerList
+                  tournament={tournament}
+                  tournaments={effectiveTournaments}
+                  tournamentSlug={tournamentSlug}
+                  setTournamentSlug={(slug) => {
+                    setTournamentSlug(slug);
+                    const next = effectiveTournaments.find((t) => t.slug === slug);
+                    if (next?.categories?.[0]) setCategoryId(next.categories[0].id);
+                  }}
+                  onOpenCategoryDraw={(catId) => {
+                    setCategoryId(catId);
+                    setDrawSubTab("bracket-draw");
+                    setActiveTab("draw");
+                  }}
                 />
               )}
             </div>

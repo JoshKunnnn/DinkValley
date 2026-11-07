@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import type { Team } from "@/data/tournaments";
+import { getMatchTeamDisplay } from "@/lib/match-store";
 
 export type FinishedMatchResult = {
   key: string;
@@ -44,13 +45,18 @@ export function FinalResultsView({
 
   const filteredResults = useMemo(() => {
     if (!filterQuery.trim()) return results;
-    const q = filterQuery.trim().toLowerCase();
-    return results.filter(
-      (r) =>
-        r.teamAName.toLowerCase().includes(q) ||
-        r.teamBName.toLowerCase().includes(q) ||
-        r.winnerName.toLowerCase().includes(q)
-    );
+    const q = filterQuery.replace(/\s+/g, " ").trim().toLowerCase();
+    return results.filter((r) => {
+      const pA = (r.teamAPlayers || r.teamA?.players || []).join(" ").replace(/\s+/g, " ").toLowerCase();
+      const pB = (r.teamBPlayers || r.teamB?.players || []).join(" ").replace(/\s+/g, " ").toLowerCase();
+      return (
+        r.teamAName.replace(/\s+/g, " ").toLowerCase().includes(q) ||
+        r.teamBName.replace(/\s+/g, " ").toLowerCase().includes(q) ||
+        r.winnerName.replace(/\s+/g, " ").toLowerCase().includes(q) ||
+        pA.includes(q) ||
+        pB.includes(q)
+      );
+    });
   }, [results, filterQuery]);
 
   if (results.length === 0) {
@@ -105,14 +111,6 @@ export function FinalResultsView({
       {/* Results Cards List */}
       <div className="space-y-3">
         {filteredResults.map((r) => {
-          const isHighlight =
-            Boolean(highlightTeam) &&
-            (r.teamAName === highlightTeam || r.teamBName === highlightTeam);
-          const isWinnerA = r.winnerName === r.teamAName;
-          const isWinnerB = r.winnerName === r.teamBName;
-          const margin = Math.abs(r.scoreA - r.scoreB);
-          const formattedCourt = formatCourtName(r.court);
-
           const playersA =
             (r.teamAPlayers && r.teamAPlayers.length > 0)
               ? r.teamAPlayers
@@ -124,6 +122,31 @@ export function FinalResultsView({
               ? r.teamBPlayers
               : r.teamB?.players;
           const clubB = r.teamBClub || r.teamB?.club;
+
+          const dispA = getMatchTeamDisplay(r.teamAName, playersA, "Team A");
+          const dispB = getMatchTeamDisplay(r.teamBName, playersB, "Team B");
+
+          const isHighlight =
+            Boolean(highlightTeam) &&
+            (r.teamAName === highlightTeam ||
+              r.teamBName === highlightTeam ||
+              dispA.primary === highlightTeam ||
+              dispB.primary === highlightTeam);
+          const isWinnerA =
+            r.scoreA > r.scoreB
+              ? true
+              : r.scoreB > r.scoreA
+                ? false
+                : r.winnerName === r.teamAName && r.winnerName !== r.teamBName;
+          const isWinnerB =
+            r.scoreB > r.scoreA
+              ? true
+              : r.scoreA > r.scoreB
+                ? false
+                : r.winnerName === r.teamBName && r.winnerName !== r.teamAName;
+          const winnerLabel = isWinnerA ? dispA.primary : isWinnerB ? dispB.primary : r.winnerName;
+          const margin = Math.abs(r.scoreA - r.scoreB);
+          const formattedCourt = formatCourtName(r.court);
 
           return (
             <div
@@ -140,9 +163,9 @@ export function FinalResultsView({
                   <span className="px-2 py-0.5 text-[0.65rem] font-bold uppercase tracking-wider bg-charcoal text-sand rounded font-mono">
                     Final Result
                   </span>
-                  {r.round && (
+                  {(r.round || r.stage) && (
                     <span className="text-[0.7rem] uppercase font-mono text-muted-foreground">
-                      {r.round}
+                      {r.round || r.stage}
                     </span>
                   )}
                 </div>
@@ -177,16 +200,16 @@ export function FinalResultsView({
                           isWinnerA ? "text-pickle font-bold" : "text-foreground/75 font-semibold"
                         }`}
                       >
-                        {r.teamAName}
+                        {dispA.primary}
                       </span>
-                      {((playersA && playersA.length > 0) || clubA) && (
+                      {(dispA.secondary || clubA) && (
                         <div className="flex items-center gap-1.5 text-xs text-muted-foreground truncate mt-0.5 font-normal">
-                          {playersA && playersA.length > 0 && (
-                            <span className="truncate">{playersA.join(" & ")}</span>
+                          {dispA.secondary && (
+                            <span className="truncate">{dispA.secondary}</span>
                           )}
                           {clubA && (
                             <>
-                              <span className="text-muted-foreground/50 shrink-0">•</span>
+                              {dispA.secondary && <span className="text-muted-foreground/50 shrink-0">&bull;</span>}
                               <span className="text-[0.65rem] px-1.5 py-0.2 rounded bg-charcoal text-sand border border-white/20 shrink-0 font-bold">
                                 {clubA}
                               </span>
@@ -226,16 +249,16 @@ export function FinalResultsView({
                           isWinnerB ? "text-pickle font-bold" : "text-foreground font-semibold"
                         }`}
                       >
-                        {r.teamBName}
+                        {dispB.primary}
                       </span>
-                      {((playersB && playersB.length > 0) || clubB) && (
+                      {(dispB.secondary || clubB) && (
                         <div className="flex items-center gap-1.5 text-xs text-muted-foreground truncate mt-0.5 font-normal">
-                          {playersB && playersB.length > 0 && (
-                            <span className="truncate">{playersB.join(" & ")}</span>
+                          {dispB.secondary && (
+                            <span className="truncate">{dispB.secondary}</span>
                           )}
                           {clubB && (
                             <>
-                              <span className="text-muted-foreground/50 shrink-0">•</span>
+                              {dispB.secondary && <span className="text-muted-foreground/50 shrink-0">&bull;</span>}
                               <span className="text-[0.65rem] px-1.5 py-0.2 rounded bg-charcoal text-sand border border-white/20 shrink-0 font-bold">
                                 {clubB}
                               </span>
@@ -258,7 +281,7 @@ export function FinalResultsView({
               {/* Friendly summary line */}
               <div className="mt-2.5 pt-2 border-t border-border/50 flex items-center justify-between text-[0.7rem] text-muted-foreground font-mono">
                 <span>
-                  {r.winnerName} won by {margin} {margin === 1 ? "point" : "points"}
+                  {winnerLabel} won by {margin} {margin === 1 ? "point" : "points"}
                 </span>
                 <span>Final Score: {Math.max(r.scoreA, r.scoreB)} - {Math.min(r.scoreA, r.scoreB)}</span>
               </div>

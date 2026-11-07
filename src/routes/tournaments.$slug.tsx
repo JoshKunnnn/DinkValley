@@ -13,6 +13,7 @@ import {
   findMatchForPair,
   generateBalancedRoundRobinPairs,
   createCategoryScopedMatchId,
+  deduplicateCompletedMatches,
   type LiveMatch,
 } from "@/lib/match-store";
 import {
@@ -140,7 +141,14 @@ function TournamentPage() {
   // Check how many confirmed/dispatched matches exist across the tournament
   const confirmedMatches = useMemo(() => matches.filter((m) => isConfirmedDispatchedMatch(m, stations)), [matches, stations]);
   const liveMatches = useMemo(() => confirmedMatches.filter((m) => m.status === "live"), [confirmedMatches]);
-  const finalMatches = useMemo(() => confirmedMatches.filter((m) => m.status === "final"), [confirmedMatches]);
+  const finalMatches = useMemo(
+    () =>
+      deduplicateCompletedMatches(confirmedMatches, {
+        tournamentSlug: t?.slug,
+        categories: t?.categories,
+      }).sort((a, b) => ((b.endedAt || b.startedAt || 0) as number) - ((a.endedAt || a.startedAt || 0) as number)),
+    [confirmedMatches, t?.slug, t?.categories],
+  );
   const scheduledMatches = useMemo(() => confirmedMatches.filter((m) => m.status === "scheduled"), [confirmedMatches]);
 
   const navigate = useNavigate();
@@ -276,9 +284,12 @@ function TournamentPage() {
       const seen = new Set<string>();
       drawnGroups.forEach((g) => {
         g.slots.forEach((s) => {
-          if (s.team && !seen.has(s.team.name)) {
-            seen.add(s.team.name);
-            extracted.push(s.team);
+          if (s.team) {
+            const teamKey = s.team.id || `${s.team.name}::${(s.team.players || []).join(",")}`;
+            if (!seen.has(teamKey)) {
+              seen.add(teamKey);
+              extracted.push(s.team);
+            }
           }
         });
       });
@@ -528,8 +539,13 @@ function TournamentPage() {
                 title={`${category?.label ?? "Division"} Final Results`}
                 results={categoryFinalMatches.map((m) => ({
                   key: m.id,
+                  round: m.stage,
                   teamAName: m.teamAName,
                   teamBName: m.teamBName,
+                  teamAPlayers: m.teamAPlayers,
+                  teamAClub: m.teamAClub,
+                  teamBPlayers: m.teamBPlayers,
+                  teamBClub: m.teamBClub,
                   scoreA: m.score.teamAScore,
                   scoreB: m.score.teamBScore,
                   winnerName: m.winnerTeam || (m.score.teamAScore > m.score.teamBScore ? m.teamAName : m.teamBName),
@@ -1235,8 +1251,13 @@ function LiveCourtsTab({
           title="Final Match Results"
           results={finalMatches.map((m) => ({
             key: m.id,
+            round: m.stage,
             teamAName: m.teamAName,
             teamBName: m.teamBName,
+            teamAPlayers: m.teamAPlayers,
+            teamAClub: m.teamAClub,
+            teamBPlayers: m.teamBPlayers,
+            teamBClub: m.teamBClub,
             scoreA: m.score.teamAScore,
             scoreB: m.score.teamBScore,
             winnerName: m.winnerTeam || (m.score.teamAScore > m.score.teamBScore ? m.teamAName : m.teamBName),

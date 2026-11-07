@@ -16,6 +16,10 @@ import {
   findMatchForPair,
   migrateMatchesToDeterministicIds,
   isMatchMatchingStation,
+  deduplicateCompletedMatches,
+  getMatchTeamDisplay,
+  isGenericTeamName,
+  resolveMatchWinnerSide,
 } from "@/lib/match-store";
 import {
   FACILITY_COURTS,
@@ -85,10 +89,24 @@ function getMatchBracketLabel(m: LiveMatch): string {
   if (match) {
     return `Bracket ${match[1]!.toUpperCase()}`;
   }
-  if (m.stage && /quarter|semi|final|playoff|bronze|gold|knockout/i.test(m.stage)) {
+  if (m.stage && /quarter|semi|final|playoff|bronze|gold|championship|knockout|elimination|round of|play-in/i.test(m.stage)) {
     return "Playoffs";
   }
   return m.stage || "Completed Matches";
+}
+
+/** Builds a unique participant identity key from normalized player pairs first, falling back to non-generic team name. */
+function getParticipantIdentityKey(teamName: string, players?: string[], fallbackId?: string): string {
+  const normPlayers = (players || [])
+    .flatMap((p) => String(p).split(/\s*[\/&]\s*/))
+    .map((p) => p.replace(/\s+/g, " ").trim().toLowerCase())
+    .filter((p) => Boolean(p) && !isGenericTeamName(p))
+    .sort()
+    .join("|");
+  if (normPlayers) return `players:${normPlayers}`;
+  const cleanTeam = (teamName || "").replace(/\s+/g, " ").trim().toLowerCase();
+  if (cleanTeam && !isGenericTeamName(cleanTeam)) return `team:${cleanTeam}`;
+  return `anon:${fallbackId || teamName}`;
 }
 
 /**
@@ -211,18 +229,17 @@ function computeCategoryUnassignedMatches(
           isDupA,
           isDupB,
         );
-        const existingLive =
-          (scopedMatchId ? divisionMatches.find((m) => m.id === scopedMatchId) : null) ||
-          findMatchForPair(
-            divisionMatches,
-            teamA.name,
-            teamB.name,
-            tournamentSlug,
-            cat.id,
-            group.letter,
-            teamA.players,
-            teamB.players,
-          );
+        const existingLive = findMatchForPair(
+          divisionMatches,
+          teamA.name,
+          teamB.name,
+          tournamentSlug,
+          cat.id,
+          group.letter,
+          teamA.players,
+          teamB.players,
+          scopedMatchId,
+        );
         const effectiveMatchId = existingLive ? existingLive.id : (scopedMatchId || canonicalId);
 
         if (existingLive?.status === "final" || existingLive?.winnerTeam || existingLive?.endedAt) {
@@ -248,33 +265,32 @@ function computeCategoryUnassignedMatches(
     }
   }
 
-  // 3. From Playoff Knockout Matches (only if both teams are registered in this category)
-  if (!hasCompletedPoolBracket && playoffMatches && playoffMatches.length > 0) {
-    resetMainDrawMatches(tournamentSlug, cat.id);
-  }
-  if (hasCompletedPoolBracket && playoffMatches) {
+  // 3. From Playoff Knockout Matches (including manually assigned or edited playoff teams)
+  if (playoffMatches && playoffMatches.length > 0) {
+    const claimedKoLiveIds = new Set<string>();
+    const koPool = divisionMatches.filter(
+      (m) => !m.stage?.includes("Pool Play") && !m.stage?.includes("Bracket "),
+    );
     for (const km of playoffMatches) {
       if (!km.teamA || !km.teamB) continue;
-      if (
-        !validTeamNames.has(km.teamA.name.trim().toLowerCase()) ||
-        !validTeamNames.has(km.teamB.name.trim().toLowerCase())
-      ) {
-        continue;
-      }
       const stage = `${km.round} - ${km.label}`;
       const legacyId = `live-ko-${tournamentSlug}-${cat.id}-${km.id}`;
-      const canonicalId = createPairMatchId(tournamentSlug, cat.id, stage, km.teamA.name, km.teamB.name);
+      const canonicalId = createPairMatchId(
+        tournamentSlug,
+        cat.id,
+        stage,
+        km.teamA.name,
+        km.teamB.name,
+        km.teamA.players,
+        km.teamB.players,
+      );
+      const unclaimedKoPool = koPool.filter((m) => !claimedKoLiveIds.has(m.id));
       const existingLive =
-        divisionMatches.find(
-          (m) =>
-            !m.stage?.includes("Pool Play") &&
-            !m.stage?.includes("Bracket ") &&
-            (m.id === canonicalId || m.id === legacyId || m.id === km.id),
+        unclaimedKoPool.find(
+          (m) => m.id === canonicalId || m.id === legacyId || m.id === km.id,
         ) ||
         findMatchForPair(
-          divisionMatches.filter(
-            (m) => !m.stage?.includes("Pool Play") && !m.stage?.includes("Bracket "),
-          ),
+          unclaimedKoPool,
           km.teamA.name,
           km.teamB.name,
           tournamentSlug,
@@ -283,6 +299,9 @@ function computeCategoryUnassignedMatches(
           km.teamA.players,
           km.teamB.players,
         );
+      if (existingLive) {
+        claimedKoLiveIds.add(existingLive.id);
+      }
       const effectiveId = existingLive?.id || canonicalId;
 
       if (existingLive?.status === "final" || existingLive?.winnerTeam || existingLive?.endedAt || km.winner) continue;
@@ -677,12 +696,17 @@ export function CourtDispatch({
       const drawnTeamNames = (existingDrawn || [])
         .flatMap((g) => g.slots.map((s) => s.team?.name?.trim().toLowerCase()))
         .filter((n): n is string => Boolean(n));
+      const existingPlayoffs = getMainDrawMatches(tournamentSlug, categoryId);
+      const playoffTeamNames = (existingPlayoffs || [])
+        .flatMap((km) => [km.teamA?.name?.trim().toLowerCase(), km.teamB?.name?.trim().toLowerCase()])
+        .filter((n): n is string => Boolean(n));
 
-      // Roster includes both current category.teams and drawn bracket teams
+      // Roster includes current category.teams, drawn bracket teams, and active/edited playoff teams
       const validNames = Array.from(
         new Set([
           ...category.teams.map((t) => t.name.trim().toLowerCase()),
           ...drawnTeamNames,
+          ...playoffTeamNames,
         ]),
       );
       const validSet = new Set(validNames);
@@ -728,6 +752,14 @@ export function CourtDispatch({
     return computeCategoryUnassignedMatches(tournamentSlug, category, queue, stations, matches);
   }, [tournamentSlug, category, queue, stations, matches, drawVersion]);
 
+  // All completed matches in the tournament (shared canonical deduplication with MatchHistory)
+  const allCompletedMatches = useMemo(() => {
+    return deduplicateCompletedMatches(matches, {
+      tournamentSlug,
+      categories: tournament.categories,
+    }).sort((a, b) => ((b.endedAt || b.startedAt || 0) as number) - ((a.endedAt || a.startedAt || 0) as number));
+  }, [matches, tournamentSlug, tournament.categories]);
+
   // Statistics and progress for each category across the tournament
   const categoryStatsMap = useMemo(() => {
     const map = new Map<
@@ -764,19 +796,10 @@ export function CourtDispatch({
 
       const unassigned = computeCategoryUnassignedMatches(tournamentSlug, cat, queue, stations, matches);
 
-      // 2. Deduplicate completed matches by canonical matchup pair and stage so duplicate DB rows count once
-      const seenCompletedKeys = new Set<string>();
-      matches.forEach((m) => {
-        if (m.status !== "final") return;
-        if (!isMatchInCategory(m, cat, tournamentSlug)) return;
-        const a = m.teamAName?.trim().toLowerCase();
-        const b = m.teamBName?.trim().toLowerCase();
-        if (!a || !b || a === b) return;
-        const pairKey = [a, b].sort().join("::");
-        const stageKey = (m.stage || "match").trim().toLowerCase();
-        seenCompletedKeys.add(`${pairKey}::${stageKey}`);
-      });
-      const completedCount = seenCompletedKeys.size;
+      // 2. Count deduplicated completed matches belonging to this category (including "n/a" & duplicate club pairs)
+      const completedCount = allCompletedMatches.filter((m) =>
+        isMatchInCategory(m, cat, tournamentSlug),
+      ).length;
 
       const onCourtCount = matches.filter((m) => {
         if (!isMatchInCategory(m, cat, tournamentSlug)) return false;
@@ -814,7 +837,7 @@ export function CourtDispatch({
     }
 
     return map;
-  }, [tournament.categories, tournamentSlug, queue, stations, matches, drawVersion]);
+  }, [tournament.categories, tournamentSlug, queue, stations, matches, allCompletedMatches, drawVersion]);
 
   const activeIndex = categoryOrder.indexOf(activeWaveId);
   const currentWaveNumber = activeIndex >= 0 ? activeIndex + 1 : 1;
@@ -846,7 +869,7 @@ export function CourtDispatch({
     }
 
     const pendingQueueCount = queue.filter((q) => q.status === "queued" || q.status === "on_deck").length;
-    const completedMatches = matches.filter((m) => m.status === "final");
+    const completedMatches = allCompletedMatches;
 
     // Average duration
     let avgDurationMin = 0;
@@ -868,7 +891,7 @@ export function CourtDispatch({
       completedCount: completedMatches.length,
       avgDurationMin: avgDurationMin || 18,
     };
-  }, [stations, queue, matches]);
+  }, [stations, queue, allCompletedMatches]);
 
   // Memoized data for Court Bracket Selection Modal
   const bracketModalData = useMemo(() => {
@@ -992,18 +1015,17 @@ export function CourtDispatch({
               isDupA,
               isDupB,
             );
-            const existing =
-              (scopedMatchId ? divisionMatches.find((m) => m.id === scopedMatchId) : null) ||
-              findMatchForPair(
-                divisionMatches,
-                teamA.name,
-                teamB.name,
-                tournamentSlug,
-                activeCat.id,
-                group.letter,
-                teamA.players,
-                teamB.players,
-              );
+            const existing = findMatchForPair(
+              divisionMatches,
+              teamA.name,
+              teamB.name,
+              tournamentSlug,
+              activeCat.id,
+              group.letter,
+              teamA.players,
+              teamB.players,
+              scopedMatchId,
+            );
             const effectiveMatchId = existing?.id || matchId;
 
             let matchStatus: "unassigned" | "queued" | "live" | "final" = "unassigned";
@@ -1075,30 +1097,33 @@ export function CourtDispatch({
       }
     }
 
-    const hasCompletedPoolBracket =
-      groupsList.length === 0 ||
-      groupsList.some((g) => g.totalCount > 0 && g.completedCount === g.totalCount);
-    if (!hasCompletedPoolBracket && playoffMatches && playoffMatches.length > 0) {
-      resetMainDrawMatches(tournamentSlug, activeCat.id);
-    }
-    if (hasCompletedPoolBracket && playoffMatches && playoffMatches.length > 0) {
+    if (playoffMatches && playoffMatches.length > 0) {
       const koMatches: typeof groupsList[number]["matches"] = [];
+      const claimedKoLiveIds = new Set<string>();
+      const koDivisionPool = divisionMatches.filter(
+        (m) => !m.stage?.includes("Pool Play") && !m.stage?.includes("Bracket "),
+      );
+
       for (const km of playoffMatches) {
         if (!km.teamA || !km.teamB) continue;
         const stage = `${km.round} - ${km.label}`;
         const legacyId = `live-ko-${tournamentSlug}-${activeCat.id}-${km.id}`;
-        const canonicalId = createPairMatchId(tournamentSlug, activeCat.id, stage, km.teamA.name, km.teamB.name);
+        const canonicalId = createPairMatchId(
+          tournamentSlug,
+          activeCat.id,
+          stage,
+          km.teamA.name,
+          km.teamB.name,
+          km.teamA.players,
+          km.teamB.players,
+        );
+        const unclaimedPool = koDivisionPool.filter((m) => !claimedKoLiveIds.has(m.id));
         const existing =
-          divisionMatches.find(
-            (m) =>
-              !m.stage?.includes("Pool Play") &&
-              !m.stage?.includes("Bracket ") &&
-              (m.id === canonicalId || m.id === legacyId || m.id === km.id),
+          unclaimedPool.find(
+            (m) => m.id === canonicalId || m.id === legacyId || m.id === km.id,
           ) ||
           findMatchForPair(
-            divisionMatches.filter(
-              (m) => !m.stage?.includes("Pool Play") && !m.stage?.includes("Bracket "),
-            ),
+            unclaimedPool,
             km.teamA.name,
             km.teamB.name,
             tournamentSlug,
@@ -1107,6 +1132,9 @@ export function CourtDispatch({
             km.teamA.players,
             km.teamB.players,
           );
+        if (existing) {
+          claimedKoLiveIds.add(existing.id);
+        }
         const effectiveId = existing?.id || canonicalId;
 
         let matchStatus: "unassigned" | "queued" | "live" | "final" = "unassigned";
@@ -1116,14 +1144,24 @@ export function CourtDispatch({
         if (existing?.status === "final" || existing?.winnerTeam || existing?.endedAt || km.winner) {
           matchStatus = "final";
         } else {
-          const courtEntry = Object.entries(stations).find(
-            ([c, st]) =>
-              (st.currentMatchId === effectiveId ||
-                st.currentMatchId === legacyId ||
-                st.currentMatchId === canonicalId ||
-                (existing && isMatchMatchingStation(existing, st.currentMatchId, c))) &&
-              (st.status === "live" || st.status === "warmup"),
-          );
+          const courtEntry = Object.entries(stations).find(([c, st]) => {
+            if (!st.currentMatchId || (st.status !== "live" && st.status !== "warmup")) {
+              return false;
+            }
+            if (
+              st.currentMatchId === effectiveId ||
+              st.currentMatchId === legacyId ||
+              st.currentMatchId === canonicalId
+            ) {
+              return true;
+            }
+            if (!existing) return false;
+            const belongsToOtherExactMatch = matches.some(
+              (other) => other.id === st.currentMatchId && other.id !== existing.id,
+            );
+            if (belongsToOtherExactMatch) return false;
+            return isMatchMatchingStation(existing, st.currentMatchId, c);
+          });
           if (courtEntry) {
             matchStatus = "live";
             assignedCourt = courtEntry[0];
@@ -1392,7 +1430,9 @@ export function CourtDispatch({
       },
     ]);
     reloadData();
-    setCopyNotice(`Queued ${match.teamAName} vs ${match.teamBName}`);
+    const dispA = getMatchTeamDisplay(match.teamAName, match.teamAPlayers, "Team A").primary;
+    const dispB = getMatchTeamDisplay(match.teamBName, match.teamBPlayers, "Team B").primary;
+    setCopyNotice(`Queued ${dispA} vs ${dispB}`);
     setTimeout(() => setCopyNotice(null), 3000);
   };
 
@@ -1490,16 +1530,29 @@ export function CourtDispatch({
     });
     setSelectedCourtForDispatch(null);
     setCourtReplaceConfirm(null);
-    setCopyNotice(`Dispatched ${match.teamAName} vs ${match.teamBName} to ${court}`);
+    const dispA = getMatchTeamDisplay(match.teamAName, match.teamAPlayers, "Team A").primary;
+    const dispB = getMatchTeamDisplay(match.teamBName, match.teamBPlayers, "Team B").primary;
+    setCopyNotice(`Dispatched ${dispA} vs ${dispB} to ${court}`);
     setTimeout(() => setCopyNotice(null), 3000);
   };
 
   // Filtered active queue (search-aware, division-aware, priority-sorted)
   const filteredQueue = useMemo(() => {
     const q = searchQuery.toLowerCase();
-    const validTeamNames = category?.teams
-      ? new Set(category.teams.map((t) => t.name.trim().toLowerCase()))
-      : new Set<string>();
+    const validTeamNames = new Set<string>(
+      category?.teams ? category.teams.map((t) => t.name.trim().toLowerCase()) : [],
+    );
+    const drawnForCat = getDrawnGroups(tournamentSlug, categoryId);
+    for (const grp of drawnForCat || []) {
+      for (const s of grp.slots || []) {
+        if (s.team?.name) validTeamNames.add(s.team.name.trim().toLowerCase());
+      }
+    }
+    const playoffsForCat = getMainDrawMatches(tournamentSlug, categoryId);
+    for (const km of playoffsForCat || []) {
+      if (km.teamA?.name) validTeamNames.add(km.teamA.name.trim().toLowerCase());
+      if (km.teamB?.name) validTeamNames.add(km.teamB.name.trim().toLowerCase());
+    }
 
     return queue
       .filter((item) => item.status === "queued" || item.status === "on_deck")
@@ -1582,46 +1635,17 @@ export function CourtDispatch({
     return map;
   }, [queue, queueDivisionFilter, categoryId]);
 
-  // All completed matches in the tournament (deduplicated by matchup pair so duplicate DB rows count once)
-  const allCompletedMatches = useMemo(() => {
-    const finals = matches.filter((m) => m.status === "final" || Boolean(m.winnerTeam) || Boolean(m.endedAt));
-    const seenMatchups = new Map<string, LiveMatch>();
-
-    for (const m of finals) {
-      if (!m.teamAName || !m.teamBName) continue;
-      const cleanA = m.teamAName.trim().toLowerCase();
-      const cleanB = m.teamBName.trim().toLowerCase();
-      if (cleanA === cleanB) continue; // Skip invalid self-matches
-      const pairKey = [cleanA, cleanB].sort().join("::");
-      const stageKey = (m.stage || "match").trim().toLowerCase();
-      const key = `${m.tournamentSlug || tournamentSlug || "all"}::${pairKey}::${stageKey}`;
-
-      if (!seenMatchups.has(key)) {
-        seenMatchups.set(key, m);
-      } else {
-        const existing = seenMatchups.get(key)!;
-        const existingScore = (existing.score?.teamAScore ?? 0) + (existing.score?.teamBScore ?? 0);
-        const newScore = (m.score?.teamAScore ?? 0) + (m.score?.teamBScore ?? 0);
-        if (newScore > existingScore || (m.endedAt && !existing.endedAt) || (m.officiatedBy && !existing.officiatedBy)) {
-          seenMatchups.set(key, m);
-        }
-      }
-    }
-
-    return Array.from(seenMatchups.values()).sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0));
-  }, [matches, tournamentSlug]);
-
   // Categories available for match history filtering with completed counts
   const availableHistoryCategories = useMemo(() => {
     return tournament.categories.map((cat) => {
-      const count = allCompletedMatches.filter((m) => isMatchInCategory(m, cat)).length;
+      const count = allCompletedMatches.filter((m) => isMatchInCategory(m, cat, tournamentSlug)).length;
       return {
         id: cat.id,
         label: cat.label,
         count,
       };
     });
-  }, [tournament.categories, allCompletedMatches]);
+  }, [tournament.categories, allCompletedMatches, tournamentSlug]);
 
   // Brackets available within the currently selected category filter with completed counts
   const availableHistoryBrackets = useMemo(() => {
@@ -1631,7 +1655,7 @@ export function CourtDispatch({
     allCompletedMatches.forEach((m) => {
       if (historyCategoryFilter !== "all") {
         const cat = tournament.categories.find((c) => c.id === historyCategoryFilter);
-        if (cat && !isMatchInCategory(m, cat)) return;
+        if (cat && !isMatchInCategory(m, cat, tournamentSlug)) return;
       }
       const bracket = getMatchBracketLabel(m);
       set.add(bracket);
@@ -1642,17 +1666,17 @@ export function CourtDispatch({
       bracket,
       count: counts[bracket] || 0,
     }));
-  }, [allCompletedMatches, historyCategoryFilter, tournament.categories]);
+  }, [allCompletedMatches, historyCategoryFilter, tournament.categories, tournamentSlug]);
 
   // Filtered match history (category-aware, bracket-aware, search-aware)
   const filteredHistory = useMemo(() => {
-    const q = historySearchQuery.trim().toLowerCase();
+    const q = historySearchQuery.replace(/\s+/g, " ").trim().toLowerCase();
     return allCompletedMatches
       .filter((m) => {
         // Category filter
         if (historyCategoryFilter !== "all") {
           const cat = tournament.categories.find((c) => c.id === historyCategoryFilter);
-          if (cat && !isMatchInCategory(m, cat)) return false;
+          if (cat && !isMatchInCategory(m, cat, tournamentSlug)) return false;
         }
         // Bracket filter
         if (historyBracketFilter !== "all") {
@@ -1661,7 +1685,7 @@ export function CourtDispatch({
         }
         // Search query
         if (q) {
-          const catLabel = tournament.categories.find((c) => isMatchInCategory(m, c))?.label || "";
+          const catLabel = tournament.categories.find((c) => isMatchInCategory(m, c, tournamentSlug))?.label || "";
           const searchHaystack = [
             m.teamAName,
             m.teamBName,
@@ -1674,13 +1698,14 @@ export function CourtDispatch({
             catLabel,
           ]
             .join(" ")
+            .replace(/\s+/g, " ")
             .toLowerCase();
           if (!searchHaystack.includes(q)) return false;
         }
         return true;
       })
-      .sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0));
-  }, [allCompletedMatches, historyCategoryFilter, historyBracketFilter, historySearchQuery, tournament.categories]);
+      .sort((a, b) => ((b.endedAt || b.startedAt || 0) as number) - ((a.endedAt || a.startedAt || 0) as number));
+  }, [allCompletedMatches, historyCategoryFilter, historyBracketFilter, historySearchQuery, tournament.categories, tournamentSlug]);
 
   // Match history grouped by bracket stage
   const groupedHistory = useMemo(() => {
@@ -1769,14 +1794,14 @@ export function CourtDispatch({
     return Array.from(set).sort((a, b) => a.localeCompare(b));
   }, [unassignedMatches, unassignedBracketFilter]);
 
-  // Matches ready to be added to the queue (neither team is currently playing on court and neither team is already queued)
+  // Matches ready to be added to the queue (neither pair/player is currently playing on court and neither pair is already queued)
   const readyUnassignedMatches = useMemo(() => {
     const existingQueueIds = new Set(queue.map((q) => q.matchId));
     const queuedTeams = new Set<string>();
     queue.forEach((q) => {
       if (q.status === "queued" || q.status === "on_deck" || q.status === "live" || q.status === "dispatched") {
-        queuedTeams.add(q.teamAName.trim().toLowerCase());
-        queuedTeams.add(q.teamBName.trim().toLowerCase());
+        queuedTeams.add(getParticipantIdentityKey(q.teamAName, q.teamAPlayers, `${q.matchId}:A`));
+        queuedTeams.add(getParticipantIdentityKey(q.teamBName, q.teamBPlayers, `${q.matchId}:B`));
       }
     });
 
@@ -1786,21 +1811,21 @@ export function CourtDispatch({
     for (const m of unassignedMatches) {
       if (existingQueueIds.has(m.id)) continue;
       if (!isMatchInSameBracket(tournamentSlug, categoryId, m.stage, m.teamAName, m.teamBName, undefined, undefined, m.teamAPlayers, m.teamBPlayers)) continue;
-      const a = m.teamAName.trim().toLowerCase();
-      const b = m.teamBName.trim().toLowerCase();
+      const keyA = getParticipantIdentityKey(m.teamAName, m.teamAPlayers, `${m.id}:A`);
+      const keyB = getParticipantIdentityKey(m.teamBName, m.teamBPlayers, `${m.id}:B`);
 
       // Skip if either team or player is currently playing or on-deck on court
       if (
         checkSimultaneousPlayConflict(m.teamAName, m.teamAPlayers, tournamentSlug) ||
         checkSimultaneousPlayConflict(m.teamBName, m.teamBPlayers, tournamentSlug)
       ) continue;
-      // Skip if either team already has a match in the active queue
-      if (queuedTeams.has(a) || queuedTeams.has(b)) continue;
-      // In this batch, pick at most 1 matchup per team
-      if (chosenInBatch.has(a) || chosenInBatch.has(b)) continue;
+      // Skip if either pair already has a match in the active queue
+      if (queuedTeams.has(keyA) || queuedTeams.has(keyB)) continue;
+      // In this batch, pick at most 1 matchup per pair
+      if (chosenInBatch.has(keyA) || chosenInBatch.has(keyB)) continue;
 
-      chosenInBatch.add(a);
-      chosenInBatch.add(b);
+      chosenInBatch.add(keyA);
+      chosenInBatch.add(keyB);
       ready.push(m);
     }
     return ready;
@@ -1832,24 +1857,26 @@ export function CourtDispatch({
       if (!isMatchInSameBracket(tournamentSlug, categoryId, m.stage, m.teamAName, m.teamBName, undefined, undefined, m.teamAPlayers, m.teamBPlayers)) return false;
       const a = m.teamAName.trim().toLowerCase();
       const b = m.teamBName.trim().toLowerCase();
-      return namesSet.has(a) || namesSet.has(b);
+      const dispA = getMatchTeamDisplay(m.teamAName, m.teamAPlayers, m.teamAName).primary.trim().toLowerCase();
+      const dispB = getMatchTeamDisplay(m.teamBName, m.teamBPlayers, m.teamBName).primary.trim().toLowerCase();
+      return namesSet.has(a) || namesSet.has(b) || namesSet.has(dispA) || namesSet.has(dispB);
     });
 
     const toAdd: typeof candidates = [];
     const scheduledInThisBatch = new Set<string>();
 
     for (const m of candidates) {
-      const a = m.teamAName.trim().toLowerCase();
-      const b = m.teamBName.trim().toLowerCase();
+      const keyA = getParticipantIdentityKey(m.teamAName, m.teamAPlayers, `${m.id}:A`);
+      const keyB = getParticipantIdentityKey(m.teamBName, m.teamBPlayers, `${m.id}:B`);
 
       if (
         checkSimultaneousPlayConflict(m.teamAName, m.teamAPlayers, tournamentSlug) ||
         checkSimultaneousPlayConflict(m.teamBName, m.teamBPlayers, tournamentSlug)
       ) continue;
-      if (scheduledInThisBatch.has(a) || scheduledInThisBatch.has(b)) continue;
+      if (scheduledInThisBatch.has(keyA) || scheduledInThisBatch.has(keyB)) continue;
 
-      scheduledInThisBatch.add(a);
-      scheduledInThisBatch.add(b);
+      scheduledInThisBatch.add(keyA);
+      scheduledInThisBatch.add(keyB);
       toAdd.push(m);
     }
 
@@ -2341,6 +2368,7 @@ export function CourtDispatch({
           categories={tournament.categories}
           matches={matches}
           initialCategoryId={categoryId}
+          onRefresh={refreshFromCloud}
           onSelectCategory={(id) => {
             setCategoryId(id);
             setActiveWaveId(tournamentSlug, id);
@@ -2823,66 +2851,76 @@ export function CourtDispatch({
                       {/* Teams & Scores */}
                       <div className="space-y-3">
                         {/* Team A */}
-                        <div className="flex items-center justify-between p-2.5 rounded bg-card border-2 border-border">
-                          <div className="min-w-0 mr-3">
-                            <div className="flex items-center gap-1.5">
-                              {activeMatch.score.servingTeam === "A" && activeMatch.status === "live" && (
-                                <span className="h-2 w-2 rounded-full bg-pickle shrink-0" />
-                              )}
-                              <span className={`font-semibold text-sm truncate ${activeMatch.score.servingTeam === "A" ? "text-foreground font-bold" : "text-foreground"}`}>
-                                {activeMatch.teamAName}
-                              </span>
+                        {(() => {
+                          const dispA = getMatchTeamDisplay(activeMatch.teamAName, activeMatch.teamAPlayers);
+                          return (
+                            <div className="flex items-center justify-between p-2.5 rounded bg-card border-2 border-border">
+                              <div className="min-w-0 mr-3">
+                                <div className="flex items-center gap-1.5">
+                                  {activeMatch.score.servingTeam === "A" && activeMatch.status === "live" && (
+                                    <span className="h-2 w-2 rounded-full bg-pickle shrink-0" />
+                                  )}
+                                  <span className={`font-semibold text-sm truncate ${activeMatch.score.servingTeam === "A" ? "text-foreground font-bold" : "text-foreground"}`}>
+                                    {dispA.primary}
+                                  </span>
+                                </div>
+                                {dispA.secondary && (
+                                  <span className="block text-[0.65rem] text-muted-foreground truncate font-mono">
+                                    {dispA.secondary}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <button
+                                  onClick={() => handleQuickScore(activeMatch.id, "A")}
+                                  className="px-2 py-1 text-xs font-bold bg-charcoal text-sand border border-border hover:border-pickle cursor-pointer"
+                                  title="Award point to Team A"
+                                >
+                                  +1
+                                </button>
+                                <span className="font-display text-2xl w-8 text-right text-foreground">
+                                  {activeMatch.score.teamAScore}
+                                </span>
+                              </div>
                             </div>
-                            {activeMatch.teamAPlayers.length > 0 && (
-                              <span className="block text-[0.65rem] text-muted-foreground truncate font-mono">
-                                {activeMatch.teamAPlayers.join(" / ")}
-                              </span>
-                            )}
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <button
-                              onClick={() => handleQuickScore(activeMatch.id, "A")}
-                              className="px-2 py-1 text-xs font-bold bg-charcoal text-sand border border-border hover:border-pickle cursor-pointer"
-                              title="Award point to Team A"
-                            >
-                              +1
-                            </button>
-                            <span className="font-display text-2xl w-8 text-right text-foreground">
-                              {activeMatch.score.teamAScore}
-                            </span>
-                          </div>
-                        </div>
+                          );
+                        })()}
 
                         {/* Team B */}
-                        <div className="flex items-center justify-between p-2.5 rounded bg-card border-2 border-border">
-                          <div className="min-w-0 mr-3">
-                            <div className="flex items-center gap-1.5">
-                              {activeMatch.score.servingTeam === "B" && activeMatch.status === "live" && (
-                                <span className="h-2 w-2 rounded-full bg-pickle shrink-0" />
-                              )}
-                              <span className={`font-semibold text-sm truncate ${activeMatch.score.servingTeam === "B" ? "text-foreground" : "text-foreground/80"}`}>
-                                {activeMatch.teamBName}
-                              </span>
+                        {(() => {
+                          const dispB = getMatchTeamDisplay(activeMatch.teamBName, activeMatch.teamBPlayers);
+                          return (
+                            <div className="flex items-center justify-between p-2.5 rounded bg-card border-2 border-border">
+                              <div className="min-w-0 mr-3">
+                                <div className="flex items-center gap-1.5">
+                                  {activeMatch.score.servingTeam === "B" && activeMatch.status === "live" && (
+                                    <span className="h-2 w-2 rounded-full bg-pickle shrink-0" />
+                                  )}
+                                  <span className={`font-semibold text-sm truncate ${activeMatch.score.servingTeam === "B" ? "text-foreground" : "text-foreground/80"}`}>
+                                    {dispB.primary}
+                                  </span>
+                                </div>
+                                {dispB.secondary && (
+                                  <span className="block text-[0.65rem] text-muted-foreground truncate">
+                                    {dispB.secondary}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <button
+                                  onClick={() => handleQuickScore(activeMatch.id, "B")}
+                                  className="px-2 py-1 text-xs font-bold bg-charcoal text-sand border border-border hover:border-pickle cursor-pointer"
+                                  title="Award point to Team B"
+                                >
+                                  +1
+                                </button>
+                                <span className="font-display text-2xl w-8 text-right text-foreground">
+                                  {activeMatch.score.teamBScore}
+                                </span>
+                              </div>
                             </div>
-                            {activeMatch.teamBPlayers.length > 0 && (
-                              <span className="block text-[0.65rem] text-muted-foreground truncate">
-                                {activeMatch.teamBPlayers.join(" / ")}
-                              </span>
-                            )}
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <button
-                              onClick={() => handleQuickScore(activeMatch.id, "B")}
-                              className="px-2 py-1 text-xs font-bold bg-charcoal text-sand border border-border hover:border-pickle cursor-pointer"
-                              title="Award point to Team B"
-                            >
-                              +1
-                            </button>
-                            <span className="font-display text-2xl w-8 text-right text-foreground">
-                              {activeMatch.score.teamBScore}
-                            </span>
-                          </div>
-                        </div>
+                          );
+                        })()}
                       </div>
 
                       {/* Quick Desk Controls */}
@@ -3024,7 +3062,7 @@ export function CourtDispatch({
                               <span className="text-pickle font-bold">{nextCourtMatch.item.stage}</span>
                             </div>
                             <div className="font-bold text-xs text-foreground truncate">
-                              {nextCourtMatch.item.teamAName} vs {nextCourtMatch.item.teamBName}
+                              {getMatchTeamDisplay(nextCourtMatch.item.teamAName, nextCourtMatch.item.teamAPlayers).primary} vs {getMatchTeamDisplay(nextCourtMatch.item.teamBName, nextCourtMatch.item.teamBPlayers).primary}
                             </div>
                             <button
                               onClick={(e) => {
@@ -3077,7 +3115,7 @@ export function CourtDispatch({
                     </span>
                     {onDeckMatch ? (
                       <span className="font-semibold text-foreground truncate ml-2">
-                        {onDeckMatch.teamAName} vs {onDeckMatch.teamBName}
+                        {getMatchTeamDisplay(onDeckMatch.teamAName, onDeckMatch.teamAPlayers).primary} vs {getMatchTeamDisplay(onDeckMatch.teamBName, onDeckMatch.teamBPlayers).primary}
                       </span>
                     ) : (
                       <span className="text-muted-foreground/60 italic">
@@ -4269,11 +4307,12 @@ export function CourtDispatch({
                     {/* Stage Matches Grid */}
                     <div className="grid grid-cols-1 xl:grid-cols-2 gap-3.5">
                       {stageMatches.map((m) => {
-                        const cat = tournament.categories.find((c) => isMatchInCategory(m, c));
-                        const isTeamAWinner =
-                          m.winnerTeam === m.teamAName || m.score.teamAScore > m.score.teamBScore;
-                        const isTeamBWinner =
-                          m.winnerTeam === m.teamBName || m.score.teamBScore > m.score.teamAScore;
+                        const cat = tournament.categories.find((c) => isMatchInCategory(m, c, tournamentSlug));
+                        const winnerSide = resolveMatchWinnerSide(m);
+                        const isTeamAWinner = winnerSide === "A";
+                        const isTeamBWinner = winnerSide === "B";
+                        const dispA = getMatchTeamDisplay(m.teamAName, m.teamAPlayers, "Team A");
+                        const dispB = getMatchTeamDisplay(m.teamBName, m.teamBPlayers, "Team B");
                         const durationMin =
                           m.startedAt && m.endedAt && m.endedAt > m.startedAt
                             ? Math.max(1, Math.round((m.endedAt - m.startedAt) / 60000))
@@ -4338,12 +4377,12 @@ export function CourtDispatch({
                                         isTeamAWinner ? "text-sand font-bold" : "text-foreground"
                                       }`}
                                     >
-                                      {m.teamAName}
+                                      {dispA.primary}
                                     </span>
                                   </div>
-                                  {m.teamAPlayers && m.teamAPlayers.length > 0 && (
+                                  {dispA.secondary && (
                                     <span className="block text-[0.65rem] text-muted-foreground truncate mt-0.5">
-                                      {m.teamAPlayers.join(" / ")}
+                                      {dispA.secondary}
                                     </span>
                                   )}
                                 </div>
@@ -4376,12 +4415,12 @@ export function CourtDispatch({
                                         isTeamBWinner ? "text-sand font-bold" : "text-foreground"
                                       }`}
                                     >
-                                      {m.teamBName}
+                                      {dispB.primary}
                                     </span>
                                   </div>
-                                  {m.teamBPlayers && m.teamBPlayers.length > 0 && (
+                                  {dispB.secondary && (
                                     <span className="block text-[0.65rem] text-muted-foreground truncate mt-0.5">
-                                      {m.teamBPlayers.join(" / ")}
+                                      {dispB.secondary}
                                     </span>
                                   )}
                                 </div>
@@ -4876,6 +4915,8 @@ export function CourtDispatch({
                     ) : (
                       <div className="space-y-2.5">
                         {displayedModalMatches.map((match, idx) => {
+                          const dispA = getMatchTeamDisplay(match.teamAName, match.teamAPlayers, "Team A");
+                          const dispB = getMatchTeamDisplay(match.teamBName, match.teamBPlayers, "Team B");
                           const restA = checkRestPeriodConflict(match.teamAName, match.teamAPlayers);
                           const restB = checkRestPeriodConflict(match.teamBName, match.teamBPlayers);
                           const liveA = checkSimultaneousPlayConflict(match.teamAName, match.teamAPlayers, tournamentSlug);
@@ -4943,36 +4984,44 @@ export function CourtDispatch({
                                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
                                   <div className="min-w-0 p-2.5 bg-card border-2 border-border rounded-md shadow-xs">
                                     <span className="font-bold text-sm text-foreground block truncate">
-                                      {match.teamAName}
+                                      {dispA.primary}
                                     </span>
-                                    {match.teamAPlayers.length > 0 && (
+                                    {dispA.secondary ? (
                                       <span className="text-[0.65rem] text-foreground/80 font-bold block truncate">
-                                        {match.teamAPlayers.join(" / ")}
+                                        {dispA.secondary}
                                       </span>
-                                    )}
+                                    ) : isGenericTeamName(match.teamAName) && match.teamAName.trim() ? (
+                                      <span className="text-[0.65rem] text-muted-foreground block truncate">
+                                        Team: {match.teamAName}
+                                      </span>
+                                    ) : null}
                                   </div>
 
                                   <div className="min-w-0 p-2.5 bg-card border-2 border-border rounded-md shadow-xs">
                                     <span className="font-bold text-sm text-foreground block truncate">
-                                      {match.teamBName}
+                                      {dispB.primary}
                                     </span>
-                                    {match.teamBPlayers.length > 0 && (
+                                    {dispB.secondary ? (
                                       <span className="text-[0.65rem] text-foreground/80 font-bold block truncate">
-                                        {match.teamBPlayers.join(" / ")}
+                                        {dispB.secondary}
                                       </span>
-                                    )}
+                                    ) : isGenericTeamName(match.teamBName) && match.teamBName.trim() ? (
+                                      <span className="text-[0.65rem] text-muted-foreground block truncate">
+                                        Team: {match.teamBName}
+                                      </span>
+                                    ) : null}
                                   </div>
                                 </div>
 
                                 {/* Conflict & Rest Warnings */}
                                 {activeConflict && (
                                   <div className="text-[0.65rem] text-brick font-bold pt-0.5">
-                                    Cannot dispatch: {activeConflict.isPlayerConflict ? `${activeConflict.playerName} (${activeConflict.teamName})` : activeConflict.teamName} is currently {activeConflict.status === "on_deck" ? "on-deck" : "live"} on {activeConflict.court}
+                                    Cannot dispatch: {activeConflict.isPlayerConflict && activeConflict.playerName !== activeConflict.teamName ? `${activeConflict.playerName} (${activeConflict.teamName})` : activeConflict.teamName} is currently {activeConflict.status === "on_deck" ? "on-deck" : "live"} on {activeConflict.court}
                                   </div>
                                 )}
                                 {(restA || restB) && (
                                   <div className="text-[0.65rem] text-amber-400 font-medium pt-0.5">
-                                    Rest Warning: {(restA ?? restB)?.teamName} finished {(restA ?? restB)?.minutesAgo}m ago
+                                    Rest Warning: {restA ? dispA.primary : dispB.primary} finished {(restA ?? restB)?.minutesAgo}m ago
                                   </div>
                                 )}
                               </div>
@@ -5062,7 +5111,7 @@ export function CourtDispatch({
               </h3>
             </div>
             <p className="text-sm text-foreground/80">
-              {courtReplaceConfirm.court} currently has an active match. Dispatching will return the current match back to the Queue and start warm-up for <strong>{courtReplaceConfirm.pendingMatch.teamAName}</strong> vs <strong>{courtReplaceConfirm.pendingMatch.teamBName}</strong>.
+              {courtReplaceConfirm.court} currently has an active match. Dispatching will return the current match back to the Queue and start warm-up for <strong>{getMatchTeamDisplay(courtReplaceConfirm.pendingMatch.teamAName, courtReplaceConfirm.pendingMatch.teamAPlayers).primary}</strong> vs <strong>{getMatchTeamDisplay(courtReplaceConfirm.pendingMatch.teamBName, courtReplaceConfirm.pendingMatch.teamBPlayers).primary}</strong>.
             </p>
             <div className="flex gap-3 justify-end pt-2">
               <button

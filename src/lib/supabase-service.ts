@@ -776,20 +776,53 @@ export async function dbGetMatches(tournamentSlug?: string): Promise<LiveMatch[]
       const byPair = new Map<string, LiveMatch>();
       const zombieIdsToDelete: string[] = [];
 
+      const isGenericName = (n: string) =>
+        ["n/a", "na", "tbd", "tba", "null", "undefined", "none", "-", "team a", "team b"].includes(n);
+
       for (const m of mapped) {
         if (!m.teamAName || !m.teamBName) {
           byPair.set(m.id, m);
           continue;
         }
-        const pA = (m.teamAPlayers || []).map((p) => p.trim().toLowerCase().replace(/[^a-z0-9]/g, "")).filter(Boolean).sort().join(",");
-        const pB = (m.teamBPlayers || []).map((p) => p.trim().toLowerCase().replace(/[^a-z0-9]/g, "")).filter(Boolean).sort().join(",");
-        const nameA = pA ? `${m.teamAName.trim().toLowerCase()}[${pA}]` : m.teamAName.trim().toLowerCase();
-        const nameB = pB ? `${m.teamBName.trim().toLowerCase()}[${pB}]` : m.teamBName.trim().toLowerCase();
+        const rawA = m.teamAName.replace(/\s+/g, " ").trim().toLowerCase();
+        const rawB = m.teamBName.replace(/\s+/g, " ").trim().toLowerCase();
+        const pA = (m.teamAPlayers || [])
+          .flatMap((p) => String(p).split(/\s*[\/&]\s*/))
+          .map((p) => p.replace(/\s+/g, " ").trim().toLowerCase())
+          .filter((p) => Boolean(p) && !isGenericName(p) && p !== rawA)
+          .map((p) => p.replace(/[^a-z0-9]/g, ""))
+          .filter(Boolean)
+          .sort()
+          .join(",");
+        const pB = (m.teamBPlayers || [])
+          .flatMap((p) => String(p).split(/\s*[\/&]\s*/))
+          .map((p) => p.replace(/\s+/g, " ").trim().toLowerCase())
+          .filter((p) => Boolean(p) && !isGenericName(p) && p !== rawB)
+          .map((p) => p.replace(/[^a-z0-9]/g, ""))
+          .filter(Boolean)
+          .sort()
+          .join(",");
+        const nameA = pA ? `[${pA}]` : rawA;
+        const nameB = pB ? `[${pB}]` : rawB;
+        if (!nameA || !nameB || nameA === nameB) {
+          byPair.set(m.id, m);
+          continue;
+        }
         const pair = [nameA, nameB].sort().join("::");
-        const bracket = (m.stage || "").match(/(?:bracket|pool)\s*([a-z])/i)?.[1]?.toLowerCase() || (m.bracketLetter ? m.bracketLetter.toLowerCase() : "pool");
-        const key = m.id.startsWith("match_")
+        const stageRaw = (m.stage || "").trim();
+        const isPlayoffStage =
+          stageRaw.length > 0 &&
+          !stageRaw.toLowerCase().includes("pool play") &&
+          !/(?:bracket|pool)\s+[a-z]\b/i.test(stageRaw) &&
+          /quarter|semi|final|playoff|bronze|gold|championship|knockout|elimination|round of|play-in/i.test(stageRaw);
+        const stageKey = isPlayoffStage
+          ? `ko-${stageRaw.toLowerCase()}`
+          : stageRaw.match(/(?:bracket|pool)\s*([a-z])\b/i)?.[1]?.toLowerCase() ||
+            (m.bracketLetter ? m.bracketLetter.toLowerCase() : "pool");
+        const hasPlayersOnGeneric = (!isGenericName(rawA) || Boolean(pA)) && (!isGenericName(rawB) || Boolean(pB));
+        const key = m.id.startsWith("match_") && !hasPlayersOnGeneric
           ? m.id
-          : `${m.tournamentSlug || "event"}::${m.categoryId || "division"}::${bracket}::${pair}`;
+          : `${m.tournamentSlug || "event"}::${m.categoryId || "division"}::${stageKey}::${pair}`;
 
         if (!byPair.has(key)) {
           byPair.set(key, m);
@@ -806,11 +839,11 @@ export async function dbGetMatches(tournamentSlug?: string): Promise<LiveMatch[]
 
           if (currWins) {
             byPair.set(key, m);
-            if (prev.status === "scheduled" && prevScore === 0) {
+            if (prev.status === "scheduled" && prevScore === 0 && !prev.id.startsWith("match_")) {
               zombieIdsToDelete.push(prev.id);
             }
           } else {
-            if (m.status === "scheduled" && currScore === 0) {
+            if (m.status === "scheduled" && currScore === 0 && !m.id.startsWith("match_")) {
               zombieIdsToDelete.push(m.id);
             }
           }
@@ -1025,7 +1058,7 @@ export function isSameCategory(catA?: string | null, catB?: string | null): bool
 }
 
 function getMatchFingerprint(m: LiveMatch, slug?: string): string {
-  return `${m.id}|${slug || m.tournamentSlug || ""}|${m.categoryId || ""}|${m.court || ""}|${m.status}|${m.score?.teamAScore}|${m.score?.teamBScore}|${m.score?.servingTeam}|${m.score?.serverNumber}|${m.score?.activeServerBase ?? ""}|${m.teamABase1Player || ""}|${m.teamBBase1Player || ""}|${m.teamASide || ""}|${m.tossDone ? "1" : "0"}|${m.tossWinner || ""}|${m.courtPositionUpdatedAt || 0}|${m.resetAt || 0}|${m.winnerTeam || ""}|${m.startedAt || 0}|${m.endedAt || 0}|${m.officiatedBy || ""}`;
+  return `${m.id}|${slug || m.tournamentSlug || ""}|${m.categoryId || ""}|${m.stage || ""}|${m.teamAName || ""}|${(m.teamAPlayers || []).join(",")}|${m.teamBName || ""}|${(m.teamBPlayers || []).join(",")}|${m.court || ""}|${m.status}|${m.score?.teamAScore}|${m.score?.teamBScore}|${m.score?.servingTeam}|${m.score?.serverNumber}|${m.score?.activeServerBase ?? ""}|${m.teamABase1Player || ""}|${m.teamBBase1Player || ""}|${m.teamASide || ""}|${m.tossDone ? "1" : "0"}|${m.tossWinner || ""}|${m.courtPositionUpdatedAt || 0}|${m.resetAt || 0}|${m.winnerTeam || ""}|${m.startedAt || 0}|${m.endedAt || 0}|${m.officiatedBy || ""}`;
 }
 
 function formatMatchRow(match: LiveMatch, tourneyId: string | null, slug: string | null) {

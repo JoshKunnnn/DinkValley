@@ -5,13 +5,14 @@ import {
   purgeMatchesForCategory,
   createPairMatchId,
   createCategoryScopedMatchId,
-  getMatches,
+  isGenericTeamName,
 } from "@/lib/match-store";
 import {
   bulkSetTeamsInCategory,
   deleteAllTeamsInCategory,
   getTournaments,
   updateCategoryInTournament,
+  updateTeamInTournament,
 } from "@/lib/tournament-store";
 import { generateMockTeams, generate32Teams } from "@/lib/team-generator";
 import {
@@ -90,10 +91,18 @@ export function saveDrawnGroups(
           (c) => c.id === categoryId || (c as any).category_slug === categoryId
         );
         const existingTeams = currentCat?.teams || [];
-        const existingIds = new Set(existingTeams.map((t) => t.id));
+        const existingMap = new Map(existingTeams.map((t) => [t.id, t]));
         const hasChange =
           existingTeams.length !== teamsToSync.length ||
-          teamsToSync.some((t) => !existingIds.has(t.id));
+          teamsToSync.some((t) => {
+            const ex = existingMap.get(t.id);
+            if (!ex) return true;
+            return (
+              ex.name !== t.name ||
+              ex.club !== t.club ||
+              JSON.stringify(ex.players || []) !== JSON.stringify(t.players || [])
+            );
+          });
 
         if (hasChange) {
           bulkSetTeamsInCategory(tournamentSlug, currentCat?.id || categoryId, teamsToSync);
@@ -108,7 +117,31 @@ export function saveDrawnGroups(
       return;
     }
 
-    syncDrawnBracketsToLiveMatches(tournamentSlug, categoryId, groups);
+    const syncedMatches = syncDrawnBracketsToLiveMatches(tournamentSlug, categoryId, groups);
+
+    // Clean any unplayed dispatch queue items that no longer belong to the same bracket
+    try {
+      const currentQ = getDispatchQueue();
+      const cleanedQ = currentQ.filter((item) => {
+        if (item.status === "live" || item.status === "dispatched") return true;
+        return isMatchInSameBracket(
+          item.tournamentSlug || tournamentSlug,
+          item.categoryId || categoryId,
+          item.stage,
+          item.teamAName,
+          item.teamBName,
+          undefined,
+          undefined,
+          item.teamAPlayers,
+          item.teamBPlayers
+        );
+      });
+      if (cleanedQ.length !== currentQ.length) {
+        saveDispatchQueue(cleanedQ);
+      }
+    } catch {
+      // ignore
+    }
 
     // Auto-enqueue initial ready matches into dispatch queue (1 match per team to prevent simultaneous play conflicts)
     const drawnMatches: {
@@ -122,12 +155,33 @@ export function saveDrawnGroups(
       teamBPlayers: string[];
     }[] = [];
 
+    const makeTeamSchedKey = (name: string, players?: string[]) => {
+      const pNorm = (players || [])
+        .flatMap((p) => p.split(/\s*[\/&]\s*/))
+        .map((p) => p.trim().toLowerCase())
+        .filter(Boolean)
+        .sort()
+        .join("|");
+      return pNorm ? `p:${pNorm}` : `n:${name.trim().toLowerCase()}`;
+    };
+
+    const finalMatchIds = new Set(
+      syncedMatches.filter((m) => m.status === "final").map((m) => m.id)
+    );
+
     const scheduledTeams = new Set<string>();
+    syncedMatches.forEach((m) => {
+      if (m.status === "live") {
+        scheduledTeams.add(makeTeamSchedKey(m.teamAName, m.teamAPlayers));
+        scheduledTeams.add(makeTeamSchedKey(m.teamBName, m.teamBPlayers));
+      }
+    });
+
     const existingQueue = getDispatchQueue();
     existingQueue.forEach((q) => {
       if (q.status === "queued" || q.status === "on_deck" || q.status === "live" || q.status === "dispatched") {
-        scheduledTeams.add(q.teamAName.trim().toLowerCase());
-        scheduledTeams.add(q.teamBName.trim().toLowerCase());
+        scheduledTeams.add(makeTeamSchedKey(q.teamAName, q.teamAPlayers));
+        scheduledTeams.add(makeTeamSchedKey(q.teamBName, q.teamBPlayers));
       }
     });
 
@@ -163,8 +217,10 @@ export function saveDrawnGroups(
                 isDupA,
                 isDupB,
               );
-          const aKey = teamA.id || `${teamA.name}-${(teamA.players || []).join(",")}`.toLowerCase();
-          const bKey = teamB.id || `${teamB.name}-${(teamB.players || []).join(",")}`.toLowerCase();
+          if (finalMatchIds.has(matchId)) continue;
+
+          const aKey = makeTeamSchedKey(teamA.name, teamA.players);
+          const bKey = makeTeamSchedKey(teamB.name, teamB.players);
 
           // Only queue initial matchups if neither team is already scheduled in this batch
           // Subsequent matchups remain in Unassigned Matches and are added after each game finishes
@@ -354,11 +410,19 @@ export function BracketDraw({
   const maxCapacity = category?.maxEntries || (teams.length >= 24 ? 32 : teams.length >= 12 ? 16 : 8);
   const targetBrackets = category?.bracketCount || getBracketsForCapacity(maxCapacity);
   const [numBrackets, setNumBrackets] = useState(targetBrackets);
+  const [bracketInputVal, setBracketInputVal] = useState(targetBrackets);
+  const [isEditBracketsModalOpen, setIsEditBracketsModalOpen] = useState(false);
+  const [modalMakeDefault, setModalMakeDefault] = useState(false);
   const [teamsByGroup, setTeamsByGroup] = useState<Team[][]>([]);
   const [drawnCount, setDrawnCount] = useState(0);
   const [drawingBracketIdx, setDrawingBracketIdx] = useState(-1);
   const [isAutoPlaying, setIsAutoPlaying] = useState(false);
   const [bracketSaveNotice, setBracketSaveNotice] = useState<string | null>(null);
+
+  // Keep direct input value in sync when numBrackets updates
+  useEffect(() => {
+    setBracketInputVal(numBrackets);
+  }, [numBrackets]);
 
   // Drag and click swap state for manual rebalancing
   const [selectedSlot, setSelectedSlot] = useState<{
@@ -372,6 +436,13 @@ export function BracketDraw({
   const [swapNotice, setSwapNotice] = useState<{
     message: string;
     previousGroups: BracketGroup[];
+  } | null>(null);
+  const [editingSlot, setEditingSlot] = useState<{
+    groupIndex: number;
+    slotIndex: number;
+    teamName: string;
+    player1: string;
+    player2: string;
   } | null>(null);
 
   // Synchronous refs to prevent race conditions and mid-animation aborts
@@ -413,6 +484,27 @@ export function BracketDraw({
       isAutoPlayingRef.current = false;
     };
   }, []);
+
+  // Keep local bracket state synced if edited via Players by Bracket checklist
+  useEffect(() => {
+    const handleDrawnGroupsSync = () => {
+      if (isDrawingRef.current || isAutoPlayingRef.current) return;
+      const latest = getDrawnGroups(tournamentSlug, effectiveCategoryId);
+      if (latest && latest.length > 0) {
+        setGroups((prev) =>
+          JSON.stringify(prev) === JSON.stringify(latest) ? prev : latest
+        );
+        groupsRef.current = latest;
+        const drawnNum = latest.filter((g) => g.isDrawn).length;
+        setDrawnCount(drawnNum);
+        drawnCountRef.current = drawnNum;
+      }
+    };
+    window.addEventListener("dv_drawn_groups_updated", handleDrawnGroupsSync);
+    return () => {
+      window.removeEventListener("dv_drawn_groups_updated", handleDrawnGroupsSync);
+    };
+  }, [tournamentSlug, effectiveCategoryId]);
 
   // Restore previously drawn groups or prepare initial empty standby groups
   useEffect(() => {
@@ -515,19 +607,47 @@ export function BracketDraw({
           _cachedIds.size <= _currentIds.size && [..._cachedIds].every((id) => _currentIds.has(id));
 
         if (_rosterMatch) {
-          setGroups(existingDrawn);
-          groupsRef.current = existingDrawn;
+          const safeTeamsById = new Map(safeTeams.map((t) => [t.id, t]));
+          let didRefreshFromRoster = false;
+          const reconciledDrawn: BracketGroup[] = existingDrawn.map((g) => ({
+            ...g,
+            slots: g.slots.map((s) => {
+              if (!s.team) return s;
+              const fresh = safeTeamsById.get(s.team.id);
+              if (!fresh) return s;
+              if (
+                fresh.name !== s.team.name ||
+                fresh.club !== s.team.club ||
+                JSON.stringify(fresh.players || []) !== JSON.stringify(s.team.players || [])
+              ) {
+                didRefreshFromRoster = true;
+                return {
+                  ...s,
+                  team: {
+                    ...s.team,
+                    name: fresh.name,
+                    players: fresh.players,
+                    club: fresh.club,
+                  },
+                };
+              }
+              return s;
+            }),
+          }));
+
+          setGroups(reconciledDrawn);
+          groupsRef.current = reconciledDrawn;
           setDrawnCount(drawnNum);
           drawnCountRef.current = drawnNum;
 
           // Rebuild teamsByGroup: drawn brackets keep their revealed teams;
           // undrawn brackets use balancedDistribute for remaining teams.
           const _undrawnPool = safeTeams.filter((t) => !_cachedIds.has(t.id));
-          const _undrawnCount = existingDrawn.filter((g) => !g.isDrawn).length;
+          const _undrawnCount = reconciledDrawn.filter((g) => !g.isDrawn).length;
           const _undrawnBuckets =
             _undrawnCount > 0 ? balancedDistribute(_undrawnPool, _undrawnCount) : [];
           let _ubIdx = 0;
-          const buckets: Team[][] = existingDrawn.map((g) => {
+          const buckets: Team[][] = reconciledDrawn.map((g) => {
             if (g.isDrawn) {
               return g.slots.map((s) => s.team).filter((t): t is Team => t !== null);
             }
@@ -536,11 +656,22 @@ export function BracketDraw({
 
           setTeamsByGroup(buckets);
           teamsByGroupRef.current = buckets;
-          if (existingDrawn.length !== numBrackets) {
-            setNumBrackets(existingDrawn.length);
+          if (reconciledDrawn.length !== numBrackets) {
+            setNumBrackets(reconciledDrawn.length);
+          }
+          if (didRefreshFromRoster) {
+            dbSaveDrawnGroups(tournamentSlug, effectiveCategoryId, reconciledDrawn).catch(() => {});
+            try {
+              localStorage.setItem(
+                `dv_drawn_groups_${tournamentSlug}_${effectiveCategoryId}`,
+                JSON.stringify(reconciledDrawn),
+              );
+            } catch {
+              // ignore
+            }
           }
           // Ensure live matches are synced into match store
-          syncDrawnBracketsToLiveMatches(tournamentSlug, effectiveCategoryId, existingDrawn);
+          syncDrawnBracketsToLiveMatches(tournamentSlug, effectiveCategoryId, reconciledDrawn);
           return;
         }
       }
@@ -574,6 +705,32 @@ export function BracketDraw({
   const isAnimating = drawingBracketIdx !== -1 || isAutoPlaying;
   const nextBracketIdx = drawnCount < groups.length ? drawnCount : -1;
   const nextBracketLetter = nextBracketIdx >= 0 ? (LETTERS[nextBracketIdx] ?? String(nextBracketIdx + 1)) : "";
+
+  // Suggested divisors and presets based on total teams
+  const suggestedCounts = useMemo(() => {
+    const counts = new Set<number>();
+    if (totalTeams > 0) {
+      for (let c = 1; c <= 26; c++) {
+        if (totalTeams % c === 0) counts.add(c);
+      }
+      for (const targetPerPool of [3, 4, 5, 6, 7]) {
+        const c = Math.round(totalTeams / targetPerPool);
+        if (c >= 1 && c <= 26) counts.add(c);
+      }
+    }
+    [2, 3, 4, 6, 8, 9, 10, 12, 16].forEach((c) => {
+      if (c <= 26) counts.add(c);
+    });
+    return Array.from(counts)
+      .sort((a, b) => a - b)
+      .map((c) => {
+        const base = totalTeams > 0 ? Math.floor(totalTeams / c) : 0;
+        const rem = totalTeams > 0 ? totalTeams % c : 0;
+        const isEven = rem === 0;
+        const label = totalTeams > 0 ? (isEven ? `${base} teams` : `${base}-${base + 1} teams`) : "Empty";
+        return { count: c, label, isEven };
+      });
+  }, [totalTeams]);
 
   // ── Draw ONE single bracket at a time ────────────────────────────────────
   const drawSingleBracket = async (bracketIndex: number, isSilent = false) => {
@@ -702,6 +859,164 @@ export function BracketDraw({
     setTimeout(() => setBracketSaveNotice(null), 3500);
   };
 
+  // ── Directly apply a new bracket count (reshapes or redistributes brackets) ──
+  const handleApplyBracketCount = (newCount: number, options?: { makeDefault?: boolean }) => {
+    if (isAnimating) return;
+    const finalCount = Math.max(1, Math.min(26, newCount));
+    const safeTeams = category?.teams || [];
+    const currentDrawnCount = groupsRef.current.filter((g) => g.isDrawn).length;
+
+    if (currentDrawnCount > 0) {
+      const ok = window.confirm(
+        `This category already has ${currentDrawnCount} drawn bracket(s). Changing to ${finalCount} brackets will reset the draw ceremony and redistribute all ${safeTeams.length} teams. Proceed?`
+      );
+      if (!ok) return;
+    }
+
+    // Abort any ongoing animation
+    animCancelRef.current = true;
+    isDrawingRef.current = false;
+    isAutoPlayingRef.current = false;
+    setIsAutoPlaying(false);
+    setDrawingBracketIdx(-1);
+    setDrawnCount(0);
+    drawnCountRef.current = 0;
+    setSelectedSlot(null);
+    setDraggedSlot(null);
+    setSwapNotice(null);
+
+    // Clear previous drawn groups across the system
+    resetDrawnGroups(
+      tournamentSlug,
+      effectiveCategoryId,
+      [categoryId, category?.id].filter(Boolean) as string[]
+    );
+
+    setNumBrackets(finalCount);
+    setBracketInputVal(finalCount);
+
+    if (safeTeams.length > 0) {
+      const buckets = balancedDistribute(safeTeams, finalCount);
+      setTeamsByGroup(buckets);
+      teamsByGroupRef.current = buckets;
+
+      const initial: BracketGroup[] = buckets.map((bucketTeams, i) => ({
+        name: `Bracket ${LETTERS[i] ?? i + 1}`,
+        letter: LETTERS[i] ?? String(i + 1),
+        slots: bucketTeams.map(() => ({ team: null, revealed: false })),
+        revealed: false,
+        isDrawn: false,
+      }));
+
+      setGroups(initial);
+      groupsRef.current = initial;
+
+      skipEffectRef.current = true;
+      saveDrawnGroups(tournamentSlug, effectiveCategoryId, initial, safeTeams, true);
+    } else {
+      setGroups([]);
+      groupsRef.current = [];
+      setTeamsByGroup([]);
+      teamsByGroupRef.current = [];
+    }
+
+    if (options?.makeDefault) {
+      updateCategoryInTournament(tournamentSlug, effectiveCategoryId, {
+        bracketCount: finalCount,
+      });
+    }
+
+    const endLetter = LETTERS[finalCount - 1] ?? String(finalCount);
+    setBracketSaveNotice(
+      `Bracket count set to ${finalCount} (${finalCount === 1 ? "Pool A" : `Pools A to ${endLetter}`})${options?.makeDefault ? " and saved as category default" : ""}.`
+    );
+    setTimeout(() => setBracketSaveNotice(null), 3500);
+  };
+
+  const handleAddSingleBracket = () => {
+    if (isAnimating) return;
+    if (groups.length >= 26) return;
+    const newCount = groups.length + 1;
+    const newLetter = LETTERS[groups.length] ?? String(newCount);
+    const currentDrawnCount = groups.filter((g) => g.isDrawn).length;
+
+    if (currentDrawnCount === 0) {
+      handleApplyBracketCount(newCount);
+      return;
+    }
+
+    // Preserve existing drawn brackets and append an empty one
+    const newGroup: BracketGroup = {
+      name: `Bracket ${newLetter}`,
+      letter: newLetter,
+      slots: [],
+      revealed: false,
+      isDrawn: false,
+    };
+    const nextGroups = [...groups, newGroup];
+    setGroups(nextGroups);
+    groupsRef.current = nextGroups;
+    setNumBrackets(nextGroups.length);
+    setBracketInputVal(nextGroups.length);
+
+    const nextBuckets = nextGroups.map((g) =>
+      g.slots.map((s) => s.team).filter((t): t is Team => t !== null)
+    );
+    setTeamsByGroup(nextBuckets);
+    teamsByGroupRef.current = nextBuckets;
+
+    const safeTeams = category?.teams || [];
+    const fullRoster = safeTeams.length > 0 ? safeTeams : nextBuckets.flat();
+    skipEffectRef.current = true;
+    saveDrawnGroups(tournamentSlug, effectiveCategoryId, nextGroups, fullRoster, false);
+
+    setBracketSaveNotice(`Added Bracket ${newLetter}. You can now drag or assign teams into it.`);
+    setTimeout(() => setBracketSaveNotice(null), 3500);
+  };
+
+  const handleRemoveSingleBracket = () => {
+    if (isAnimating) return;
+    if (groups.length <= 1) return;
+    const lastGroup = groups[groups.length - 1];
+    if (!lastGroup) return;
+
+    const lastHasTeams = lastGroup.slots.some((s) => s.team !== null);
+    if (lastHasTeams) {
+      const ok = window.confirm(
+        `Bracket ${lastGroup.letter} has ${lastGroup.slots.filter((s) => s.team !== null).length} assigned team(s). Removing it will return those teams to the pool or redistribute. Continue?`
+      );
+      if (!ok) return;
+    }
+
+    const newCount = groups.length - 1;
+    const currentDrawnCount = groups.filter((g) => g.isDrawn).length;
+
+    if (currentDrawnCount === 0 || lastHasTeams) {
+      handleApplyBracketCount(newCount);
+      return;
+    }
+
+    const nextGroups = groups.slice(0, -1);
+    setGroups(nextGroups);
+    groupsRef.current = nextGroups;
+    setNumBrackets(nextGroups.length);
+    setBracketInputVal(nextGroups.length);
+
+    const nextBuckets = nextGroups.map((g) =>
+      g.slots.map((s) => s.team).filter((t): t is Team => t !== null)
+    );
+    setTeamsByGroup(nextBuckets);
+    teamsByGroupRef.current = nextBuckets;
+
+    const safeTeams = category?.teams || [];
+    const fullRoster = safeTeams.length > 0 ? safeTeams : nextBuckets.flat();
+    skipEffectRef.current = true;
+    saveDrawnGroups(tournamentSlug, effectiveCategoryId, nextGroups, fullRoster, false);
+
+    setBracketSaveNotice(`Removed Bracket ${lastGroup.letter}. Total brackets: ${nextGroups.length}.`);
+    setTimeout(() => setBracketSaveNotice(null), 3500);
+  };
+
   const handleResetToAutoBrackets = () => {
     if (!tournamentSlug || !effectiveCategoryId) return;
     const autoCount = getBracketsForCapacity(maxCapacity);
@@ -709,6 +1024,7 @@ export function BracketDraw({
       bracketCount: undefined,
     });
     setNumBrackets(autoCount);
+    setBracketInputVal(autoCount);
     setBracketSaveNotice(
       `Reset: ${category?.label || "Category"} bracket count set to Auto (${autoCount} brackets).`
     );
@@ -763,26 +1079,140 @@ export function BracketDraw({
     groupsRef.current = initial;
   };
 
-  // ── Locked Team Checker ───────────────────────────────────────────────────
-  const isTeamLocked = (team?: Team | null) => {
-    if (!team) return false;
-    const tId = team.id;
-    const tName = team.name.trim().toLowerCase();
-    const liveMatches = getMatches();
-    return liveMatches.some((m) => {
-      const isThisCat =
-        (m.tournamentSlug === tournamentSlug || !m.tournamentSlug) &&
-        (m.categoryId === effectiveCategoryId || !m.categoryId);
-      if (!isThisCat) return false;
-      if (m.status !== "live" && m.status !== "final") return false;
-      const matchA =
-        (tId && m.id.includes(tId)) ||
-        (m.teamAName && m.teamAName.trim().toLowerCase() === tName);
-      const matchB =
-        (tId && m.id.includes(tId)) ||
-        (m.teamBName && m.teamBName.trim().toLowerCase() === tName);
-      return matchA || matchB;
+  const formatSlotTeamLabel = (team?: Team | null) => {
+    if (!team) return "Empty Slot";
+    const playersLabel = (team.players || []).filter(Boolean).join(" & ");
+    if (isGenericTeamName(team.name) && playersLabel) {
+      return playersLabel;
+    }
+    return team.name || playersLabel || "Team";
+  };
+
+  // ── Edit Players / Team Modal Handlers ────────────────────────────────────
+  const openEditSlotModal = (groupIdx: number, slotIdx: number) => {
+    if (isAnimating) return;
+    const slot = groupsRef.current[groupIdx]?.slots[slotIdx];
+    if (!slot?.team) return;
+    const [p1 = "", p2 = ""] = slot.team.players || [];
+    setEditingSlot({
+      groupIndex: groupIdx,
+      slotIndex: slotIdx,
+      teamName: slot.team.name || "",
+      player1: p1,
+      player2: p2,
     });
+  };
+
+  const handleSaveEditedSlot = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!editingSlot) return;
+
+    const { groupIndex, slotIndex, teamName, player1, player2 } = editingSlot;
+    const currentGroups = groupsRef.current;
+    const targetGroup = currentGroups[groupIndex];
+    const targetSlot = targetGroup?.slots[slotIndex];
+    if (!targetGroup || !targetSlot?.team) {
+      setEditingSlot(null);
+      return;
+    }
+
+    const nextPlayers = [player1.trim(), player2.trim()].filter(Boolean);
+    const nextName = teamName.trim() || nextPlayers.join(" / ") || targetSlot.team.name;
+    if (!nextName && nextPlayers.length === 0) {
+      return;
+    }
+
+    const prevGroupsSnapshot = JSON.parse(JSON.stringify(currentGroups)) as BracketGroup[];
+    const prevTeam = targetSlot.team;
+    const updatedTeam: Team = {
+      ...prevTeam,
+      name: nextName,
+      players: nextPlayers.length > 0 ? nextPlayers : prevTeam.players,
+    };
+
+    const nextGroups = currentGroups.map((g, gi) => ({
+      ...g,
+      slots: g.slots.map((s, si) =>
+        gi === groupIndex && si === slotIndex ? { ...s, team: updatedTeam } : { ...s }
+      ),
+    }));
+
+    setGroups(nextGroups);
+    groupsRef.current = nextGroups;
+
+    const nextBuckets = nextGroups.map((g) =>
+      g.slots.map((s) => s.team).filter((t): t is Team => t !== null)
+    );
+    setTeamsByGroup(nextBuckets);
+    teamsByGroupRef.current = nextBuckets;
+
+    // Update category.teams in tournament store
+    const targetCatId = category?.id || effectiveCategoryId;
+    updateTeamInTournament(tournamentSlug, targetCatId, updatedTeam.id, {
+      name: updatedTeam.name,
+      players: updatedTeam.players,
+    });
+
+    // Update any queued dispatch items referencing this team
+    try {
+      const q = getDispatchQueue();
+      let queueModified = false;
+      const prevPlayersNorm = (prevTeam.players || []).map((p) => p.trim().toLowerCase()).filter(Boolean).sort().join("|");
+      const nextQ = q.map((item) => {
+        const isCat =
+          (!item.tournamentSlug || item.tournamentSlug === tournamentSlug) &&
+          (!item.categoryId || isSameCategory(item.categoryId, effectiveCategoryId));
+        if (!isCat) return item;
+
+        const idHasTeam = Boolean(updatedTeam.id && item.matchId.includes(updatedTeam.id));
+        const itemANorm = (item.teamAPlayers || []).map((p) => p.trim().toLowerCase()).filter(Boolean).sort().join("|");
+        const itemBNorm = (item.teamBPlayers || []).map((p) => p.trim().toLowerCase()).filter(Boolean).sort().join("|");
+
+        const matchesA =
+          (prevPlayersNorm && itemANorm === prevPlayersNorm) ||
+          (idHasTeam && !prevPlayersNorm && item.teamAName.trim().toLowerCase() === prevTeam.name.trim().toLowerCase());
+        const matchesB =
+          (prevPlayersNorm && itemBNorm === prevPlayersNorm) ||
+          (idHasTeam && !prevPlayersNorm && item.teamBName.trim().toLowerCase() === prevTeam.name.trim().toLowerCase());
+
+        if (matchesA) {
+          queueModified = true;
+          return {
+            ...item,
+            teamAName: updatedTeam.name,
+            teamAPlayers: updatedTeam.players,
+          };
+        }
+        if (matchesB) {
+          queueModified = true;
+          return {
+            ...item,
+            teamBName: updatedTeam.name,
+            teamBPlayers: updatedTeam.players,
+          };
+        }
+        return item;
+      });
+      if (queueModified) {
+        saveDispatchQueue(nextQ);
+      }
+    } catch {
+      // ignore
+    }
+
+    const safeTeams = (category?.teams || []).map((t) =>
+      t.id === updatedTeam.id ? updatedTeam : t
+    );
+    const fullRoster = safeTeams.length > 0 ? safeTeams : nextBuckets.flat();
+    skipEffectRef.current = true;
+    saveDrawnGroups(tournamentSlug, effectiveCategoryId, nextGroups, fullRoster, false);
+
+    setSwapNotice({
+      message: `Updated players for ${formatSlotTeamLabel(updatedTeam)} (Bracket ${targetGroup.letter}, Slot ${slotIndex + 1})`,
+      previousGroups: prevGroupsSnapshot,
+    });
+    setEditingSlot(null);
+    setSelectedSlot(null);
   };
 
   // ── Drag & Click Swap Handler ─────────────────────────────────────────────
@@ -813,18 +1243,6 @@ export function BracketDraw({
       return;
     }
 
-    // Safety checks against moving teams with live or completed match history
-    if (isTeamLocked(sourceSlot.team)) {
-      alert(`Cannot move ${sourceSlot.team?.name || "this team"}: they already have an active or completed match on court.`);
-      setSelectedSlot(null);
-      return;
-    }
-    if (isTeamLocked(targetSlot.team)) {
-      alert(`Cannot move ${targetSlot.team?.name || "this team"}: they already have an active or completed match on court.`);
-      setSelectedSlot(null);
-      return;
-    }
-
     const prevGroupsSnapshot = JSON.parse(JSON.stringify(currentGroups)) as BracketGroup[];
 
     // Deep clone groups to prevent accidental state mutation
@@ -851,8 +1269,11 @@ export function BracketDraw({
     }
 
     // Update state and ref
+    const nextDrawnCount = nextGroups.filter((g) => g.isDrawn).length;
     setGroups(nextGroups);
     groupsRef.current = nextGroups;
+    setDrawnCount(nextDrawnCount);
+    drawnCountRef.current = nextDrawnCount;
 
     // Update teamsByGroup buckets
     const nextBuckets = nextGroups.map((g) =>
@@ -861,37 +1282,98 @@ export function BracketDraw({
     setTeamsByGroup(nextBuckets);
     teamsByGroupRef.current = nextBuckets;
 
-    // Clean any unplayed dispatch queue items that now cross brackets
-    try {
-      const q = getDispatchQueue();
-      const cleanedQ = q.filter((item) => {
-        if (item.status === "live" || item.status === "dispatched") return true;
-        return isMatchInSameBracket(
-          item.tournamentSlug || tournamentSlug,
-          item.categoryId || effectiveCategoryId,
-          item.stage,
-          item.teamAName,
-          item.teamBName,
-          undefined,
-          undefined,
-          item.teamAPlayers,
-          item.teamBPlayers
-        );
-      });
-      saveDispatchQueue(cleanedQ);
-    } catch {
-      // ignore
-    }
-
-    // Comprehensive sync to Supabase, localStorage, and MatchStore
+    // Comprehensive sync to Supabase, localStorage, DispatchQueue, and MatchStore
     const safeTeams = category?.teams || [];
     const fullRoster = safeTeams.length > 0 ? safeTeams : nextBuckets.flat();
+    skipEffectRef.current = true;
     saveDrawnGroups(tournamentSlug, effectiveCategoryId, nextGroups, fullRoster, false);
 
-    const sourceLabel = sourceTeam?.name || "Empty Slot";
-    const targetLabel = targetTeam?.name || "Empty Slot";
+    const sourceLabel = formatSlotTeamLabel(sourceTeam);
+    const targetLabel = formatSlotTeamLabel(targetTeam);
     setSwapNotice({
       message: `Swapped ${sourceLabel} (Bracket ${sourceGroup.letter}) and ${targetLabel} (Bracket ${targetGroup.letter})`,
+      previousGroups: prevGroupsSnapshot,
+    });
+
+    setSelectedSlot(null);
+    setDraggedSlot(null);
+  };
+
+  // ── Drag & Tap Move Handler (Resizes Brackets, e.g. 5 -> 4 and 4 -> 5) ───
+  const handleMoveSlotToBracket = (
+    fromGroupIdx: number,
+    fromSlotIdx: number,
+    toGroupIdx: number
+  ) => {
+    if (isAnimating) return;
+    if (fromGroupIdx === toGroupIdx) {
+      setSelectedSlot(null);
+      setDraggedSlot(null);
+      return;
+    }
+
+    const currentGroups = groupsRef.current;
+    const sourceGroup = currentGroups[fromGroupIdx];
+    const targetGroup = currentGroups[toGroupIdx];
+    if (!sourceGroup || !targetGroup) return;
+
+    const sourceSlot = sourceGroup.slots[fromSlotIdx];
+    if (!sourceSlot || !sourceSlot.team) {
+      setSelectedSlot(null);
+      setDraggedSlot(null);
+      return;
+    }
+
+    const movedTeam = sourceSlot.team;
+    const prevGroupsSnapshot = JSON.parse(JSON.stringify(currentGroups)) as BracketGroup[];
+
+    const nextGroups = currentGroups.map((g) => ({
+      ...g,
+      slots: g.slots.map((s) => ({ ...s })),
+    }));
+
+    // Remove slot from source bracket so its slot count shrinks by 1
+    nextGroups[fromGroupIdx]!.slots.splice(fromSlotIdx, 1);
+
+    // Add to target bracket: fill an empty slot if already drawn with a vacancy, otherwise append a new slot
+    const targetNext = nextGroups[toGroupIdx]!;
+    const emptyIdxInDrawn = targetNext.isDrawn
+      ? targetNext.slots.findIndex((s) => s.team === null)
+      : -1;
+
+    if (emptyIdxInDrawn !== -1) {
+      targetNext.slots[emptyIdxInDrawn] = { team: movedTeam, revealed: true };
+    } else {
+      targetNext.slots.push({ team: movedTeam, revealed: true });
+      if (targetNext.slots.every((s) => s.team !== null && s.revealed)) {
+        targetNext.isDrawn = true;
+        targetNext.revealed = true;
+      }
+    }
+
+    const nextDrawnCount = nextGroups.filter((g) => g.isDrawn).length;
+    setGroups(nextGroups);
+    groupsRef.current = nextGroups;
+    setDrawnCount(nextDrawnCount);
+    drawnCountRef.current = nextDrawnCount;
+
+    const nextBuckets = nextGroups.map((g) =>
+      g.slots.map((s) => s.team).filter((t): t is Team => t !== null)
+    );
+    setTeamsByGroup(nextBuckets);
+    teamsByGroupRef.current = nextBuckets;
+
+    const safeTeams = category?.teams || [];
+    const fullRoster = safeTeams.length > 0 ? safeTeams : nextBuckets.flat();
+    skipEffectRef.current = true;
+    saveDrawnGroups(tournamentSlug, effectiveCategoryId, nextGroups, fullRoster, false);
+
+    const movedLabel = formatSlotTeamLabel(movedTeam);
+    const newSourceCount = nextGroups[fromGroupIdx]!.slots.filter((s) => s.team !== null).length;
+    const newTargetCount = nextGroups[toGroupIdx]!.slots.filter((s) => s.team !== null).length;
+
+    setSwapNotice({
+      message: `Moved ${movedLabel} from Bracket ${sourceGroup.letter} (${newSourceCount} teams) to Bracket ${targetGroup.letter} (${newTargetCount} teams)`,
       previousGroups: prevGroupsSnapshot,
     });
 
@@ -902,8 +1384,11 @@ export function BracketDraw({
   const handleUndoSwap = () => {
     if (!swapNotice) return;
     const restoredGroups = swapNotice.previousGroups;
+    const nextDrawnCount = restoredGroups.filter((g) => g.isDrawn).length;
     setGroups(restoredGroups);
     groupsRef.current = restoredGroups;
+    setDrawnCount(nextDrawnCount);
+    drawnCountRef.current = nextDrawnCount;
 
     const nextBuckets = restoredGroups.map((g) =>
       g.slots.map((s) => s.team).filter((t): t is Team => t !== null)
@@ -911,30 +1396,16 @@ export function BracketDraw({
     setTeamsByGroup(nextBuckets);
     teamsByGroupRef.current = nextBuckets;
 
-    // Clean dispatch queue items
-    try {
-      const q = getDispatchQueue();
-      const cleanedQ = q.filter((item) => {
-        if (item.status === "live" || item.status === "dispatched") return true;
-        return isMatchInSameBracket(
-          item.tournamentSlug || tournamentSlug,
-          item.categoryId || effectiveCategoryId,
-          item.stage,
-          item.teamAName,
-          item.teamBName,
-          undefined,
-          undefined,
-          item.teamAPlayers,
-          item.teamBPlayers
-        );
-      });
-      saveDispatchQueue(cleanedQ);
-    } catch {
-      // ignore
-    }
+    const restoredById = new Map(
+      restoredGroups
+        .flatMap((g) => g.slots.map((s) => s.team))
+        .filter((t): t is Team => t !== null)
+        .map((t) => [t.id, t])
+    );
 
-    const safeTeams = category?.teams || [];
+    const safeTeams = (category?.teams || []).map((t) => restoredById.get(t.id) ?? t);
     const fullRoster = safeTeams.length > 0 ? safeTeams : nextBuckets.flat();
+    skipEffectRef.current = true;
     saveDrawnGroups(tournamentSlug, effectiveCategoryId, restoredGroups, fullRoster, false);
 
     setSwapNotice(null);
@@ -1181,51 +1652,112 @@ export function BracketDraw({
               </div>
             </div>
 
-            <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap">
+            {/* Direct Bracket Count Controls */}
+            <div className="flex items-center gap-1.5 flex-wrap sm:flex-nowrap">
+              {/* Stepper Down */}
+              <button
+                type="button"
+                onClick={() => handleApplyBracketCount(numBrackets - 1)}
+                disabled={isAnimating || numBrackets <= 1}
+                className="h-9 w-9 shrink-0 flex items-center justify-center font-bold text-base border border-border bg-card text-foreground hover:border-pickle hover:text-pickle disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors rounded"
+                title="Decrease bracket count by 1"
+              >
+                -
+              </button>
+
+              {/* Direct Numeric Input */}
+              <div className="relative shrink-0" title="Directly type bracket count (1 - 26) and press Enter">
+                <input
+                  type="number"
+                  min="1"
+                  max="26"
+                  value={bracketInputVal}
+                  disabled={isAnimating}
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value, 10);
+                    setBracketInputVal(isNaN(val) ? 1 : Math.max(1, Math.min(26, val)));
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      handleApplyBracketCount(bracketInputVal);
+                    }
+                  }}
+                  className="w-14 h-9 text-center font-mono font-bold text-sm sm:text-base border-2 border-pickle bg-background text-pickle focus:outline-none focus:ring-1 focus:ring-pickle rounded"
+                />
+              </div>
+
+              {/* Stepper Up */}
+              <button
+                type="button"
+                onClick={() => handleApplyBracketCount(numBrackets + 1)}
+                disabled={isAnimating || numBrackets >= 26}
+                className="h-9 w-9 shrink-0 flex items-center justify-center font-bold text-base border border-border bg-card text-foreground hover:border-pickle hover:text-pickle disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors rounded"
+                title="Increase bracket count by 1"
+              >
+                +
+              </button>
+
+              {/* Dropdown with all numbers */}
               <select
-                value={[1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 16].includes(numBrackets) ? numBrackets : "custom"}
+                value={numBrackets}
                 disabled={isAnimating}
                 onChange={(e) => {
-                  if (e.target.value !== "custom") {
-                    setNumBrackets(parseInt(e.target.value, 10));
+                  const val = parseInt(e.target.value, 10);
+                  if (!isNaN(val)) {
+                    handleApplyBracketCount(val);
                   }
                 }}
-                className="w-full border border-input bg-background px-3 py-2 text-xs sm:text-sm focus:border-pickle focus:outline-none disabled:opacity-60 font-semibold text-pickle"
+                className="h-9 flex-1 min-w-[130px] border border-input bg-background px-2.5 py-1 text-xs sm:text-sm font-semibold text-foreground focus:border-pickle focus:outline-none disabled:opacity-60 rounded"
               >
-                <option value={1}>1 Bracket (Single Pool - Round Robin)</option>
-                <option value={2}>2 Brackets (Pools A &amp; B)</option>
-                <option value={3}>3 Brackets (Pools A, B, C)</option>
-                <option value={4}>4 Brackets (Pools A to D)</option>
-                <option value={5}>5 Brackets (Pools A to E)</option>
-                <option value={6}>6 Brackets (Pools A to F)</option>
-                <option value={7}>7 Brackets (Pools A to G)</option>
-                <option value={8}>8 Brackets (Pools A to H)</option>
-                <option value={10}>10 Brackets (Pools A to J)</option>
-                <option value={12}>12 Brackets (Pools A to L)</option>
-                <option value={16}>16 Brackets (Pools A to P)</option>
-                <option value="custom">Custom Bracket Count...</option>
+                {Array.from({ length: 16 }, (_, i) => i + 1).map((n) => {
+                  const endLetter = LETTERS[n - 1] ?? String(n);
+                  const poolText = n === 1 ? "Single Pool (Round Robin)" : `Pools A to ${endLetter}`;
+                  return (
+                    <option key={n} value={n}>
+                      {n} {n === 1 ? "Bracket" : "Brackets"} ({poolText})
+                    </option>
+                  );
+                })}
+                {[18, 20, 24, 26].map((n) => (
+                  <option key={n} value={n}>
+                    {n} Brackets (Pools A to {LETTERS[n - 1] ?? n})
+                  </option>
+                ))}
               </select>
 
-              {![1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 16].includes(numBrackets) && (
-                <div className="flex items-center gap-1 shrink-0">
-                  <input
-                    type="number"
-                    min="1"
-                    max="26"
-                    value={numBrackets}
-                    disabled={isAnimating}
-                    onChange={(e) => setNumBrackets(Math.max(1, Math.min(26, parseInt(e.target.value) || 1)))}
-                    className="w-16 border border-input bg-background px-2 py-2 text-xs sm:text-sm font-mono font-bold text-pickle focus:border-pickle focus:outline-none"
-                  />
-                  <span className="text-[0.65rem] text-muted-foreground">brackets</span>
-                </div>
+              {/* Apply button if typed value differs */}
+              {bracketInputVal !== numBrackets && (
+                <button
+                  type="button"
+                  onClick={() => handleApplyBracketCount(bracketInputVal)}
+                  disabled={isAnimating}
+                  className="h-9 shrink-0 px-3 text-xs font-bold uppercase tracking-wider rounded bg-pickle text-sand border border-pickle hover:bg-pickle/90 transition-all cursor-pointer whitespace-nowrap shadow-xs"
+                  title="Apply the typed bracket count to drawing"
+                >
+                  Apply ({bracketInputVal})
+                </button>
               )}
+
+              {/* Direct Edit Calculator Button */}
+              <button
+                type="button"
+                onClick={() => {
+                  setBracketInputVal(numBrackets);
+                  setIsEditBracketsModalOpen(true);
+                }}
+                disabled={isAnimating}
+                className="h-9 shrink-0 px-2.5 text-xs font-bold uppercase tracking-wider rounded border border-border bg-charcoal text-sand hover:border-pickle hover:text-pickle transition-all cursor-pointer whitespace-nowrap shadow-xs"
+                title="Open direct bracket count calculator and divisor presets"
+              >
+                Edit Brackets
+              </button>
 
               <button
                 type="button"
                 onClick={() => handleSaveCategoryBracketCount(numBrackets)}
                 disabled={isAnimating}
-                className="shrink-0 px-3 py-2 text-xs font-bold uppercase tracking-wider rounded border border-pickle bg-pickle/15 text-pickle hover:bg-pickle hover:text-sand transition-all cursor-pointer whitespace-nowrap shadow-xs"
+                className="h-9 shrink-0 px-2.5 text-xs font-bold uppercase tracking-wider rounded border border-pickle bg-pickle/15 text-pickle hover:bg-pickle hover:text-sand transition-all cursor-pointer whitespace-nowrap shadow-xs"
                 title="Save this bracket count as the category's permanent setting"
               >
                 Set for Category
@@ -1236,13 +1768,62 @@ export function BracketDraw({
                   type="button"
                   onClick={handleResetToAutoBrackets}
                   disabled={isAnimating}
-                  className="shrink-0 px-2.5 py-2 text-xs font-mono text-muted-foreground hover:text-foreground border border-border bg-card rounded transition-colors cursor-pointer whitespace-nowrap"
+                  className="h-9 shrink-0 px-2 text-xs font-mono text-muted-foreground hover:text-foreground border border-border bg-card rounded transition-colors cursor-pointer whitespace-nowrap"
                   title="Reset category to automatic bracket count"
                 >
                   Reset Auto
                 </button>
               )}
             </div>
+
+            {/* Distribution Helper Text */}
+            <div className="flex items-center justify-between text-[0.68rem] text-muted-foreground pt-0.5">
+              <span>
+                Pools A to {LETTERS[numBrackets - 1] ?? numBrackets}:{" "}
+                <strong className="text-foreground">
+                  {teams.length > 0
+                    ? `${teams.length} teams (${Math.floor(teams.length / numBrackets)}${teams.length % numBrackets > 0 ? `-${Math.ceil(teams.length / numBrackets)}` : ""} per pool)`
+                    : "No teams in roster"}
+                </strong>
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  setBracketInputVal(numBrackets);
+                  setIsEditBracketsModalOpen(true);
+                }}
+                className="text-pickle font-bold hover:underline cursor-pointer ml-2"
+              >
+                Calculator &rarr;
+              </button>
+            </div>
+
+            {/* Quick Presets / Factors */}
+            {suggestedCounts.length > 0 && (
+              <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
+                <span className="text-[0.6rem] uppercase tracking-wider text-muted-foreground font-bold">
+                  Quick Divisors:
+                </span>
+                {suggestedCounts.slice(0, 7).map(({ count, label, isEven }) => (
+                  <button
+                    key={count}
+                    type="button"
+                    onClick={() => handleApplyBracketCount(count)}
+                    disabled={isAnimating}
+                    className={`px-2 py-0.5 rounded text-[0.65rem] font-mono font-bold border transition-colors cursor-pointer ${
+                      count === numBrackets
+                        ? "bg-pickle text-sand border-pickle shadow-xs"
+                        : isEven
+                          ? "bg-card text-foreground border-border hover:border-pickle hover:text-pickle"
+                          : "bg-muted/30 text-muted-foreground border-border/70 hover:border-foreground"
+                    }`}
+                    title={`${count} Brackets (${label} each)`}
+                  >
+                    {count} Brackets{isEven ? ` (${label})` : ""}
+                  </button>
+                ))}
+              </div>
+            )}
 
             {bracketSaveNotice && (
               <div className="p-2 bg-pickle/20 border border-pickle rounded text-[0.72rem] text-pickle font-bold animate-in fade-in duration-200">
@@ -1313,13 +1894,35 @@ export function BracketDraw({
       {/* ── Interactive Bracket Step Navigator ───────────────── */}
       {hasTeams && groups.length > 0 && (
         <div className="border-2 border-border bg-card rounded-xl p-3.5 space-y-2.5 shadow-xs">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between flex-wrap gap-2">
             <span className="text-[0.65rem] uppercase tracking-widest text-foreground font-bold">
               Ceremony Sequence ({drawnCount}/{groups.length} Drawn)
             </span>
-            <span className="text-[0.65rem] font-mono text-pickle font-bold">
-              {isAllDone ? "Ceremony Complete" : nextBracketLetter ? `Next: Bracket ${nextBracketLetter}` : ""}
-            </span>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={handleAddSingleBracket}
+                disabled={isAnimating || groups.length >= 26}
+                className="px-2 py-0.5 text-[0.62rem] font-bold uppercase tracking-wider border border-pickle/40 bg-pickle/15 text-pickle hover:bg-pickle hover:text-sand transition-colors cursor-pointer rounded"
+                title="Add 1 more bracket to this ceremony"
+              >
+                + Add Bracket ({LETTERS[groups.length] ?? groups.length + 1})
+              </button>
+              {groups.length > 1 && (
+                <button
+                  type="button"
+                  onClick={handleRemoveSingleBracket}
+                  disabled={isAnimating}
+                  className="px-2 py-0.5 text-[0.62rem] font-bold uppercase tracking-wider border border-border bg-card text-muted-foreground hover:text-brick hover:border-brick/50 transition-colors cursor-pointer rounded"
+                  title="Remove the last bracket"
+                >
+                  - Remove Last ({LETTERS[groups.length - 1] ?? groups.length})
+                </button>
+              )}
+              <span className="text-[0.65rem] font-mono text-pickle font-bold ml-1">
+                {isAllDone ? "Ceremony Complete" : nextBracketLetter ? `Next: Bracket ${nextBracketLetter}` : ""}
+              </span>
+            </div>
           </div>
 
           {/* Responsive grid — wraps cleanly on mobile into 4 columns without horizontal scrolling */}
@@ -1458,7 +2061,7 @@ export function BracketDraw({
           </div>
           {drawnCount > 0 && (
             <div className="flex items-center gap-1.5 text-pickle text-[0.7rem] font-semibold uppercase tracking-wider">
-              <span>Drag or tap teams to switch brackets</span>
+              <span>Drag onto a slot to swap, or drag onto another bracket to move and resize</span>
             </div>
           )}
         </div>
@@ -1487,22 +2090,64 @@ export function BracketDraw({
       {/* ── Brackets Grid (Supports up to 8 brackets with 32 teams) ── */}
       {hasTeams && groups.length > 0 && (
         <div className="space-y-4">
-          {/* Active selection banner for mobile / desktop click to swap */}
+          {/* Active selection banner for mobile / desktop click to swap or move */}
           {selectedSlot && (
-            <div className="flex flex-wrap items-center justify-between gap-3 bg-pickle/15 border-2 border-pickle px-4 py-3 rounded-xl text-xs sm:text-sm text-foreground shadow-sm animate-in fade-in duration-200">
-              <div className="flex items-center gap-2 min-w-0">
-                <span className="h-2 w-2 rounded-full bg-pickle animate-ping shrink-0" />
-                <span className="truncate">
-                  Selected: <strong>{groups[selectedSlot.groupIndex]?.slots[selectedSlot.slotIndex]?.team?.name || "Empty Slot"}</strong> (Bracket {groups[selectedSlot.groupIndex]?.letter}, Slot {selectedSlot.slotIndex + 1}) — Tap another slot to switch brackets.
-                </span>
+            <div className="flex flex-col gap-3 bg-pickle/15 border-2 border-pickle px-4 py-3.5 rounded-xl text-xs sm:text-sm text-foreground shadow-sm animate-in fade-in duration-200">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="h-2 w-2 rounded-full bg-pickle animate-ping shrink-0" />
+                  <span className="truncate">
+                    Selected: <strong>{formatSlotTeamLabel(groups[selectedSlot.groupIndex]?.slots[selectedSlot.slotIndex]?.team)}</strong> (Bracket {groups[selectedSlot.groupIndex]?.letter}, Slot {selectedSlot.slotIndex + 1}) — Tap another slot to swap, or move directly to resize brackets:
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {groups[selectedSlot.groupIndex]?.slots[selectedSlot.slotIndex]?.team && (
+                    <button
+                      type="button"
+                      onClick={() => openEditSlotModal(selectedSlot.groupIndex, selectedSlot.slotIndex)}
+                      className="border border-pickle bg-card px-3 py-1.5 text-[0.7rem] font-bold uppercase tracking-wider text-pickle hover:bg-pickle hover:text-sand transition-colors rounded cursor-pointer shrink-0"
+                    >
+                      Edit Players
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setSelectedSlot(null)}
+                    className="border border-border bg-charcoal px-3 py-1.5 text-[0.7rem] font-bold uppercase tracking-wider text-sand hover:border-pickle hover:text-pickle transition-colors rounded cursor-pointer shrink-0"
+                  >
+                    Cancel
+                  </button>
+                </div>
               </div>
-              <button
-                type="button"
-                onClick={() => setSelectedSlot(null)}
-                className="border border-border bg-charcoal px-3 py-1.5 text-[0.7rem] font-bold uppercase tracking-wider text-sand hover:border-pickle hover:text-pickle transition-colors cursor-pointer shrink-0"
-              >
-                Cancel
-              </button>
+
+              {/* Quick "Move to Bracket" buttons (changes bracket counts, e.g. 5 -> 4 and 4 -> 5) */}
+              {groups.length > 1 && groups[selectedSlot.groupIndex]?.slots[selectedSlot.slotIndex]?.team && (
+                <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-pickle/30">
+                  <span className="text-[0.65rem] font-mono font-bold uppercase tracking-widest text-muted-foreground">
+                    Move Pair Into:
+                  </span>
+                  {groups.map((targetGrp, tIdx) => {
+                    if (tIdx === selectedSlot.groupIndex) return null;
+                    const currentTeamsInTarget = targetGrp.slots.filter((s) => s.team !== null).length;
+                    return (
+                      <button
+                        key={targetGrp.letter}
+                        type="button"
+                        onClick={() =>
+                          handleMoveSlotToBracket(
+                            selectedSlot.groupIndex,
+                            selectedSlot.slotIndex,
+                            tIdx
+                          )
+                        }
+                        className="rounded border border-pickle bg-pickle px-3 py-1.5 text-[0.68rem] font-bold uppercase tracking-wider text-sand hover:opacity-90 transition-opacity cursor-pointer shadow-xs"
+                      >
+                        + Bracket {targetGrp.letter} ({currentTeamsInTarget} &rarr; {currentTeamsInTarget + 1} Teams)
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
 
@@ -1519,7 +2164,7 @@ export function BracketDraw({
                   onClick={handleUndoSwap}
                   className="bg-pickle text-sand px-3 py-1 text-[0.7rem] font-bold uppercase tracking-wider hover:opacity-90 transition-opacity cursor-pointer rounded"
                 >
-                  Undo Swap
+                  Undo
                 </button>
                 <button
                   type="button"
@@ -1571,16 +2216,30 @@ export function BracketDraw({
                       handleSwapSlots(selectedSlot.groupIndex, selectedSlot.slotIndex, groupIdx, slotIdx);
                     }
                   }}
+                  onEditSlot={(groupIdx, slotIdx) => {
+                    openEditSlotModal(groupIdx, slotIdx);
+                  }}
                   draggedSlot={draggedSlot}
                   onDragStartSlot={(groupIdx, slotIdx) => {
-                    setDraggedSlot({ groupIndex: groupIdx, slotIndex: slotIdx });
+                    requestAnimationFrame(() => {
+                      setDraggedSlot({ groupIndex: groupIdx, slotIndex: slotIdx });
+                    });
                   }}
-                  onDropSlot={(groupIdx, slotIdx) => {
-                    if (draggedSlot) {
-                      handleSwapSlots(draggedSlot.groupIndex, draggedSlot.slotIndex, groupIdx, slotIdx);
+                  onDragEndSlot={() => {
+                    setDraggedSlot(null);
+                  }}
+                  onDropSlot={(groupIdx, slotIdx, fallbackSource) => {
+                    const src = fallbackSource || draggedSlot;
+                    if (src) {
+                      handleSwapSlots(src.groupIndex, src.slotIndex, groupIdx, slotIdx);
                     }
                   }}
-                  isTeamLocked={isTeamLocked}
+                  onMoveToBracket={(targetGroupIdx, fallbackSource) => {
+                    const src = fallbackSource || draggedSlot || selectedSlot;
+                    if (src) {
+                      handleMoveSlotToBracket(src.groupIndex, src.slotIndex, targetGroupIdx);
+                    }
+                  }}
                 />
               );
             })}
@@ -1610,11 +2269,315 @@ export function BracketDraw({
           </div>
         </div>
       )}
+
+      {/* ── Edit Players / Team Modal ───────────────────────── */}
+      {editingSlot && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-xs"
+          onClick={() => setEditingSlot(null)}
+        >
+          <div
+            className="w-full max-w-md rounded-xl border-2 border-border bg-card shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="bg-charcoal px-5 py-4 flex items-center justify-between border-b border-border">
+              <div>
+                <span className="block text-[0.62rem] font-bold uppercase tracking-[0.25em] text-pickle">
+                  Bracket {groups[editingSlot.groupIndex]?.letter} • Slot {editingSlot.slotIndex + 1}
+                </span>
+                <h3 className="font-display text-2xl text-sand leading-tight mt-0.5">
+                  Change Players / Team
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingSlot(null)}
+                className="rounded border border-sand/30 px-2.5 py-1 text-[0.65rem] font-bold uppercase tracking-wider text-sand/80 hover:border-sand hover:text-sand cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveEditedSlot} className="p-5 space-y-4">
+              <div className="space-y-1.5">
+                <label className="block text-[0.68rem] font-bold uppercase tracking-widest text-muted-foreground">
+                  Player 1 Full Name
+                </label>
+                <input
+                  type="text"
+                  value={editingSlot.player1}
+                  onChange={(e) => setEditingSlot({ ...editingSlot, player1: e.target.value })}
+                  placeholder="Enter Player 1 name"
+                  autoFocus
+                  className="w-full rounded border border-input bg-background px-3 py-2.5 text-sm font-medium text-foreground focus:border-pickle focus:outline-none"
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="block text-[0.68rem] font-bold uppercase tracking-widest text-muted-foreground">
+                  Player 2 Full Name
+                </label>
+                <input
+                  type="text"
+                  value={editingSlot.player2}
+                  onChange={(e) => setEditingSlot({ ...editingSlot, player2: e.target.value })}
+                  placeholder="Enter Player 2 name (leave blank for singles)"
+                  className="w-full rounded border border-input bg-background px-3 py-2.5 text-sm font-medium text-foreground focus:border-pickle focus:outline-none"
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="block text-[0.68rem] font-bold uppercase tracking-widest text-muted-foreground">
+                  Team Name
+                </label>
+                <input
+                  type="text"
+                  value={editingSlot.teamName}
+                  onChange={(e) => setEditingSlot({ ...editingSlot, teamName: e.target.value })}
+                  placeholder="Team name (or n/a)"
+                  className="w-full rounded border border-input bg-background px-3 py-2.5 text-sm font-medium text-foreground focus:border-pickle focus:outline-none"
+                />
+              </div>
+
+              <div className="pt-2 flex flex-col-reverse sm:flex-row sm:justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEditingSlot(null)}
+                  className="w-full sm:w-auto border border-border bg-charcoal px-4 py-2.5 text-xs font-bold uppercase tracking-widest text-sand hover:border-pickle hover:text-pickle transition-colors rounded cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="w-full sm:w-auto bg-pickle px-5 py-2.5 text-xs font-bold uppercase tracking-widest text-sand hover:opacity-90 transition-opacity rounded shadow cursor-pointer"
+                >
+                  Save Players
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ── Direct Edit Bracket Count Modal ── */}
+      {isEditBracketsModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-xs"
+          onClick={() => setIsEditBracketsModalOpen(false)}
+        >
+          <div
+            className="w-full max-w-lg rounded-xl border-2 border-border bg-card shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="bg-charcoal px-5 py-4 flex items-center justify-between border-b border-border">
+              <div>
+                <span className="block text-[0.62rem] font-bold uppercase tracking-[0.25em] text-pickle">
+                  Bracket Configuration
+                </span>
+                <h3 className="font-display text-2xl text-sand leading-tight mt-0.5">
+                  Directly Edit Bracket Count
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsEditBracketsModalOpen(false)}
+                className="rounded border border-sand/30 px-2.5 py-1 text-[0.65rem] font-bold uppercase tracking-wider text-sand/80 hover:border-sand hover:text-sand cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="p-5 space-y-5 max-h-[80vh] overflow-y-auto">
+              {/* Category Info Header */}
+              <div className="surface-card p-3 rounded border border-border flex items-center justify-between">
+                <div>
+                  <span className="block text-xs font-bold text-foreground">
+                    {category?.label || "Category"}
+                  </span>
+                  <span className="text-[0.68rem] text-muted-foreground">
+                    Total Roster: {totalTeams} teams
+                  </span>
+                </div>
+                <div className="text-right">
+                  <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground block">
+                    Current Brackets
+                  </span>
+                  <span className="font-mono text-sm font-bold text-pickle">
+                    {groups.length} ({groups.length === 1 ? "Pool A" : `Pools A to ${LETTERS[groups.length - 1] ?? groups.length}`})
+                  </span>
+                </div>
+              </div>
+
+              {/* Stepper & Number Input */}
+              <div className="space-y-2">
+                <label className="block text-[0.68rem] font-bold uppercase tracking-widest text-muted-foreground">
+                  Number of Brackets (Pools A to {LETTERS[bracketInputVal - 1] ?? bracketInputVal})
+                </label>
+                <div className="flex items-center justify-center gap-3 py-2">
+                  <button
+                    type="button"
+                    onClick={() => setBracketInputVal((prev) => Math.max(1, prev - 1))}
+                    disabled={bracketInputVal <= 1}
+                    className="h-11 w-11 rounded-lg border-2 border-border bg-charcoal text-sand text-xl font-bold flex items-center justify-center hover:border-pickle hover:text-pickle disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
+                    title="Decrease by 1"
+                  >
+                    -
+                  </button>
+
+                  <div className="text-center">
+                    <input
+                      type="number"
+                      min={1}
+                      max={26}
+                      value={bracketInputVal}
+                      onChange={(e) => {
+                        const val = parseInt(e.target.value, 10);
+                        setBracketInputVal(isNaN(val) ? 1 : Math.max(1, Math.min(26, val)));
+                      }}
+                      className="w-24 h-12 text-center font-display text-3xl font-bold text-foreground border-2 border-pickle bg-background rounded-lg focus:outline-none focus:ring-2 focus:ring-pickle"
+                    />
+                    <span className="block text-[0.65rem] font-mono text-muted-foreground mt-1">
+                      Pools A through {LETTERS[bracketInputVal - 1] ?? bracketInputVal}
+                    </span>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => setBracketInputVal((prev) => Math.max(1, Math.min(26, prev + 1)))}
+                    disabled={bracketInputVal >= 26}
+                    className="h-11 w-11 rounded-lg border-2 border-border bg-charcoal text-sand text-xl font-bold flex items-center justify-center hover:border-pickle hover:text-pickle disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
+                    title="Increase by 1"
+                  >
+                    +
+                  </button>
+                </div>
+              </div>
+
+              {/* Real-time Allocation Breakdown */}
+              <div className="p-3.5 bg-card/60 rounded-lg border border-border space-y-1.5 text-xs">
+                <div className="flex items-center justify-between font-medium">
+                  <span className="text-muted-foreground">Distribution for {totalTeams} teams:</span>
+                  <span className="font-bold text-foreground">
+                    {totalTeams > 0
+                      ? totalTeams % bracketInputVal === 0
+                        ? `${Math.floor(totalTeams / bracketInputVal)} teams per bracket (Perfect Balance)`
+                        : `${totalTeams % bracketInputVal} brackets of ${Math.ceil(totalTeams / bracketInputVal)} teams, ${bracketInputVal - (totalTeams % bracketInputVal)} brackets of ${Math.floor(totalTeams / bracketInputVal)} teams`
+                      : "No teams in roster"}
+                  </span>
+                </div>
+                <p className="text-[0.68rem] text-muted-foreground leading-relaxed">
+                  Teams are randomly shuffled and seeded with balanced distribution across Bracket A through Bracket {LETTERS[bracketInputVal - 1] ?? bracketInputVal}.
+                </p>
+              </div>
+
+              {/* Quick Divisors / Factors */}
+              {suggestedCounts.length > 0 && (
+                <div className="space-y-2">
+                  <span className="block text-[0.68rem] font-bold uppercase tracking-widest text-muted-foreground">
+                    Recommended Presets for {totalTeams} Teams
+                  </span>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    {suggestedCounts.slice(0, 9).map(({ count, label, isEven }) => (
+                      <button
+                        key={count}
+                        type="button"
+                        onClick={() => setBracketInputVal(count)}
+                        className={`p-2 rounded border text-left transition-all cursor-pointer ${
+                          bracketInputVal === count
+                            ? "border-pickle bg-pickle/20 ring-1 ring-pickle"
+                            : "border-border bg-card hover:border-pickle/60"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="font-bold text-xs text-foreground">
+                            {count} {count === 1 ? "Bracket" : "Brackets"}
+                          </span>
+                          {isEven && (
+                            <span className="text-[0.55rem] font-bold uppercase bg-pickle/20 text-pickle px-1 py-0.2 rounded">
+                              Even
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-[0.65rem] text-muted-foreground block font-mono">
+                          {label} each
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Save as Category Default Option */}
+              <label className="flex items-start gap-2.5 p-3 rounded border border-border bg-card/40 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={modalMakeDefault}
+                  onChange={(e) => setModalMakeDefault(e.target.checked)}
+                  className="mt-0.5 accent-pickle cursor-pointer"
+                />
+                <div className="text-xs">
+                  <span className="font-bold text-foreground block">
+                    Save as permanent default for {category?.label || "this category"}
+                  </span>
+                  <span className="text-[0.68rem] text-muted-foreground">
+                    Future draws and resets for this division will automatically use {bracketInputVal} brackets.
+                  </span>
+                </div>
+              </label>
+
+              {/* Warning if already drawn */}
+              {groups.some((g) => g.isDrawn) && (
+                <div className="p-3 bg-brick/15 border border-brick/40 rounded text-xs text-brick">
+                  <strong>Notice:</strong> Brackets have already been drawn. Applying a new bracket count will reset the ceremony and redistribute all teams into the new brackets.
+                </div>
+              )}
+
+              {/* Action Buttons */}
+              <div className="pt-2 flex flex-col-reverse sm:flex-row sm:justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsEditBracketsModalOpen(false)}
+                  className="w-full sm:w-auto border border-border bg-charcoal px-4 py-2.5 text-xs font-bold uppercase tracking-widest text-sand hover:border-pickle hover:text-pickle transition-colors rounded cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleApplyBracketCount(bracketInputVal, { makeDefault: modalMakeDefault });
+                    setIsEditBracketsModalOpen(false);
+                  }}
+                  className="w-full sm:w-auto bg-pickle px-5 py-2.5 text-xs font-bold uppercase tracking-widest text-sand hover:opacity-90 transition-opacity rounded shadow cursor-pointer"
+                >
+                  Apply {bracketInputVal} Brackets
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
 // ── BracketCard ────────────────────────────────────────────────────────────
+function parseDragData(e: React.DragEvent): { groupIndex: number; slotIndex: number } | null {
+  try {
+    const raw = e.dataTransfer.getData("text/plain");
+    if (!raw) return null;
+    const [gStr, sStr] = raw.split(",");
+    const g = Number(gStr);
+    const s = Number(sStr);
+    if (Number.isInteger(g) && Number.isInteger(s) && g >= 0 && s >= 0) {
+      return { groupIndex: g, slotIndex: s };
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
 function BracketCard({
   group,
   index,
@@ -1625,10 +2588,12 @@ function BracketCard({
   onDrawThisBracket,
   selectedSlot,
   onSelectSlot,
+  onEditSlot,
   draggedSlot,
   onDragStartSlot,
+  onDragEndSlot,
   onDropSlot,
-  isTeamLocked,
+  onMoveToBracket,
 }: {
   group: BracketGroup;
   index: number;
@@ -1639,34 +2604,79 @@ function BracketCard({
   onDrawThisBracket: () => void;
   selectedSlot: { groupIndex: number; slotIndex: number } | null;
   onSelectSlot: (groupIndex: number, slotIndex: number) => void;
+  onEditSlot: (groupIndex: number, slotIndex: number) => void;
   draggedSlot: { groupIndex: number; slotIndex: number } | null;
   onDragStartSlot: (groupIndex: number, slotIndex: number) => void;
-  onDropSlot: (groupIndex: number, slotIndex: number) => void;
-  isTeamLocked: (team?: Team | null) => boolean;
+  onDragEndSlot: () => void;
+  onDropSlot: (
+    groupIndex: number,
+    slotIndex: number,
+    fallbackSource?: { groupIndex: number; slotIndex: number } | null
+  ) => void;
+  onMoveToBracket: (
+    targetGroupIndex: number,
+    fallbackSource?: { groupIndex: number; slotIndex: number } | null
+  ) => void;
 }) {
+  const [isMoveDropOver, setIsMoveDropOver] = useState(false);
   const revealedCount = group.slots.filter((s) => s.revealed).length;
   const totalSlots = group.slots.length;
+  const filledTeamsCount = group.slots.filter((s) => s.team !== null).length;
+
+  const isDraggingFromOtherBracket = Boolean(
+    !isAnimating && draggedSlot && draggedSlot.groupIndex !== index
+  );
+  const isSelectedFromOtherBracket = Boolean(
+    !isAnimating && selectedSlot && selectedSlot.groupIndex !== index
+  );
+  const canReceiveBracketMove = isDraggingFromOtherBracket || isSelectedFromOtherBracket;
 
   return (
     <div
-      className={`flex flex-col overflow-hidden border-2 transition-all duration-300 rounded-xl shadow-xs ${isActive
-          ? "border-pickle shadow-xl shadow-pickle/20 scale-[1.02] ring-2 ring-pickle"
-          : isDrawn
-            ? "border-pickle/50 bg-card"
-            : isNext
-              ? "border-brick/80 shadow-md shadow-brick/10 scale-[1.01]"
-              : "border-border/80 opacity-70 hover:opacity-100"
-        }`}
+      className={`flex flex-col overflow-hidden border-2 transition-all duration-300 rounded-xl shadow-xs ${
+        isMoveDropOver
+          ? "border-pickle ring-2 ring-pickle shadow-lg shadow-pickle/20"
+          : isActive
+            ? "border-pickle shadow-xl shadow-pickle/20 scale-[1.02] ring-2 ring-pickle"
+            : isDrawn
+              ? "border-pickle/50 bg-card"
+              : isNext
+                ? "border-brick/80 shadow-md shadow-brick/10 scale-[1.01]"
+                : "border-border/80 opacity-70 hover:opacity-100"
+      }`}
     >
-      {/* ── Card Header ── */}
+      {/* ── Card Header (also accepts drop to move pair into this bracket) ── */}
       <div
+        onDragOver={(e) => {
+          if (isAnimating) return;
+          if (!draggedSlot || draggedSlot.groupIndex !== index) {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = "move";
+            if (!isMoveDropOver) setIsMoveDropOver(true);
+          }
+        }}
+        onDragLeave={() => {
+          if (isMoveDropOver) setIsMoveDropOver(false);
+        }}
+        onDrop={(e) => {
+          if (isAnimating) return;
+          e.preventDefault();
+          e.stopPropagation();
+          setIsMoveDropOver(false);
+          const fallback = parseDragData(e);
+          if ((draggedSlot && draggedSlot.groupIndex !== index) || (fallback && fallback.groupIndex !== index)) {
+            onMoveToBracket(index, fallback);
+          }
+        }}
         className={`relative flex items-center justify-between overflow-hidden px-5 py-4 transition-colors duration-400 ${isActive
             ? "bg-pickle text-sand"
-            : isDrawn
-              ? "bg-charcoal text-sand"
-              : isNext
-                ? "bg-brick text-sand"
-                : "bg-charcoal/70 text-sand/80"
+            : isMoveDropOver
+              ? "bg-pickle text-sand"
+              : isDrawn
+                ? "bg-charcoal text-sand"
+                : isNext
+                  ? "bg-brick text-sand"
+                  : "bg-charcoal/70 text-sand/80"
           }`}
       >
         {/* Animated scan line when this bracket is active */}
@@ -1739,7 +2749,6 @@ function BracketCard({
           group.slots.map((slot, ti) => {
             const isSelected = selectedSlot?.groupIndex === index && selectedSlot?.slotIndex === ti;
             const isOtherSelected = Boolean(selectedSlot && !isSelected);
-            const isLocked = isTeamLocked(slot.team);
 
             return (
               <TeamSlot
@@ -1752,21 +2761,81 @@ function BracketCard({
                 isAnimating={isAnimating}
                 isSelected={isSelected}
                 isOtherSelected={isOtherSelected}
-                isLocked={isLocked}
                 onSelect={() => onSelectSlot(index, ti)}
+                onEdit={() => onEditSlot(index, ti)}
                 onDragStart={(e) => {
+                  e.dataTransfer.effectAllowed = "move";
                   e.dataTransfer.setData("text/plain", `${index},${ti}`);
                   onDragStartSlot(index, ti);
                 }}
+                onDragEnd={onDragEndSlot}
                 onDragOver={(e) => {
                   e.preventDefault();
+                  e.dataTransfer.dropEffect = "move";
                 }}
-                onDrop={() => {
-                  onDropSlot(index, ti);
+                onDrop={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const fallback = parseDragData(e);
+                  onDropSlot(index, ti, fallback);
                 }}
               />
             );
           })
+        )}
+
+        {/* ── Drop / Tap Zone to ADD pair into this bracket (resizes bracket, e.g. 4 -> 5) ── */}
+        {canReceiveBracketMove && (
+          <div
+            role="button"
+            tabIndex={0}
+            onClick={() => {
+              if (isSelectedFromOtherBracket) {
+                onMoveToBracket(index, selectedSlot);
+              }
+            }}
+            onKeyDown={(e) => {
+              if ((e.key === "Enter" || e.key === " ") && isSelectedFromOtherBracket) {
+                e.preventDefault();
+                onMoveToBracket(index, selectedSlot);
+              }
+            }}
+            onDragOver={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              e.dataTransfer.dropEffect = "move";
+              if (!isMoveDropOver) setIsMoveDropOver(true);
+            }}
+            onDragLeave={() => {
+              if (isMoveDropOver) setIsMoveDropOver(false);
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setIsMoveDropOver(false);
+              const fallback = parseDragData(e);
+              onMoveToBracket(index, fallback);
+            }}
+            className={`flex-1 min-h-[54px] m-2 rounded-lg border-2 border-dashed px-4 py-3 flex items-center justify-between gap-2 transition-all cursor-pointer select-none ${
+              isMoveDropOver
+                ? "border-pickle bg-pickle/25 text-pickle shadow-inner scale-[0.99]"
+                : "border-pickle/60 bg-pickle/10 text-pickle hover:bg-pickle/20 hover:border-pickle"
+            }`}
+          >
+            <div className="flex items-center gap-2.5 min-w-0">
+              <span className="font-display text-lg leading-none text-pickle">
+                {totalSlots + 1}
+              </span>
+              <span className="text-xs font-bold uppercase tracking-wider truncate">
+                {isDraggingFromOtherBracket
+                  ? `+ Drop here to move into Bracket ${group.letter}`
+                  : `+ Tap to move into Bracket ${group.letter}`}
+              </span>
+            </div>
+            <span className="shrink-0 rounded bg-pickle px-2 py-0.5 font-mono text-[0.62rem] font-bold uppercase tracking-wider text-sand">
+              {filledTeamsCount} &rarr; {filledTeamsCount + 1} Teams
+            </span>
+          </div>
         )}
       </div>
     </div>
@@ -1783,9 +2852,10 @@ function TeamSlot({
   isAnimating,
   isSelected,
   isOtherSelected,
-  isLocked,
   onSelect,
+  onEdit,
   onDragStart,
+  onDragEnd,
   onDragOver,
   onDrop,
 }: {
@@ -1797,22 +2867,44 @@ function TeamSlot({
   isAnimating: boolean;
   isSelected: boolean;
   isOtherSelected: boolean;
-  isLocked: boolean;
   onSelect: () => void;
+  onEdit: () => void;
   onDragStart: (e: React.DragEvent) => void;
+  onDragEnd: () => void;
   onDragOver: (e: React.DragEvent) => void;
   onDrop: (e: React.DragEvent) => void;
 }) {
+  const [isSlotDragOver, setIsSlotDragOver] = useState(false);
   const hasTeam = Boolean(slot.team);
   const canInteract = !isAnimating && (hasTeam || isOtherSelected);
-  const canDrag = !isAnimating && !isLocked && hasTeam && slot.revealed;
+  const canDrag = !isAnimating && hasTeam && slot.revealed;
+  const isGenericName = slot.team ? isGenericTeamName(slot.team.name) : false;
+  const playersLine = slot.team?.players?.filter(Boolean).join(" & ") || "";
 
   return (
     <div
       draggable={canDrag}
       onDragStart={canDrag ? onDragStart : undefined}
-      onDragOver={canInteract ? onDragOver : undefined}
-      onDrop={canInteract ? onDrop : undefined}
+      onDragEnd={canDrag ? onDragEnd : undefined}
+      onDragOver={
+        !isAnimating
+          ? (e) => {
+              onDragOver(e);
+              if (!isSlotDragOver) setIsSlotDragOver(true);
+            }
+          : undefined
+      }
+      onDragLeave={() => {
+        if (isSlotDragOver) setIsSlotDragOver(false);
+      }}
+      onDrop={
+        !isAnimating
+          ? (e) => {
+              setIsSlotDragOver(false);
+              onDrop(e);
+            }
+          : undefined
+      }
       onClick={() => {
         if (!canInteract) return;
         onSelect();
@@ -1822,17 +2914,19 @@ function TeamSlot({
           ? "opacity-100 translate-y-0"
           : "opacity-35 translate-y-1"
       } ${
-        isSelected
-          ? "bg-pickle/20 border-l-4 border-l-pickle ring-2 ring-pickle/80 shadow-md"
-          : isOtherSelected
-            ? "cursor-pointer hover:bg-pickle/15 hover:border-l-4 hover:border-l-pickle/60 active:scale-[0.99]"
-            : canDrag
-              ? "cursor-pointer hover:bg-muted/40 active:cursor-grabbing"
-              : ""
+        isSlotDragOver
+          ? "bg-pickle/20 border-l-4 border-l-pickle ring-2 ring-pickle/70"
+          : isSelected
+            ? "bg-pickle/20 border-l-4 border-l-pickle ring-2 ring-pickle/80 shadow-md"
+            : isOtherSelected
+              ? "cursor-pointer hover:bg-pickle/15 hover:border-l-4 hover:border-l-pickle/60 active:scale-[0.99]"
+              : canDrag
+                ? "cursor-grab hover:bg-muted/40 active:cursor-grabbing"
+                : ""
       } ${
         slot.revealed && isGroupActive
           ? "bg-pickle/10 border-l-2 border-l-pickle"
-          : slot.revealed && !isSelected
+          : slot.revealed && !isSelected && !isSlotDragOver
             ? "border-l-2 border-l-transparent bg-card"
             : "bg-card/50"
       }`}
@@ -1874,33 +2968,41 @@ function TeamSlot({
       <div className="flex-1 min-w-0">
         {slot.revealed && slot.team ? (
           <>
-            <div className="flex items-center justify-between gap-1">
+            <div className="flex items-center justify-between gap-1.5">
               <span className="block font-semibold text-foreground truncate text-xs sm:text-sm">
-                {slot.team.name}
+                {isGenericName && playersLine ? playersLine : slot.team.name}
               </span>
-              {isSelected ? (
-                <span className="text-[0.6rem] uppercase tracking-wider font-bold px-1.5 py-0.5 rounded bg-pickle text-sand shrink-0 shadow-xs">
-                  Selected
-                </span>
-              ) : isLocked ? (
-                <span
-                  title="Team has an active or completed match on court"
-                  className="flex items-center gap-1 text-[0.6rem] font-bold uppercase tracking-wider text-amber-500 bg-amber-500/10 px-1.5 py-0.5 rounded border border-amber-500/30 shrink-0"
-                >
-                  <svg className="h-3 w-3 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
-                    <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-                  </svg>
-                  <span>Locked</span>
-                </span>
-              ) : isOtherSelected ? (
-                <span className="text-[0.6rem] uppercase tracking-wider font-bold px-1.5 py-0.5 rounded bg-pickle/20 text-pickle border border-pickle/40 shrink-0 hidden sm:inline-block">
-                  Tap to Swap
-                </span>
-              ) : null}
+              <div className="flex items-center gap-1 shrink-0">
+                {isSelected ? (
+                  <span className="text-[0.6rem] uppercase tracking-wider font-bold px-1.5 py-0.5 rounded bg-pickle text-sand shrink-0 shadow-xs">
+                    Selected
+                  </span>
+                ) : isOtherSelected ? (
+                  <span className="text-[0.6rem] uppercase tracking-wider font-bold px-1.5 py-0.5 rounded bg-pickle/20 text-pickle border border-pickle/40 shrink-0 hidden sm:inline-block">
+                    Tap to Swap
+                  </span>
+                ) : null}
+                {!isAnimating && !isOtherSelected && (
+                  <button
+                    type="button"
+                    title="Change players or team name"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onEdit();
+                    }}
+                    className="rounded border border-border bg-card px-1.5 py-0.5 text-[0.58rem] font-bold uppercase tracking-wider text-muted-foreground hover:border-pickle hover:text-pickle transition-colors cursor-pointer shrink-0"
+                  >
+                    Edit
+                  </button>
+                )}
+              </div>
             </div>
             <div className="flex items-center gap-1.5 text-[0.65rem] text-foreground/80 font-medium truncate mt-0.5">
-              <span className="truncate">{slot.team.players.join(" & ")}</span>
+              {!isGenericName && playersLine ? (
+                <span className="truncate">{playersLine}</span>
+              ) : isGenericName ? (
+                <span className="truncate text-muted-foreground">Team: {slot.team.name}</span>
+              ) : null}
               {slot.team.club && (
                 <>
                   <span className="text-muted-foreground/40 shrink-0">•</span>

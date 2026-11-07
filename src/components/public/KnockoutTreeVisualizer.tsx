@@ -1,6 +1,7 @@
 import React, { useState, useRef } from "react";
 import type { Category, Team } from "@/data/tournaments";
 import type { KnockoutCardItem, ProjectedSlot } from "./KnockoutBracketListView";
+import { getMatchTeamDisplay, isGenericTeamName } from "@/lib/match-store";
 import {
   Trophy,
   ShieldCheck,
@@ -239,16 +240,16 @@ function TenTeamBracketTree({
   highlightTeam,
   onTeamTap,
 }: {
-  r16Upper?: KnockoutCardItem;
-  r16Lower?: KnockoutCardItem;
-  qf1?: KnockoutCardItem;
-  qf2?: KnockoutCardItem;
-  qf3?: KnockoutCardItem;
-  qf4?: KnockoutCardItem;
-  sf1?: KnockoutCardItem;
-  sf2?: KnockoutCardItem;
-  finalMatch?: KnockoutCardItem;
-  bronzeMatch?: KnockoutCardItem;
+  r16Upper?: KnockoutCardItem | undefined;
+  r16Lower?: KnockoutCardItem | undefined;
+  qf1?: KnockoutCardItem | undefined;
+  qf2?: KnockoutCardItem | undefined;
+  qf3?: KnockoutCardItem | undefined;
+  qf4?: KnockoutCardItem | undefined;
+  sf1?: KnockoutCardItem | undefined;
+  sf2?: KnockoutCardItem | undefined;
+  finalMatch?: KnockoutCardItem | undefined;
+  bronzeMatch?: KnockoutCardItem | undefined;
   highlightTeam?: string | null | undefined;
   onTeamTap?: ((team: Team) => void) | undefined;
 }) {
@@ -523,14 +524,14 @@ function EightTeamBracketTree({
   highlightTeam,
   onTeamTap,
 }: {
-  qf1?: KnockoutCardItem;
-  qf2?: KnockoutCardItem;
-  qf3?: KnockoutCardItem;
-  qf4?: KnockoutCardItem;
-  sf1?: KnockoutCardItem;
-  sf2?: KnockoutCardItem;
-  finalMatch?: KnockoutCardItem;
-  bronzeMatch?: KnockoutCardItem;
+  qf1?: KnockoutCardItem | undefined;
+  qf2?: KnockoutCardItem | undefined;
+  qf3?: KnockoutCardItem | undefined;
+  qf4?: KnockoutCardItem | undefined;
+  sf1?: KnockoutCardItem | undefined;
+  sf2?: KnockoutCardItem | undefined;
+  finalMatch?: KnockoutCardItem | undefined;
+  bronzeMatch?: KnockoutCardItem | undefined;
   highlightTeam?: string | null | undefined;
   onTeamTap?: ((team: Team) => void) | undefined;
 }) {
@@ -704,10 +705,10 @@ function FourTeamBracketTree({
   highlightTeam,
   onTeamTap,
 }: {
-  sf1?: KnockoutCardItem;
-  sf2?: KnockoutCardItem;
-  finalMatch?: KnockoutCardItem;
-  bronzeMatch?: KnockoutCardItem;
+  sf1?: KnockoutCardItem | undefined;
+  sf2?: KnockoutCardItem | undefined;
+  finalMatch?: KnockoutCardItem | undefined;
+  bronzeMatch?: KnockoutCardItem | undefined;
   highlightTeam?: string | null | undefined;
   onTeamTap?: ((team: Team) => void) | undefined;
 }) {
@@ -850,16 +851,41 @@ function TreeMatchNode({
 }: {
   matchIndex: string;
   match: KnockoutCardItem;
-  defaultSlotALabel?: string;
-  defaultSlotBLabel?: string;
-  isChampionship?: boolean;
+  defaultSlotALabel?: string | undefined;
+  defaultSlotBLabel?: string | undefined;
+  isChampionship?: boolean | undefined;
   highlightTeam?: string | null | undefined;
   onTeamTap?: ((team: Team) => void) | undefined;
 }) {
   const isLive = match.status === "live";
   const isDone = match.status === "final";
-  const wonA = isDone && match.winnerTeamName && match.slotA.team?.name === match.winnerTeamName;
-  const wonB = isDone && match.winnerTeamName && match.slotB.team?.name === match.winnerTeamName;
+  const dispA = match.slotA.team
+    ? getMatchTeamDisplay(match.slotA.team.name, match.slotA.team.players, match.slotA.team.name)
+    : null;
+  const dispB = match.slotB.team
+    ? getMatchTeamDisplay(match.slotB.team.name, match.slotB.team.players, match.slotB.team.name)
+    : null;
+  const hasDecisiveScores =
+    typeof match.scoreA === "number" &&
+    typeof match.scoreB === "number" &&
+    match.scoreA !== match.scoreB;
+  const wonA = Boolean(
+    isDone &&
+      (hasDecisiveScores
+        ? (match.scoreA ?? 0) > (match.scoreB ?? 0)
+        : match.winnerTeamName &&
+          (dispA?.primary === match.winnerTeamName ||
+            (!isGenericTeamName(match.slotA.team?.name) && match.slotA.team?.name === match.winnerTeamName))),
+  );
+  const wonB = Boolean(
+    isDone &&
+      !wonA &&
+      (hasDecisiveScores
+        ? (match.scoreB ?? 0) > (match.scoreA ?? 0)
+        : match.winnerTeamName &&
+          (dispB?.primary === match.winnerTeamName ||
+            (!isGenericTeamName(match.slotB.team?.name) && match.slotB.team?.name === match.winnerTeamName))),
+  );
 
   const isHighlightedA = Boolean(
     highlightTeam && match.slotA.team && match.slotA.team.name.toLowerCase() === highlightTeam.toLowerCase()
@@ -928,8 +954,8 @@ function SlotRow({
 }) {
   const isBye = slot.isBye;
   const isLocked = slot.isLocked && slot.team;
-  const displayName = isLocked
-    ? slot.team?.name
+  const displayName = isLocked && slot.team
+    ? getMatchTeamDisplay(slot.team.name, slot.team.players, slot.team.name).primary
     : slot.provisionalTeamName
       ? `${slot.provisionalTeamName} (TBD)`
       : slot.label || defaultLabel || "TBD";

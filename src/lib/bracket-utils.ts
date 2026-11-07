@@ -35,17 +35,26 @@ export function isMatchInSameBracket(
   teamBPlayers?: string[],
 ): boolean {
   if (!teamAName || !teamBName) return false;
-  const cleanA = teamAName.trim().toLowerCase();
-  const cleanB = teamBName.trim().toLowerCase();
+  const cleanA = teamAName.replace(/\s+/g, " ").trim().toLowerCase();
+  const cleanB = teamBName.replace(/\s+/g, " ").trim().toLowerCase();
+  const isGeneric = (n: string) =>
+    ["n/a", "na", "tbd", "tba", "null", "undefined", "none", "-", "team a", "team b"].includes(n);
+  const normPlayerRoster = (arr?: string[]) =>
+    (arr || [])
+      .flatMap((p) => String(p).split(/\s*[\/&]\s*/))
+      .map((p) => p.replace(/\s+/g, " ").trim().toLowerCase())
+      .filter((p) => Boolean(p) && !isGeneric(p))
+      .sort()
+      .join("|");
 
   // Same team playing itself
   if (teamAId && teamBId && teamAId === teamBId) return false;
   if (!teamAId && !teamBId && cleanA === cleanB) {
-    if (teamAPlayers && teamBPlayers && teamAPlayers.length > 0 && teamBPlayers.length > 0) {
-      const pA = [...teamAPlayers].sort().join(",").toLowerCase();
-      const pB = [...teamBPlayers].sort().join(",").toLowerCase();
+    const pA = normPlayerRoster(teamAPlayers);
+    const pB = normPlayerRoster(teamBPlayers);
+    if (pA && pB) {
       if (pA === pB) return false;
-    } else {
+    } else if (!isGeneric(cleanA)) {
       return false;
     }
   }
@@ -53,7 +62,7 @@ export function isMatchInSameBracket(
   if (!stage) return true;
 
   // Non-bracket stages (e.g. Finals, Semifinals, Exhibition) are not pool play brackets
-  const match = stage.match(/(?:bracket|pool)\s*([a-h])\b/i);
+  const match = stage.match(/(?:bracket|pool)\s*([a-z])\b/i);
   if (!match) {
     return true; // Knockout or exhibition match
   }
@@ -62,19 +71,22 @@ export function isMatchInSameBracket(
 
   const isSlotMatch = (slot: any, cleanName: string, teamId?: string, players?: string[]): boolean => {
     if (teamId && slot?.team?.id && slot.team.id === teamId) return true;
-    const sName = (slot?.team?.name || slot?.name || "").trim().toLowerCase();
+    const sName = (slot?.team?.name || slot?.name || "").replace(/\s+/g, " ").trim().toLowerCase();
+    const p1 = normPlayerRoster(players);
+    const p2 = normPlayerRoster(slot?.team?.players);
+    if (p1 && p2) {
+      return p1 === p2;
+    }
     if (!sName || !cleanName) return false;
 
     if (sName === cleanName) {
-      if (players && players.length > 0 && slot?.team?.players && slot.team.players.length > 0) {
-        const p1 = [...players].sort().join(",").toLowerCase();
-        const p2 = [...slot.team.players].sort().join(",").toLowerCase();
-        return p1 === p2;
+      if (isGeneric(cleanName) && Boolean(p1) !== Boolean(p2)) {
+        return false;
       }
       return true;
     }
     // Disallow substring collision on short team names (e.g. 'nv', 'dv', 'ro', 'dmd')
-    if (sName.length >= 4 && cleanName.length >= 4) {
+    if (sName.length >= 4 && cleanName.length >= 4 && !isGeneric(sName) && !isGeneric(cleanName)) {
       if (sName.includes(cleanName) || cleanName.includes(sName)) return true;
     }
     return false;

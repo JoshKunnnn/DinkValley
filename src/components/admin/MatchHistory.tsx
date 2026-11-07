@@ -1,10 +1,15 @@
 import React, { useState, useMemo } from "react";
 import type { Category } from "@/data/tournaments";
 import type { LiveMatch } from "@/lib/match-store";
-import { clearCompletedMatches, getMatchTeamDisplay } from "@/lib/match-store";
+import {
+  clearCompletedMatches,
+  deduplicateCompletedMatches,
+  getMatchTeamDisplay,
+  resolveMatchWinnerSide,
+} from "@/lib/match-store";
 import { isMatchInCategory } from "@/lib/court-dispatch";
 import { getCachedDrawnGroups, isSameCategory } from "@/lib/supabase-service";
-import { Search, ChevronDown, ChevronUp, Trash2, AlertTriangle, Loader2, Check } from "lucide-react";
+import { Search, ChevronDown, ChevronUp, Trash2, AlertTriangle, Loader2, Check, RefreshCw } from "lucide-react";
 
 interface MatchHistoryProps {
   tournamentSlug: string;
@@ -12,6 +17,7 @@ interface MatchHistoryProps {
   matches: LiveMatch[];
   initialCategoryId?: string;
   onSelectCategory?: (categoryId: string) => void;
+  onRefresh?: () => Promise<unknown> | void;
 }
 
 export function MatchHistory({
@@ -20,6 +26,7 @@ export function MatchHistory({
   matches,
   initialCategoryId,
   onSelectCategory,
+  onRefresh,
 }: MatchHistoryProps) {
   const [selectedCategory, setSelectedCategory] = useState<string>(
     initialCategoryId || (categories[0]?.id ?? "ALL"),
@@ -28,6 +35,7 @@ export function MatchHistory({
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [sortOrder, setSortOrder] = useState<"recent" | "earliest">("recent");
   const [expandedRalliesMatchId, setExpandedRalliesMatchId] = useState<string | null>(null);
+  const [isSyncing, setIsSyncing] = useState<boolean>(false);
 
   // Clear History Modal & Action State
   const [showClearModal, setShowClearModal] = useState<boolean>(false);
@@ -46,72 +54,36 @@ export function MatchHistory({
     }
   }, [initialCategoryId]);
 
-  // Deduplicate and filter completed matches belonging to this tournament
-  const allCompletedMatches = useMemo(() => {
-    const isMatchingSlug = (slugA?: string, slugB?: string) => {
-      if (!slugA || !slugB) return true;
-      if (slugA === slugB) return true;
-      const a = slugA.toLowerCase();
-      const b = slugB.toLowerCase();
-      const isDvA = a === "dink-valley" || a === "dink-valley-tournament" || a === "dv";
-      const isDvB = b === "dink-valley" || b === "dink-valley-tournament" || b === "dv";
-      return isDvA && isDvB;
-    };
-
-    const filtered = matches.filter((m) => {
-      if (tournamentSlug && m.tournamentSlug && !isMatchingSlug(m.tournamentSlug, tournamentSlug)) {
-        return false;
-      }
-      return m.status === "final" || Boolean(m.winnerTeam);
-    });
-
-    // Deduplicate by pair and stage so identical ghost/duplicate matches collapse into 1
-    const byPairAndStage = new Map<string, LiveMatch>();
-    for (const m of filtered) {
-      if (!m.teamAName || !m.teamBName) {
-        byPairAndStage.set(m.id, m);
-        continue;
-      }
-      const pair = [m.teamAName.trim().toLowerCase(), m.teamBName.trim().toLowerCase()].sort().join("::");
-      const stage = (m.stage || "").trim().toLowerCase();
-      // Normalize category key to avoid splitting duplicates by UUID vs slug
-      const matchedCat = categories.find((c) =>
-        m.categoryId ? isSameCategory(m.categoryId, c.id) || isSameCategory(m.categoryId, (c as any).category_slug) : false
-      );
-      const catKey = matchedCat?.id || m.categoryId || "cat";
-      const key = `${catKey}::${stage}::${pair}`;
-
-      if (!byPairAndStage.has(key)) {
-        byPairAndStage.set(key, m);
-      } else {
-        const existing = byPairAndStage.get(key)!;
-        const existingScore = (existing.score?.teamAScore ?? 0) + (existing.score?.teamBScore ?? 0);
-        const mScore = (m.score?.teamAScore ?? 0) + (m.score?.teamBScore ?? 0);
-        const existingRallies = existing.score?.rallies?.length ?? 0;
-        const mRallies = m.score?.rallies?.length ?? 0;
-
-        // Prefer canonical match ID that matches stage (e.g. quarterfinal ID over bracket-a pool ID)
-        const isMStageId = (m.id || "").toLowerCase().includes("quarter") === stage.includes("quarter");
-        const isExistingStageId = (existing.id || "").toLowerCase().includes("quarter") === stage.includes("quarter");
-
-        const mWins =
-          (!isExistingStageId && isMStageId) ||
-          mScore > existingScore ||
-          (mScore === existingScore && mRallies > existingRallies) ||
-          (mScore === existingScore && mRallies === existingRallies && (m.endedAt ?? 0) > (existing.endedAt ?? 0));
-
-        if (mWins) {
-          byPairAndStage.set(key, m);
-        }
-      }
+  // Pull fresh cloud matches immediately when opening Match History
+  React.useEffect(() => {
+    if (onRefresh) {
+      void onRefresh();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-    return Array.from(byPairAndStage.values());
-  }, [matches, tournamentSlug, categories]);
+  const handleManualSync = async () => {
+    if (!onRefresh || isSyncing) return;
+    setIsSyncing(true);
+    try {
+      await onRefresh();
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  // Deduplicate and filter completed matches belonging to this tournament
+  const allCompletedMatches = useMemo(
+    () => deduplicateCompletedMatches(matches, { tournamentSlug, categories }),
+    [matches, tournamentSlug, categories],
+  );
 
   function isPlayoffMatch(m: LiveMatch): boolean {
     const stage = (m.stage || "").toLowerCase();
     const id = (m.id || "").toLowerCase();
+    if (stage.includes("pool play") || /(?:bracket|pool)\s+[a-z]\b/i.test(stage)) {
+      return false;
+    }
     return (
       stage.includes("quarter") ||
       stage.includes("semi") ||
@@ -135,18 +107,44 @@ export function MatchHistory({
     if (isPlayoffMatch(m)) return undefined;
     if (m.bracketLetter) return m.bracketLetter.toUpperCase();
     const stage = (m.stage || "").toLowerCase();
-    const stageLetter = stage.match(/(?:bracket|pool)\s*([a-h])\b/i)?.[1]?.toUpperCase();
+    const stageLetter = stage.match(/(?:bracket|pool)\s*([a-z])\b/i)?.[1]?.toUpperCase();
     if (stageLetter) return stageLetter;
-    const idMatch = m.id?.match(/[-_](?:bracket|b)[-_]?([a-h])\b/i);
+    const idMatch = m.id?.match(/[-_](?:bracket|b)[-_]?([a-z])\b/i) || m.id?.match(/^match_.+?_([A-Z])_/);
     if (idMatch?.[1]) return idMatch[1].toUpperCase();
+
+    // Fallback: look up drawn groups for this match's category to resolve bracket letter by player roster
+    const assignedCat = getMatchAssignedCategory(m, categories, tournamentSlug);
+    if (assignedCat) {
+      const drawn =
+        getCachedDrawnGroups(tournamentSlug, assignedCat.id) ||
+        getCachedDrawnGroups(tournamentSlug, (assignedCat as any).category_slug);
+      if (drawn && Array.isArray(drawn)) {
+        const normP = (arr?: string[]) =>
+          (arr || [])
+            .flatMap((p) => String(p).split(/\s*[\/&]\s*/))
+            .map((p) => p.replace(/\s+/g, " ").trim().toLowerCase())
+            .filter(Boolean)
+            .sort()
+            .join("|");
+        const pA = normP(m.teamAPlayers);
+        const pB = normP(m.teamBPlayers);
+        if (pA && pB) {
+          for (const g of drawn) {
+            const letter = (g.letter || g.bracketLetter)?.toUpperCase();
+            if (!letter || !Array.isArray(g.slots)) continue;
+            const slotRosters = new Set(
+              g.slots.map((s: any) => normP(s?.team?.players)).filter(Boolean),
+            );
+            if (slotRosters.has(pA) && slotRosters.has(pB)) {
+              return letter;
+            }
+          }
+        }
+      }
+    }
     return undefined;
   }
 
-/**
- * Determines whether a completed match belongs to a tournament category.
- * Prioritizes direct categoryId matching, match ID slug, team roster membership,
- * and drawn groups before falling back to heuristic matching.
- */
 /**
  * Resolves the single authoritative category that a match belongs to.
  * Enforces 1:1 match-to-category mapping so no match ever cross-pollinates
@@ -159,7 +157,44 @@ function getMatchAssignedCategory(
 ): Category | null {
   if (!m || !allCategories || allCategories.length === 0) return null;
 
-  // 1. Division & Age Isolation pre-filter
+  // 1. Direct Category ID / Slug / UUID match (Authoritative ground truth from database)
+  if (m.categoryId) {
+    const cleanMatchCat = m.categoryId.trim().toLowerCase();
+    for (const cat of allCategories) {
+      const cleanCatId = cat.id.trim().toLowerCase();
+      const cleanSlug = (cat as any).category_slug?.trim().toLowerCase();
+      const cleanUuid = (cat as any).uuid?.trim().toLowerCase();
+
+      if (
+        cleanMatchCat === cleanCatId ||
+        (cleanSlug && cleanMatchCat === cleanSlug) ||
+        (cleanUuid && cleanMatchCat === cleanUuid) ||
+        isSameCategory(m.categoryId, cat.id) ||
+        ((cat as any).uuid && isSameCategory(m.categoryId, (cat as any).uuid)) ||
+        ((cat as any).category_slug && isSameCategory(m.categoryId, (cat as any).category_slug))
+      ) {
+        return cat;
+      }
+    }
+  }
+
+  // 1b. Category-scoped match_ ID prefix
+  if (m.id?.startsWith("match_")) {
+    const seg = m.id.match(/^match_(.+?)_(?:[A-Z]|PLAYOFF|KO)_/i)?.[1];
+    if (seg) {
+      for (const cat of allCategories) {
+        if (
+          isSameCategory(seg, cat.id) ||
+          ((cat as any).uuid && isSameCategory(seg, (cat as any).uuid)) ||
+          ((cat as any).category_slug && isSameCategory(seg, (cat as any).category_slug))
+        ) {
+          return cat;
+        }
+      }
+    }
+  }
+
+  // 2. Division & Age Isolation pre-filter for legacy matches without categoryId
   const matchText = `${m.categoryId || ""} ${m.id || ""}`.toLowerCase();
   const isMatchWomen = matchText.includes("women") || matchText.includes("female");
   const isMatchMen = (matchText.includes("men") || matchText.includes("male")) && !isMatchWomen;
@@ -198,11 +233,14 @@ function getMatchAssignedCategory(
   const pool = allCategories.filter(isCompatible);
   const candidatePool = pool.length > 0 ? pool : allCategories;
 
-  // 2. Player roster membership (Definitive ground truth for unrostered or custom match names)
+  // 3. Player roster membership (Definitive ground truth for unrostered or custom match names)
   const matchPlayers = [
     ...(m.teamAPlayers || []),
     ...(m.teamBPlayers || []),
-  ].map((p) => p.trim().toLowerCase()).filter(Boolean);
+  ]
+    .flatMap((p) => String(p).split(/\s*[\/&]\s*/))
+    .map((p) => p.replace(/\s+/g, " ").trim().toLowerCase())
+    .filter(Boolean);
 
   if (matchPlayers.length > 0) {
     let bestCatByPlayers: Category | null = null;
@@ -211,7 +249,11 @@ function getMatchAssignedCategory(
     for (const cat of candidatePool) {
       if (cat.teams && cat.teams.length > 0) {
         const catPlayers = new Set(
-          cat.teams.flatMap((t) => (t.players || []).map((p) => p.trim().toLowerCase()))
+          cat.teams.flatMap((t) =>
+            (t.players || [])
+              .flatMap((p) => String(p).split(/\s*[\/&]\s*/))
+              .map((p) => p.replace(/\s+/g, " ").trim().toLowerCase()),
+          ),
         );
         const matchCount = matchPlayers.filter((p) => catPlayers.has(p)).length;
         if (matchCount > maxPlayerMatches) {
@@ -226,14 +268,14 @@ function getMatchAssignedCategory(
     }
   }
 
-  // 3. Team roster membership (Both teams registered in category or official drawn groups)
-  const tA = m.teamAName?.trim().toLowerCase();
-  const tB = m.teamBName?.trim().toLowerCase();
+  // 4. Team roster membership (Both teams registered in category or official drawn groups)
+  const tA = m.teamAName?.replace(/\s+/g, " ").trim().toLowerCase();
+  const tB = m.teamBName?.replace(/\s+/g, " ").trim().toLowerCase();
   if (tA && tB && tA !== "n/a" && tB !== "n/a") {
     // Official category teams
     for (const cat of candidatePool) {
       if (cat.teams && cat.teams.length > 0) {
-        const validTeams = new Set(cat.teams.map((t) => t.name.trim().toLowerCase()));
+        const validTeams = new Set(cat.teams.map((t) => t.name.replace(/\s+/g, " ").trim().toLowerCase()));
         if (validTeams.has(tA) && validTeams.has(tB)) {
           return cat;
         }
@@ -249,33 +291,12 @@ function getMatchAssignedCategory(
         const drawnTeams = new Set<string>();
         for (const g of cachedDrawn) {
           for (const s of g.slots || []) {
-            if (s.team?.name) drawnTeams.add(s.team.name.trim().toLowerCase());
+            if (s.team?.name) drawnTeams.add(s.team.name.replace(/\s+/g, " ").trim().toLowerCase());
           }
         }
         if (drawnTeams.has(tA) && drawnTeams.has(tB)) {
           return cat;
         }
-      }
-    }
-  }
-
-  // 4. Direct Category ID / Slug / UUID match
-  if (m.categoryId) {
-    const cleanMatchCat = m.categoryId.trim().toLowerCase();
-    for (const cat of candidatePool) {
-      const cleanCatId = cat.id.trim().toLowerCase();
-      const cleanSlug = (cat as any).category_slug?.trim().toLowerCase();
-      const cleanUuid = (cat as any).uuid?.trim().toLowerCase();
-
-      if (
-        cleanMatchCat === cleanCatId ||
-        (cleanSlug && cleanMatchCat === cleanSlug) ||
-        (cleanUuid && cleanMatchCat === cleanUuid) ||
-        isSameCategory(m.categoryId, cat.id) ||
-        ((cat as any).uuid && isSameCategory(m.categoryId, (cat as any).uuid)) ||
-        ((cat as any).category_slug && isSameCategory(m.categoryId, (cat as any).category_slug))
-      ) {
-        return cat;
       }
     }
   }
@@ -419,14 +440,14 @@ function isMatchBelongsToCategory(
     let result = [...bracketMatches];
 
     if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase().trim();
+      const q = searchQuery.replace(/\s+/g, " ").toLowerCase().trim();
       result = result.filter((m) => {
-        const teamA = (m.teamAName || "").toLowerCase();
-        const teamB = (m.teamBName || "").toLowerCase();
+        const teamA = (m.teamAName || "").replace(/\s+/g, " ").toLowerCase();
+        const teamB = (m.teamBName || "").replace(/\s+/g, " ").toLowerCase();
         const stage = (m.stage || "").toLowerCase();
         const court = (m.court || "").toLowerCase();
-        const playersA = (m.teamAPlayers || []).join(" ").toLowerCase();
-        const playersB = (m.teamBPlayers || []).join(" ").toLowerCase();
+        const playersA = (m.teamAPlayers || []).join(" ").replace(/\s+/g, " ").toLowerCase();
+        const playersB = (m.teamBPlayers || []).join(" ").replace(/\s+/g, " ").toLowerCase();
         return (
           teamA.includes(q) ||
           teamB.includes(q) ||
@@ -565,7 +586,7 @@ function isMatchBelongsToCategory(
           </p>
         </div>
 
-        {/* Right side controls: Search bar & Clear History button */}
+        {/* Right side controls: Search bar, Sync & Clear History buttons */}
         <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full sm:w-auto">
           {/* Search bar */}
           <div className="relative w-full sm:w-64">
@@ -579,20 +600,35 @@ function isMatchBelongsToCategory(
             />
           </div>
 
-          {/* Clear Match History Button */}
-          <button
-            type="button"
-            onClick={() => {
-              setClearScope(selectedCategory !== "ALL" ? "selected" : "all");
-              setShowClearModal(true);
-            }}
-            disabled={allCompletedMatches.length === 0}
-            className="flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-semibold uppercase tracking-wider border border-brick/50 bg-brick/10 text-brick hover:bg-brick hover:text-sand transition-all rounded disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer shrink-0"
-            title="Clear recorded match history"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-            <span>Clear History</span>
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            {onRefresh && (
+              <button
+                type="button"
+                onClick={handleManualSync}
+                disabled={isSyncing}
+                className="flex flex-1 sm:flex-initial items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-semibold uppercase tracking-wider border border-pickle/50 bg-pickle/10 text-pickle hover:bg-pickle hover:text-sand transition-all rounded disabled:opacity-50 cursor-pointer shrink-0"
+                title="Sync match history with cloud database"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 ${isSyncing ? "animate-spin" : ""}`} />
+                <span>{isSyncing ? "Syncing" : "Sync"}</span>
+              </button>
+            )}
+
+            {/* Clear Match History Button */}
+            <button
+              type="button"
+              onClick={() => {
+                setClearScope(selectedCategory !== "ALL" ? "selected" : "all");
+                setShowClearModal(true);
+              }}
+              disabled={allCompletedMatches.length === 0}
+              className="flex flex-1 sm:flex-initial items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-semibold uppercase tracking-wider border border-brick/50 bg-brick/10 text-brick hover:bg-brick hover:text-sand transition-all rounded disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer shrink-0"
+              title="Clear recorded match history"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              <span>Clear History</span>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -776,21 +812,9 @@ function isMatchBelongsToCategory(
             const scoreB = m.score?.teamBScore ?? 0;
             const displayA = getMatchTeamDisplay(m.teamAName, m.teamAPlayers, "Team A");
             const displayB = getMatchTeamDisplay(m.teamBName, m.teamBPlayers, "Team B");
-            const winner = m.winnerTeam || (scoreA > scoreB ? (displayA.primary || m.teamAName) : scoreB > scoreA ? (displayB.primary || m.teamBName) : null);
-            const isAWinner = Boolean(
-              winner && (
-                winner.trim().toLowerCase() === (m.teamAName || "").trim().toLowerCase() ||
-                winner.trim().toLowerCase() === displayA.primary.trim().toLowerCase() ||
-                winner.trim().toLowerCase() === displayA.combined.trim().toLowerCase()
-              )
-            );
-            const isBWinner = Boolean(
-              winner && (
-                winner.trim().toLowerCase() === (m.teamBName || "").trim().toLowerCase() ||
-                winner.trim().toLowerCase() === displayB.primary.trim().toLowerCase() ||
-                winner.trim().toLowerCase() === displayB.combined.trim().toLowerCase()
-              )
-            );
+            const winnerSide = resolveMatchWinnerSide(m);
+            const isAWinner = winnerSide === "A";
+            const isBWinner = winnerSide === "B";
             const rallies = m.score?.rallies || [];
             const isRalliesExpanded = expandedRalliesMatchId === m.id;
 

@@ -1,7 +1,23 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
 import type { Team, Tournament, Category } from "@/data/tournaments";
 import { getDrawnGroups } from "./BracketDraw";
-import { getMatches, saveMatches, sanitizeCourtName, type LiveMatch, createPairMatchId, createCategoryScopedMatchId, findMatchForPair, markLocalMatchDeleted } from "@/lib/match-store";
+import {
+  useMatchStore,
+  getMatches,
+  saveMatches,
+  sanitizeCourtName,
+  type LiveMatch,
+  createPairMatchId,
+  createCategoryScopedMatchId,
+  findMatchForPair,
+  markLocalMatchDeleted,
+  markLocalMatchMutation,
+  createInitialScore,
+  getMatchTeamDisplay,
+  isGenericTeamName,
+  resolveMatchWinnerSide,
+} from "@/lib/match-store";
+import { getDispatchQueue, saveDispatchQueue } from "@/lib/court-dispatch";
 import {
   dbSaveMainDraw,
   dbDeleteMainDraw,
@@ -10,6 +26,7 @@ import {
   isSameCategory,
   isDrawResetMarked,
   dbDeleteMatchesBatch,
+  dbSaveMatch,
 } from "@/lib/supabase-service";
 
 export type BracketMatch = {
@@ -35,6 +52,8 @@ export type KnockoutMatch = {
   label: string;
   teamA?: Team | undefined;
   teamB?: Team | undefined;
+  manualTeamA?: boolean | undefined;
+  manualTeamB?: boolean | undefined;
   seedA?: string | undefined;
   seedB?: string | undefined;
   scoreA?: number | undefined;
@@ -213,21 +232,53 @@ export function getMainDrawMatches(slug: string, catId: string): KnockoutMatch[]
   }
 }
 
+function normalizePlayoffPlayers(players?: string[]): string {
+  return (players || [])
+    .flatMap((p) => String(p).split(/\s*[\/&]\s*/))
+    .map((p) => p.replace(/\s+/g, " ").trim().toLowerCase())
+    .filter((p) => Boolean(p) && !isGenericTeamName(p))
+    .sort()
+    .join("|");
+}
+
 function isSamePlayoffTeam(t1?: Team, t2?: Team): boolean {
   if (!t1 && !t2) return true;
   if (!t1 || !t2) return false;
   if (t1.id && t2.id && t1.id === t2.id) return true;
-  return t1.name.trim().toLowerCase() === t2.name.trim().toLowerCase();
+  const p1 = normalizePlayoffPlayers(t1.players);
+  const p2 = normalizePlayoffPlayers(t2.players);
+  if (p1 && p2) return p1 === p2;
+  const n1 = t1.name.replace(/\s+/g, " ").trim().toLowerCase();
+  const n2 = t2.name.replace(/\s+/g, " ").trim().toLowerCase();
+  if (!isGenericTeamName(n1) && !isGenericTeamName(n2)) {
+    return n1 === n2;
+  }
+  return false;
+}
+
+function isExactSamePlayoffTeam(t1?: Team, t2?: Team): boolean {
+  if (!isSamePlayoffTeam(t1, t2)) return false;
+  if (!t1 && !t2) return true;
+  if (!t1 || !t2) return false;
+  return (
+    t1.name === t2.name &&
+    (t1.club || "") === (t2.club || "") &&
+    JSON.stringify(t1.players || []) === JSON.stringify(t2.players || [])
+  );
 }
 
 /**
  * Executes automatic tournament bracket advancement rules across rounds:
  * Round of 16 -> Quarterfinals -> Semifinals -> Finals & Bronze
- * Supports dynamic linkages (feedWinnerTo / feedLoserTo) with automatic cascading and legacy fallback.
+ * Supports dynamic linkages (feedWinnerTo / feedLoserTo) with automatic cascading,
+ * while preserving any manually overridden slots (manualTeamA / manualTeamB).
  */
 export function advancePlayoffBracket(matches: KnockoutMatch[]): { updated: KnockoutMatch[]; hasChanges: boolean } {
   let hasChanges = false;
   let updated = matches.map((m) => ({ ...m }));
+
+  const isSlotManual = (target: KnockoutMatch, slot: "teamA" | "teamB") =>
+    slot === "teamA" ? Boolean(target.manualTeamA) : Boolean(target.manualTeamB);
 
   const hasMetadata = updated.some((m) => m.feedWinnerTo !== undefined);
 
@@ -243,44 +294,63 @@ export function advancePlayoffBracket(matches: KnockoutMatch[]): { updated: Knoc
           if (m.feedWinnerTo) {
             const targetIdx = updated.findIndex((x) => x.id === m.feedWinnerTo!.matchId);
             if (targetIdx !== -1) {
+              const target = updated[targetIdx]!;
               const slot = m.feedWinnerTo.slot;
-              if (!isSamePlayoffTeam(updated[targetIdx]![slot], m.winner)) {
-                updated[targetIdx] = {
-                  ...updated[targetIdx]!,
+              if (!isSlotManual(target, slot) && !isExactSamePlayoffTeam(target[slot], m.winner)) {
+                const identityChanged = !isSamePlayoffTeam(target[slot], m.winner);
+                const nextTarget: KnockoutMatch = {
+                  ...target,
                   [slot]: m.winner,
                 };
+                if (identityChanged && target[slot] !== undefined) {
+                  nextTarget.winner = undefined;
+                  nextTarget.scoreA = undefined;
+                  nextTarget.scoreB = undefined;
+                } else if (nextTarget.winner && isSamePlayoffTeam(nextTarget.winner, m.winner)) {
+                  nextTarget.winner = m.winner;
+                }
+                updated[targetIdx] = nextTarget;
                 passChanged = true;
                 hasChanges = true;
               }
             }
           }
           if (m.feedLoserTo && m.teamA && m.teamB) {
-            const isAWinner =
-              m.winner.id === m.teamA.id ||
-              m.winner.name.trim().toLowerCase() === m.teamA.name.trim().toLowerCase();
+            const isAWinner = isSamePlayoffTeam(m.winner, m.teamA);
             const loser = isAWinner ? m.teamB : m.teamA;
             const targetIdx = updated.findIndex((x) => x.id === m.feedLoserTo!.matchId);
             if (targetIdx !== -1 && loser) {
+              const target = updated[targetIdx]!;
               const slot = m.feedLoserTo.slot;
-              if (!isSamePlayoffTeam(updated[targetIdx]![slot], loser)) {
-                updated[targetIdx] = {
-                  ...updated[targetIdx]!,
+              if (!isSlotManual(target, slot) && !isExactSamePlayoffTeam(target[slot], loser)) {
+                const identityChanged = !isSamePlayoffTeam(target[slot], loser);
+                const nextTarget: KnockoutMatch = {
+                  ...target,
                   [slot]: loser,
                 };
+                if (identityChanged && target[slot] !== undefined) {
+                  nextTarget.winner = undefined;
+                  nextTarget.scoreA = undefined;
+                  nextTarget.scoreB = undefined;
+                } else if (nextTarget.winner && isSamePlayoffTeam(nextTarget.winner, loser)) {
+                  nextTarget.winner = loser;
+                }
+                updated[targetIdx] = nextTarget;
                 passChanged = true;
                 hasChanges = true;
               }
             }
           }
         } else {
-          // If a match score was reset and winner was removed, clear the downstream fed slot
+          // If a match score was reset and winner was removed, clear the downstream fed slot unless manually overridden
           if (m.feedWinnerTo) {
             const targetIdx = updated.findIndex((x) => x.id === m.feedWinnerTo!.matchId);
             if (targetIdx !== -1) {
+              const target = updated[targetIdx]!;
               const slot = m.feedWinnerTo.slot;
-              if (updated[targetIdx]![slot] !== undefined) {
+              if (!isSlotManual(target, slot) && target[slot] !== undefined) {
                 updated[targetIdx] = {
-                  ...updated[targetIdx]!,
+                  ...target,
                   [slot]: undefined,
                   winner: undefined,
                   scoreA: undefined,
@@ -294,10 +364,11 @@ export function advancePlayoffBracket(matches: KnockoutMatch[]): { updated: Knoc
           if (m.feedLoserTo) {
             const targetIdx = updated.findIndex((x) => x.id === m.feedLoserTo!.matchId);
             if (targetIdx !== -1) {
+              const target = updated[targetIdx]!;
               const slot = m.feedLoserTo.slot;
-              if (updated[targetIdx]![slot] !== undefined) {
+              if (!isSlotManual(target, slot) && target[slot] !== undefined) {
                 updated[targetIdx] = {
-                  ...updated[targetIdx]!,
+                  ...target,
                   [slot]: undefined,
                   winner: undefined,
                   scoreA: undefined,
@@ -313,7 +384,6 @@ export function advancePlayoffBracket(matches: KnockoutMatch[]): { updated: Knoc
     }
   } else {
     // Legacy fallback for brackets saved without feedWinnerTo metadata
-    // 1. Auto-advance R16 winners to Quarterfinals
     const r16Matches = updated.filter((m) => m.round === "Round of 16");
     if (r16Matches.length > 0) {
       const getWinner = (id: string) => updated.find((m) => m.id === id)?.winner;
@@ -322,19 +392,19 @@ export function advancePlayoffBracket(matches: KnockoutMatch[]): { updated: Knoc
         let teamA = m.teamA;
         let teamB = m.teamB;
         if (m.id === "md-qf-1") {
-          teamA = getWinner("md-r16-1") ?? m.teamA;
-          teamB = getWinner("md-r16-2") ?? m.teamB;
+          if (!m.manualTeamA) teamA = getWinner("md-r16-1") ?? m.teamA;
+          if (!m.manualTeamB) teamB = getWinner("md-r16-2") ?? m.teamB;
         } else if (m.id === "md-qf-2") {
-          teamA = getWinner("md-r16-3") ?? m.teamA;
-          teamB = getWinner("md-r16-4") ?? m.teamB;
+          if (!m.manualTeamA) teamA = getWinner("md-r16-3") ?? m.teamA;
+          if (!m.manualTeamB) teamB = getWinner("md-r16-4") ?? m.teamB;
         } else if (m.id === "md-qf-3") {
-          teamA = getWinner("md-r16-5") ?? m.teamA;
-          teamB = getWinner("md-r16-6") ?? m.teamB;
+          if (!m.manualTeamA) teamA = getWinner("md-r16-5") ?? m.teamA;
+          if (!m.manualTeamB) teamB = getWinner("md-r16-6") ?? m.teamB;
         } else if (m.id === "md-qf-4") {
-          teamA = getWinner("md-r16-7") ?? m.teamA;
-          teamB = getWinner("md-r16-8") ?? m.teamB;
+          if (!m.manualTeamA) teamA = getWinner("md-r16-7") ?? m.teamA;
+          if (!m.manualTeamB) teamB = getWinner("md-r16-8") ?? m.teamB;
         }
-        if (!isSamePlayoffTeam(teamA, m.teamA) || !isSamePlayoffTeam(teamB, m.teamB)) {
+        if (!isExactSamePlayoffTeam(teamA, m.teamA) || !isExactSamePlayoffTeam(teamB, m.teamB)) {
           hasChanges = true;
           return { ...m, teamA, teamB };
         }
@@ -342,7 +412,6 @@ export function advancePlayoffBracket(matches: KnockoutMatch[]): { updated: Knoc
       });
     }
 
-    // 2. Auto-advance QF winners to Semifinals
     const qfMatches = updated.filter((m) => m.round === "Quarterfinal");
     if (qfMatches.length > 0) {
       const qf1 = updated.find((m) => m.id === "md-qf-1");
@@ -354,13 +423,13 @@ export function advancePlayoffBracket(matches: KnockoutMatch[]): { updated: Knoc
         let teamA = m.teamA;
         let teamB = m.teamB;
         if (m.id === "md-sf-1") {
-          teamA = qf1?.winner ?? m.teamA;
-          teamB = qf2?.winner ?? m.teamB;
+          if (!m.manualTeamA) teamA = qf1?.winner ?? m.teamA;
+          if (!m.manualTeamB) teamB = qf2?.winner ?? m.teamB;
         } else if (m.id === "md-sf-2") {
-          teamA = qf3?.winner ?? m.teamA;
-          teamB = qf4?.winner ?? m.teamB;
+          if (!m.manualTeamA) teamA = qf3?.winner ?? m.teamA;
+          if (!m.manualTeamB) teamB = qf4?.winner ?? m.teamB;
         }
-        if (!isSamePlayoffTeam(teamA, m.teamA) || !isSamePlayoffTeam(teamB, m.teamB)) {
+        if (!isExactSamePlayoffTeam(teamA, m.teamA) || !isExactSamePlayoffTeam(teamB, m.teamB)) {
           hasChanges = true;
           return { ...m, teamA, teamB };
         }
@@ -368,15 +437,14 @@ export function advancePlayoffBracket(matches: KnockoutMatch[]): { updated: Knoc
       });
     }
 
-    // 3. Auto-advance SF winners to Final & losers to Bronze
     const sf1 = updated.find((m) => m.id === "md-sf-1");
     const sf2 = updated.find((m) => m.id === "md-sf-2");
 
     updated = updated.map((m) => {
       if (m.id === "md-final") {
-        const teamA = sf1?.winner ?? m.teamA;
-        const teamB = sf2?.winner ?? m.teamB;
-        if (!isSamePlayoffTeam(teamA, m.teamA) || !isSamePlayoffTeam(teamB, m.teamB)) {
+        const teamA = m.manualTeamA ? m.teamA : (sf1?.winner ?? m.teamA);
+        const teamB = m.manualTeamB ? m.teamB : (sf2?.winner ?? m.teamB);
+        if (!isExactSamePlayoffTeam(teamA, m.teamA) || !isExactSamePlayoffTeam(teamB, m.teamB)) {
           hasChanges = true;
           return { ...m, teamA, teamB };
         }
@@ -384,19 +452,15 @@ export function advancePlayoffBracket(matches: KnockoutMatch[]): { updated: Knoc
       if (m.id === "md-bronze") {
         let teamA = m.teamA;
         let teamB = m.teamB;
-        if (sf1?.winner && sf1.teamA && sf1.teamB) {
-          const isAWinner =
-            sf1.winner.id === sf1.teamA.id ||
-            sf1.winner.name.trim().toLowerCase() === sf1.teamA.name.trim().toLowerCase();
+        if (!m.manualTeamA && sf1?.winner && sf1.teamA && sf1.teamB) {
+          const isAWinner = isSamePlayoffTeam(sf1.winner, sf1.teamA);
           teamA = isAWinner ? sf1.teamB : sf1.teamA;
         }
-        if (sf2?.winner && sf2.teamA && sf2.teamB) {
-          const isAWinner =
-            sf2.winner.id === sf2.teamA.id ||
-            sf2.winner.name.trim().toLowerCase() === sf2.teamA.name.trim().toLowerCase();
+        if (!m.manualTeamB && sf2?.winner && sf2.teamA && sf2.teamB) {
+          const isAWinner = isSamePlayoffTeam(sf2.winner, sf2.teamA);
           teamB = isAWinner ? sf2.teamB : sf2.teamA;
         }
-        if (!isSamePlayoffTeam(teamA, m.teamA) || !isSamePlayoffTeam(teamB, m.teamB)) {
+        if (!isExactSamePlayoffTeam(teamA, m.teamA) || !isExactSamePlayoffTeam(teamB, m.teamB)) {
           hasChanges = true;
           return { ...m, teamA, teamB };
         }
@@ -424,33 +488,40 @@ export function syncMainDrawWithLiveMatches(
   const matches = liveMatches ?? getMatches();
   let modified = false;
 
+  const koScopedMatches = matches.filter((m) => {
+    if (tournamentSlug && m.tournamentSlug && m.tournamentSlug !== tournamentSlug) return false;
+    if (m.categoryId && !isSameCategory(m.categoryId, categoryId)) return false;
+    if (m.stage?.includes("Pool Play") || m.stage?.includes("Bracket ")) return false;
+    return true;
+  });
+
+  const claimedLiveIds = new Set<string>();
+
   const updatedMatches = currentDraw.map((km) => {
     if (!km.teamA || !km.teamB) return km;
 
-    const nameA = km.teamA.name.trim().toLowerCase();
-    const nameB = km.teamB.name.trim().toLowerCase();
+    const nameA = km.teamA.name.replace(/\s+/g, " ").trim().toLowerCase();
+    const nameB = km.teamB.name.replace(/\s+/g, " ").trim().toLowerCase();
+    const pA = normalizePlayoffPlayers(km.teamA.players);
+    const pB = normalizePlayoffPlayers(km.teamB.players);
 
-    // Find corresponding match in liveMatches strictly scoped to categoryId and knockout round
     const stage = `${km.round} - ${km.label}`;
-    const canonical = createPairMatchId(tournamentSlug, categoryId, stage, km.teamA.name, km.teamB.name);
-    const legacy = `live-ko-${tournamentSlug}-${categoryId}-${km.id}`;
+    const legacyId = `live-ko-${tournamentSlug}-${categoryId}-${km.id}`;
+    const canonicalId = createPairMatchId(
+      tournamentSlug,
+      categoryId,
+      stage,
+      km.teamA.name,
+      km.teamB.name,
+      km.teamA.players,
+      km.teamB.players,
+    );
 
+    const unclaimedKoMatches = koScopedMatches.filter((m) => !claimedLiveIds.has(m.id));
     const live =
-      matches.find((m) => {
-        if (tournamentSlug && m.tournamentSlug && m.tournamentSlug !== tournamentSlug) return false;
-        if (m.categoryId && !isSameCategory(m.categoryId, categoryId)) return false;
-        if (m.stage?.includes("Pool Play") || m.stage?.includes("Bracket ")) return false;
-        if (m.id === canonical || m.id === legacy) return true;
-        if (m.id === km.id && m.categoryId && isSameCategory(m.categoryId, categoryId)) return true;
-        return false;
-      }) ||
+      unclaimedKoMatches.find((m) => m.id === canonicalId || m.id === legacyId || m.id === km.id) ||
       findMatchForPair(
-        matches.filter(
-          (m) =>
-            !m.stage?.includes("Pool Play") &&
-            !m.stage?.includes("Bracket ") &&
-            (!m.categoryId || isSameCategory(m.categoryId, categoryId)),
-        ),
+        unclaimedKoMatches,
         km.teamA.name,
         km.teamB.name,
         tournamentSlug,
@@ -461,12 +532,28 @@ export function syncMainDrawWithLiveMatches(
       );
 
     if (!live) return km;
+    claimedLiveIds.add(live.id);
 
     let nextKm = { ...km };
 
-    // Sync score if available
-    const scoreA = live.teamAName?.trim().toLowerCase() === nameA ? live.score?.teamAScore : live.score?.teamBScore;
-    const scoreB = live.teamAName?.trim().toLowerCase() === nameA ? live.score?.teamBScore : live.score?.teamAScore;
+    // Determine side alignment using player rosters first so generic "n/a" team names never flip scores
+    const lpA = normalizePlayoffPlayers(live.teamAPlayers);
+    const lpB = normalizePlayoffPlayers(live.teamBPlayers);
+    const liveAName = (live.teamAName || "").replace(/\s+/g, " ").trim().toLowerCase();
+
+    let isSameOrder = true;
+    if (pA && lpA && (pA !== pB || lpA !== lpB)) {
+      if (pA === lpA || (pB && lpB && pB === lpB)) {
+        isSameOrder = true;
+      } else if (pA === lpB || (pB && pB === lpA)) {
+        isSameOrder = false;
+      }
+    } else if (nameA !== nameB) {
+      isSameOrder = liveAName !== nameB;
+    }
+
+    const scoreA = isSameOrder ? live.score?.teamAScore : live.score?.teamBScore;
+    const scoreB = isSameOrder ? live.score?.teamBScore : live.score?.teamAScore;
 
     if (scoreA !== undefined && scoreA !== nextKm.scoreA) {
       nextKm.scoreA = scoreA;
@@ -477,17 +564,29 @@ export function syncMainDrawWithLiveMatches(
       modified = true;
     }
 
-    // Determine winner
-    if (live.status === "final" || live.winnerTeam || (scoreA !== undefined && scoreB !== undefined && (scoreA >= 11 || scoreB >= 11) && Math.abs(scoreA - scoreB) >= 2)) {
+    // Determine winner accurately
+    const isFinished =
+      live.status === "final" ||
+      Boolean(live.winnerTeam) ||
+      (scoreA !== undefined &&
+        scoreB !== undefined &&
+        (scoreA >= 11 || scoreB >= 11) &&
+        Math.abs(scoreA - scoreB) >= 2);
+
+    if (isFinished) {
       let winningTeam: Team | undefined;
-      const winName = live.winnerTeam?.trim().toLowerCase();
-      if (winName) {
-        winningTeam = winName === nameA ? km.teamA : winName === nameB ? km.teamB : undefined;
-      } else if (scoreA !== undefined && scoreB !== undefined && scoreA !== scoreB) {
+      if (scoreA !== undefined && scoreB !== undefined && scoreA !== scoreB) {
         winningTeam = scoreA > scoreB ? km.teamA : km.teamB;
+      } else {
+        const liveSide = resolveMatchWinnerSide(live);
+        if (liveSide === "A") {
+          winningTeam = isSameOrder ? km.teamA : km.teamB;
+        } else if (liveSide === "B") {
+          winningTeam = isSameOrder ? km.teamB : km.teamA;
+        }
       }
 
-      if (winningTeam && (!nextKm.winner || !isSamePlayoffTeam(nextKm.winner, winningTeam))) {
+      if (winningTeam && (!nextKm.winner || !isExactSamePlayoffTeam(nextKm.winner, winningTeam))) {
         nextKm.winner = winningTeam;
         modified = true;
       }
@@ -510,8 +609,8 @@ export function syncMainDrawWithLiveMatches(
 }
 
 /**
- * Syncs generated playoff knockout matches to the live match store
- * so umpires can officiate them in the Umpire Console and admins can dispatch them.
+ * Syncs generated or manually edited playoff knockout matches to the live match store
+ * and dispatch queue so umpires, court dispatch, and spectators stay in real-time sync.
  */
 export function syncKnockoutToLiveMatches(
   tournamentSlug: string,
@@ -520,63 +619,193 @@ export function syncKnockoutToLiveMatches(
 ): void {
   const current = getMatches();
   const newMatches: LiveMatch[] = [];
+  const staleIdsToRemove = new Set<string>();
+
+  const isTargetDivisionKoMatch = (m: LiveMatch) => {
+    if (tournamentSlug && m.tournamentSlug && m.tournamentSlug !== tournamentSlug) return false;
+    if (m.categoryId && !isSameCategory(m.categoryId, categoryId)) return false;
+    if (!m.categoryId && !m.id.toLowerCase().includes(categoryId.toLowerCase())) return false;
+    if (m.stage?.includes("Pool Play") || m.stage?.includes("Bracket ")) return false;
+    return true;
+  };
+
+  let queueItems = getDispatchQueue();
+  let queueModified = false;
 
   for (const km of knockoutMatches) {
-    if (!km.teamA || !km.teamB) continue;
-    const teamA = km.teamA;
-    const teamB = km.teamB;
     const stage = `${km.round} - ${km.label}`;
     const legacyId = `live-ko-${tournamentSlug}-${categoryId}-${km.id}`;
-    const canonicalId = createPairMatchId(tournamentSlug, categoryId, stage, teamA.name, teamB.name);
+
+    const stageMatches = current.filter(
+      (m) =>
+        isTargetDivisionKoMatch(m) &&
+        (m.stage === stage || m.id === legacyId || m.id === km.id),
+    );
+
+    if (!km.teamA || !km.teamB) {
+      // Slot was cleared to TBD: remove any unplayed live match & queued item for this knockout stage
+      for (const sm of stageMatches) {
+        if (sm.status !== "final") {
+          staleIdsToRemove.add(sm.id);
+          markLocalMatchDeleted(sm.id);
+        }
+      }
+      const prevQueueLen = queueItems.length;
+      queueItems = queueItems.filter((q) => {
+        const sameScope =
+          (!tournamentSlug || q.tournamentSlug === tournamentSlug) &&
+          isSameCategory(q.categoryId, categoryId) &&
+          q.stage === stage &&
+          q.status !== "completed";
+        return !sameScope;
+      });
+      if (queueItems.length !== prevQueueLen) queueModified = true;
+      continue;
+    }
+
+    const teamA = km.teamA;
+    const teamB = km.teamB;
+    const canonicalId = createPairMatchId(
+      tournamentSlug,
+      categoryId,
+      stage,
+      teamA.name,
+      teamB.name,
+      teamA.players,
+      teamB.players,
+    );
     const cleanCourt = sanitizeCourtName(km.court);
 
-    // Look for existing match strictly within this category and knockout round (never Pool Play / Bracket)
-    const existing =
-      current.find((m) => {
-        if (tournamentSlug && m.tournamentSlug && m.tournamentSlug !== tournamentSlug) return false;
-        if (m.categoryId && !isSameCategory(m.categoryId, categoryId)) return false;
-        if (m.stage?.includes("Pool Play") || m.stage?.includes("Bracket ")) return false;
-        if (m.id === canonicalId || m.id === legacyId) return true;
-        if (m.id === km.id && m.categoryId && isSameCategory(m.categoryId, categoryId)) return true;
-        return false;
-      }) ||
-      findMatchForPair(
-        current.filter(
-          (m) =>
-            !m.stage?.includes("Pool Play") &&
-            !m.stage?.includes("Bracket ") &&
-            (!m.categoryId || isSameCategory(m.categoryId, categoryId)),
-        ),
-        teamA.name,
-        teamB.name,
-        tournamentSlug,
-        categoryId,
-        stage,
-        teamA.players,
-        teamB.players,
-      );
+    const exactPairMatch = findMatchForPair(
+      current.filter(isTargetDivisionKoMatch),
+      teamA.name,
+      teamB.name,
+      tournamentSlug,
+      categoryId,
+      stage,
+      teamA.players,
+      teamB.players,
+    );
 
-    const effectiveId = existing?.id || canonicalId;
+    const activeStageMatch = stageMatches.find((m) => m.status !== "final");
+    const resettableFinalStageMatch =
+      !km.winner && km.scoreA === undefined && km.scoreB === undefined
+        ? stageMatches.find((m) => m.status === "final")
+        : undefined;
+
+    const existing = exactPairMatch || activeStageMatch || resettableFinalStageMatch;
+
+    // Mark any extra duplicate records on this exact stage for removal
+    for (const sm of stageMatches) {
+      if (sm.id !== existing?.id && (sm.status !== "final" || (!km.winner && km.scoreA === undefined && km.scoreB === undefined))) {
+        staleIdsToRemove.add(sm.id);
+        markLocalMatchDeleted(sm.id);
+      }
+    }
+
+    const dispWinner = km.winner
+      ? getMatchTeamDisplay(km.winner.name, km.winner.players, km.winner.name).primary
+      : undefined;
 
     if (existing) {
-      newMatches.push({
+      const canUpgradeScheduledId =
+        existing.status === "scheduled" &&
+        (!existing.court || existing.court === "Queue") &&
+        !existing.id.startsWith("live-ko-") &&
+        !existing.id.startsWith("match_") &&
+        existing.id !== canonicalId;
+      if (canUpgradeScheduledId) {
+        staleIdsToRemove.add(existing.id);
+        markLocalMatchDeleted(existing.id);
+      }
+      const effectiveId = canUpgradeScheduledId ? canonicalId : existing.id;
+      const isPairUnchanged = Boolean(exactPairMatch && exactPairMatch.id === existing.id);
+      const shouldResetScore =
+        !isPairUnchanged || (!km.winner && km.scoreA === undefined && km.scoreB === undefined && existing.status === "final");
+
+      const nextStatus: LiveMatch["status"] = km.winner
+        ? "final"
+        : shouldResetScore
+          ? existing.court && existing.court !== "Queue" && existing.status === "live"
+            ? "live"
+            : "scheduled"
+          : existing.status;
+
+      const nextScore = shouldResetScore
+        ? {
+            ...createInitialScore(),
+            teamAScore: km.scoreA ?? 0,
+            teamBScore: km.scoreB ?? 0,
+          }
+        : {
+            ...(existing.score || createInitialScore()),
+            teamAScore: km.scoreA ?? existing.score?.teamAScore ?? 0,
+            teamBScore: km.scoreB ?? existing.score?.teamBScore ?? 0,
+          };
+
+      const updatedRecord: LiveMatch = {
         ...existing,
         id: effectiveId,
         court: sanitizeCourtName(existing.court),
         tournamentSlug: tournamentSlug || existing.tournamentSlug,
         categoryId: categoryId || existing.categoryId,
-        stage: existing.stage || stage,
-        winnerTeam: km.winner?.name || existing.winnerTeam,
-        status: km.winner ? "final" : existing.status,
+        stage,
+        teamAName: teamA.name,
+        teamAPlayers: teamA.players,
+        teamAClub: teamA.club || existing.teamAClub,
+        teamBName: teamB.name,
+        teamBPlayers: teamB.players,
+        teamBClub: teamB.club || existing.teamBClub,
+        score: nextScore,
+        winnerTeam: km.winner ? dispWinner : shouldResetScore ? undefined : existing.winnerTeam,
+        status: nextStatus,
+        endedAt: km.winner ? (existing.endedAt || Date.now()) : shouldResetScore ? undefined : existing.endedAt,
+      };
+
+      markLocalMatchMutation(effectiveId);
+      newMatches.push(updatedRecord);
+
+      // Update any matching dispatch queue item in place
+      queueItems = queueItems.map((q) => {
+        const matchesStageOrId =
+          q.status !== "completed" &&
+          (!tournamentSlug || q.tournamentSlug === tournamentSlug) &&
+          isSameCategory(q.categoryId, categoryId) &&
+          (q.matchId === effectiveId || q.matchId === legacyId || q.matchId === canonicalId || q.stage === stage);
+        if (!matchesStageOrId) return q;
+        if (
+          q.matchId === effectiveId &&
+          q.teamAName === teamA.name &&
+          q.teamBName === teamB.name &&
+          JSON.stringify(q.teamAPlayers) === JSON.stringify(teamA.players) &&
+          JSON.stringify(q.teamBPlayers) === JSON.stringify(teamB.players)
+        ) {
+          return q;
+        }
+        queueModified = true;
+        return {
+          ...q,
+          matchId: effectiveId,
+          stage,
+          teamAName: teamA.name,
+          teamAPlayers: teamA.players,
+          teamAClub: teamA.club,
+          teamBName: teamB.name,
+          teamBPlayers: teamB.players,
+          teamBClub: teamB.club,
+        };
       });
     } else {
-      newMatches.push({
+      const effectiveId = canonicalId;
+      const createdRecord: LiveMatch = {
         id: effectiveId,
         court: cleanCourt,
-        teamAName: km.teamA.name,
-        teamAPlayers: km.teamA.players,
-        teamBName: km.teamB.name,
-        teamBPlayers: km.teamB.players,
+        teamAName: teamA.name,
+        teamAPlayers: teamA.players,
+        teamAClub: teamA.club,
+        teamBName: teamB.name,
+        teamBPlayers: teamB.players,
+        teamBClub: teamB.club,
         status: km.winner ? "final" : (km.scoreA !== undefined || km.scoreB !== undefined) ? "live" : "scheduled",
         score: {
           teamAScore: km.scoreA ?? 0,
@@ -586,20 +815,50 @@ export function syncKnockoutToLiveMatches(
           activeServerBase: 1,
           rallies: [],
         },
-        winnerTeam: km.winner?.name,
+        winnerTeam: dispWinner,
         startedAt: undefined,
-        endedAt: undefined,
+        endedAt: km.winner ? Date.now() : undefined,
         officiatedBy: undefined,
         tournamentSlug,
         categoryId,
         stage,
+      };
+      markLocalMatchMutation(effectiveId);
+      newMatches.push(createdRecord);
+
+      queueItems = queueItems.map((q) => {
+        const matchesStage =
+          q.status !== "completed" &&
+          (!tournamentSlug || q.tournamentSlug === tournamentSlug) &&
+          isSameCategory(q.categoryId, categoryId) &&
+          q.stage === stage;
+        if (!matchesStage) return q;
+        queueModified = true;
+        return {
+          ...q,
+          matchId: effectiveId,
+          stage,
+          teamAName: teamA.name,
+          teamAPlayers: teamA.players,
+          teamAClub: teamA.club,
+          teamBName: teamB.name,
+          teamBPlayers: teamB.players,
+          teamBClub: teamB.club,
+        };
       });
     }
   }
 
   const updatedIds = new Set(newMatches.map((m) => m.id));
-  const retained = current.filter((m) => !updatedIds.has(m.id));
+  const retained = current.filter((m) => !updatedIds.has(m.id) && !staleIdsToRemove.has(m.id));
   saveMatches([...newMatches, ...retained], true, newMatches);
+
+  if (staleIdsToRemove.size > 0) {
+    dbDeleteMatchesBatch(Array.from(staleIdsToRemove)).catch(() => {});
+  }
+  if (queueModified) {
+    saveDispatchQueue(queueItems);
+  }
 }
 
 /* ─────────────────────────────────────────────
@@ -627,6 +886,7 @@ export function DrawsManager({
   setCategoryId,
   onSwitchToBracketDraw,
 }: DrawsManagerProps) {
+  const { matches: liveStoreMatches } = useMatchStore(tournamentSlug || undefined);
   const [stageView, setStageView] = useState<"round_robin" | "main_draw">("round_robin");
   const [syncNotice, setSyncNotice] = useState<string | null>(null);
 
@@ -651,12 +911,13 @@ export function DrawsManager({
     const drawn = getDrawnGroups(tournamentSlug, categoryId);
     if (!drawn || drawn.length === 0) return [];
 
+    const rosterById = new Map((category?.teams || []).map((t) => [t.id, t]));
     const liveMatches = getMatches();
     let courtCounter = 1;
 
     return drawn.map((dGrp) => {
       const teams = dGrp.slots
-        .map((s) => s.team)
+        .map((s) => (s.team ? (rosterById.get(s.team.id) ?? s.team) : null))
         .filter((t): t is Team => t !== null);
 
       const nameCounts = new Map<string, number>();
@@ -679,22 +940,17 @@ export function DrawsManager({
               : null;
           const bracketMatchId = scopedId || `bracket-${dGrp.letter}-m${i + 1}-${j + 1}`;
 
-          const liveMatch =
-            (scopedId
-              ? liveMatches.find(
-                  (m) => m.id === scopedId && (!m.categoryId || isSameCategory(m.categoryId, categoryId)),
-                )
-              : undefined) ||
-            findMatchForPair(
-              liveMatches,
-              teamA.name,
-              teamB.name,
-              tournamentSlug,
-              categoryId,
-              dGrp.letter,
-              teamA.players,
-              teamB.players,
-            );
+          const liveMatch = findMatchForPair(
+            liveMatches,
+            teamA.name,
+            teamB.name,
+            tournamentSlug,
+            categoryId,
+            dGrp.letter,
+            teamA.players,
+            teamB.players,
+            scopedId,
+          );
 
           let scoreA: number | undefined = undefined;
           let scoreB: number | undefined = undefined;
@@ -703,19 +959,36 @@ export function DrawsManager({
 
           if (liveMatch) {
             court = liveMatch.court;
-            const aNameLower = teamA.name.trim().toLowerCase();
-            const bNameLower = teamB.name.trim().toLowerCase();
-            const liveALower = (liveMatch.teamAName || "").trim().toLowerCase();
-            let isSameOrder = liveALower === aNameLower && aNameLower !== bNameLower;
-            if (aNameLower === bNameLower && teamA.players?.length && liveMatch.teamAPlayers?.length) {
-              const pA = [...teamA.players].map((p) => p.trim().toLowerCase()).sort().join(",");
-              const lpA = [...liveMatch.teamAPlayers].map((p) => p.trim().toLowerCase()).sort().join(",");
-              isSameOrder = pA === lpA;
-            } else if (liveALower === bNameLower && aNameLower !== bNameLower) {
-              isSameOrder = false;
+            const normP = (arr?: string[]) =>
+              (arr || [])
+                .flatMap((p) => String(p).split(/\s*[\/&]\s*/))
+                .map((p) => p.replace(/\s+/g, " ").trim().toLowerCase())
+                .filter(Boolean)
+                .sort()
+                .join("|");
+            const pA = normP(teamA.players);
+            const pB = normP(teamB.players);
+            const lpA = normP(liveMatch.teamAPlayers);
+            const lpB = normP(liveMatch.teamBPlayers);
+            const aNameLower = teamA.name.replace(/\s+/g, " ").trim().toLowerCase();
+            const bNameLower = teamB.name.replace(/\s+/g, " ").trim().toLowerCase();
+            const liveALower = (liveMatch.teamAName || "").replace(/\s+/g, " ").trim().toLowerCase();
+
+            let isSameOrder = true;
+            if (pA && lpA && (pA !== pB || lpA !== lpB)) {
+              if (pA === lpA || (pB && lpB && pB === lpB)) {
+                isSameOrder = true;
+              } else if (pA === lpB || (pB && pB === lpA)) {
+                isSameOrder = false;
+              }
+            } else if (aNameLower !== bNameLower) {
+              isSameOrder = liveALower !== bNameLower;
             }
 
-            if (liveMatch.status === "final") {
+            const isCompletedLive =
+              liveMatch.status === "final" || Boolean(liveMatch.winnerTeam) || Boolean(liveMatch.endedAt);
+
+            if (isCompletedLive) {
               status = "completed";
               if (isSameOrder) {
                 scoreA = liveMatch.score.teamAScore;
@@ -756,7 +1029,7 @@ export function DrawsManager({
         matches,
       };
     });
-  }, [tournamentSlug, categoryId]);
+  }, [tournamentSlug, categoryId, category?.teams]);
 
   // State for brackets and main draw
   const [brackets, setBrackets] = useState<BracketGroup[]>(() => initializeGroupsFromDrawn());
@@ -770,19 +1043,27 @@ export function DrawsManager({
 
   const syncFromStorage = useCallback(() => {
     const nextBrackets = initializeGroupsFromDrawn();
-    setBrackets(nextBrackets);
-    const hasCompletedPoolBracket =
-      nextBrackets.length === 0 ||
-      nextBrackets.some((b) => b.matches.length > 0 && b.matches.every((m) => m.status === "completed"));
-    if (!hasCompletedPoolBracket) {
-      const stale = getMainDrawMatches(tournamentSlug, categoryId);
-      if (stale && stale.length > 0) {
-        resetMainDrawMatches(tournamentSlug, categoryId);
-      }
-      setMainDrawMatches([]);
-      setMainDrawGenerated(false);
-      return;
-    }
+    setBrackets((prev) =>
+      nextBrackets.map((nb) => {
+        const prevGrp = prev.find((g) => g.id === nb.id);
+        if (!prevGrp) return nb;
+        return {
+          ...nb,
+          matches: nb.matches.map((nm) => {
+            const pm = prevGrp.matches.find((x) => x.id === nm.id);
+            if (
+              pm &&
+              pm.status === "in_progress" &&
+              nm.status === "scheduled" &&
+              (pm.scoreA !== undefined || pm.scoreB !== undefined)
+            ) {
+              return pm;
+            }
+            return nm;
+          }),
+        };
+      }),
+    );
     const existing = getMainDrawMatches(tournamentSlug, categoryId);
     if (existing && existing.length > 0) {
       setMainDrawMatches(existing);
@@ -793,10 +1074,12 @@ export function DrawsManager({
     }
   }, [initializeGroupsFromDrawn, tournamentSlug, categoryId]);
 
-  // Real-time synchronization across draw resets, score entries, and cross-tab actions
+  // Real-time synchronization across cloud updates, draw resets, score entries, and cross-tab actions
   useEffect(() => {
     syncFromStorage();
+  }, [syncFromStorage, liveStoreMatches]);
 
+  useEffect(() => {
     const handleSync = () => {
       syncFromStorage();
     };
@@ -804,12 +1087,14 @@ export function DrawsManager({
     window.addEventListener("dv_drawn_groups_updated", handleSync);
     window.addEventListener("dv_live_matches_updated", handleSync);
     window.addEventListener("dv_main_draw_updated", handleSync);
+    window.addEventListener("dv_tournaments_updated", handleSync);
     window.addEventListener("storage", handleSync);
 
     return () => {
       window.removeEventListener("dv_drawn_groups_updated", handleSync);
       window.removeEventListener("dv_live_matches_updated", handleSync);
       window.removeEventListener("dv_main_draw_updated", handleSync);
+      window.removeEventListener("dv_tournaments_updated", handleSync);
       window.removeEventListener("storage", handleSync);
     };
   }, [syncFromStorage]);
@@ -1032,6 +1317,144 @@ export function DrawsManager({
     );
   };
 
+  // Persist Pool Play score entry or reset directly to live match store & Supabase so Match History stays in sync
+  const persistPoolMatchScoreToStore = (
+    bracketId: string,
+    matchId: string,
+    scoreA: number | undefined,
+    scoreB: number | undefined,
+  ) => {
+    const grp = brackets.find((g) => g.id === bracketId);
+    const bm = grp?.matches.find((m) => m.id === matchId);
+    if (!grp || !bm) return;
+    const teamA = grp.teams.find((t) => t.id === bm.teamAId);
+    const teamB = grp.teams.find((t) => t.id === bm.teamBId);
+    if (!teamA || !teamB) return;
+
+    const letter = grp.name.replace("Bracket ", "").trim().toUpperCase();
+    const all = getMatches();
+    const scopedId =
+      teamA.id && teamB.id
+        ? createCategoryScopedMatchId(categoryId, letter, teamA.id, teamB.id)
+        : matchId;
+    const existing = findMatchForPair(
+      all,
+      teamA.name,
+      teamB.name,
+      tournamentSlug,
+      categoryId,
+      letter,
+      teamA.players,
+      teamB.players,
+      scopedId,
+    );
+
+    const normP = (arr?: string[]) =>
+      (arr || [])
+        .flatMap((p) => String(p).split(/\s*[\/&]\s*/))
+        .map((p) => p.replace(/\s+/g, " ").trim().toLowerCase())
+        .filter(Boolean)
+        .sort()
+        .join("|");
+
+    let isSameOrder = true;
+    if (existing) {
+      const pA = normP(teamA.players);
+      const pB = normP(teamB.players);
+      const lpA = normP(existing.teamAPlayers);
+      const lpB = normP(existing.teamBPlayers);
+      const aName = teamA.name.replace(/\s+/g, " ").trim().toLowerCase();
+      const bName = teamB.name.replace(/\s+/g, " ").trim().toLowerCase();
+      const liveA = (existing.teamAName || "").replace(/\s+/g, " ").trim().toLowerCase();
+
+      if (pA && lpA && (pA !== pB || lpA !== lpB)) {
+        if (pA === lpA || (pB && lpB && pB === lpB)) isSameOrder = true;
+        else if (pA === lpB || (pB && pB === lpA)) isSameOrder = false;
+      } else if (aName !== bName) {
+        isSameOrder = liveA !== bName;
+      }
+    }
+
+    const now = Date.now();
+
+    if (scoreA === undefined && scoreB === undefined) {
+      if (!existing) return;
+      const resetRecord: LiveMatch = {
+        ...existing,
+        status: "scheduled",
+        score: createInitialScore(),
+        winnerTeam: undefined,
+        startedAt: undefined,
+        endedAt: undefined,
+        resetAt: now,
+      };
+      markLocalMatchMutation(resetRecord.id);
+      const nextAll = all.map((m) => (m.id === resetRecord.id ? resetRecord : m));
+      saveMatches(nextAll, false);
+      dbSaveMatch(resetRecord).catch((err) => console.warn("[Supabase] Pool match reset failed:", err));
+      return;
+    }
+
+    if (scoreA === undefined || scoreB === undefined || scoreA === scoreB) return;
+
+    const dispA = getMatchTeamDisplay(teamA.name, teamA.players, teamA.name || "Team A");
+    const dispB = getMatchTeamDisplay(teamB.name, teamB.players, teamB.name || "Team B");
+    const winnerLabel = scoreA > scoreB ? dispA.primary : dispB.primary;
+
+    const storeScoreA = isSameOrder ? scoreA : scoreB;
+    const storeScoreB = isSameOrder ? scoreB : scoreA;
+    const targetId = existing?.id || scopedId;
+
+    const record: LiveMatch = existing
+      ? {
+          ...existing,
+          tournamentSlug: tournamentSlug || existing.tournamentSlug,
+          categoryId: categoryId || existing.categoryId,
+          stage: existing.stage || `Bracket ${letter} (Pool Play)`,
+          bracketLetter: existing.bracketLetter || letter,
+          status: "final",
+          score: {
+            ...(existing.score || createInitialScore()),
+            teamAScore: storeScoreA,
+            teamBScore: storeScoreB,
+          },
+          winnerTeam: winnerLabel,
+          startedAt: existing.startedAt || now,
+          endedAt: existing.endedAt || now,
+        }
+      : {
+          id: targetId,
+          tournamentSlug,
+          categoryId,
+          court: sanitizeCourtName(bm.court || "Queue"),
+          stage: `Bracket ${letter} (Pool Play)`,
+          bracketLetter: letter,
+          teamAName: teamA.name,
+          teamAPlayers: teamA.players,
+          teamAClub: teamA.club,
+          teamBName: teamB.name,
+          teamBPlayers: teamB.players,
+          teamBClub: teamB.club,
+          officiatedBy: "Tournament Desk",
+          status: "final",
+          score: {
+            ...createInitialScore(),
+            teamAScore: scoreA,
+            teamBScore: scoreB,
+          },
+          winnerTeam: winnerLabel,
+          startedAt: now,
+          endedAt: now,
+        };
+
+    markLocalMatchMutation(record.id);
+    const nextAll = existing
+      ? all.map((m) => (m.id === existing.id ? record : m))
+      : [...all, record];
+    saveMatches(nextAll, false);
+    dbSaveMatch(record).catch((err) => console.warn("[Supabase] Pool match save failed:", err));
+  };
+
   // Quick preset score
   const handleQuickScore = (
     bracketId: string,
@@ -1056,6 +1479,7 @@ export function DrawsManager({
         };
       }),
     );
+    persistPoolMatchScoreToStore(bracketId, matchId, scoreA, scoreB);
   };
 
   // Reset match score
@@ -1073,6 +1497,7 @@ export function DrawsManager({
         };
       }),
     );
+    persistPoolMatchScoreToStore(bracketId, matchId, undefined, undefined);
   };
 
   /* ─────────────────────────────────────────────────────────────
@@ -1478,6 +1903,592 @@ export function DrawsManager({
     setTimeout(() => setSyncNotice(null), 4000);
   };
 
+  /* ─────────────────────────────────────────────────────────────
+     Manual Knockout Stage Player Assignment & Editing
+  ───────────────────────────────────────────────────────────── */
+  const [editingKoSlot, setEditingKoSlot] = useState<{
+    matchId: string;
+    slot: "teamA" | "teamB";
+    matchLabel: string;
+    round: KnockoutMatch["round"];
+    initialTeamId: string;
+    selectedTeamId: string;
+    swapWithMatchSlot: boolean;
+    player1: string;
+    player2: string;
+    teamName: string;
+    club: string;
+    seedLabel: string;
+    keepScore: boolean;
+  } | null>(null);
+
+  const availableKnockoutTeams = useMemo(() => {
+    const items: Array<{ team: Team; sourceLabel: string; defaultSeed?: string | undefined }> = [];
+    const seenIds = new Set<string>();
+    const seenRosters = new Set<string>();
+
+    const registerItem = (team: Team, sourceLabel: string, defaultSeed?: string) => {
+      const rosterKey = `${normalizePlayoffPlayers(team.players)}::${team.name.trim().toLowerCase()}`;
+      if ((team.id && seenIds.has(team.id)) || (rosterKey !== "::" && seenRosters.has(rosterKey))) {
+        return;
+      }
+      if (team.id) seenIds.add(team.id);
+      seenRosters.add(rosterKey);
+      items.push({ team, sourceLabel, defaultSeed });
+    };
+
+    for (const q of qualifiers) {
+      const diffStr = q.pointDiff > 0 ? `+${q.pointDiff}` : `${q.pointDiff}`;
+      registerItem(
+        q.team,
+        `Seed #${q.overallSeed} (${q.bracketSeed}, ${q.won}W-${q.lost}L, ${diffStr})`,
+        `#${q.overallSeed} (${q.bracketSeed})`,
+      );
+    }
+
+    for (const b of allStandings) {
+      const letter = b.name.replace("Bracket ", "").trim();
+      for (const row of b.rows) {
+        registerItem(
+          row.team,
+          `${b.name} - Rank ${row.rank} (${row.won}W-${row.lost}L)`,
+          `${letter}${row.rank}`,
+        );
+      }
+    }
+
+    for (const t of category?.teams || []) {
+      registerItem(t, "Registered Pair");
+    }
+
+    return items;
+  }, [qualifiers, allStandings, category?.teams]);
+
+  const handleCreateCustomMainDraw = (slotSize: 2 | 4 | 8 | 16) => {
+    const seedPool: Array<{ team: Team; seedLabel: string }> =
+      qualifiers.length > 0
+        ? qualifiers.map((q) => ({
+            team: q.team,
+            seedLabel: `#${q.overallSeed} (${q.bracketSeed})`,
+          }))
+        : (category?.teams || []).map((t, idx) => ({
+            team: t,
+            seedLabel: `#${idx + 1}`,
+          }));
+
+    const pickSeed = (num: number) => seedPool[num - 1];
+    const matches: KnockoutMatch[] = [];
+
+    if (slotSize === 16) {
+      const r16Pairs: Array<[number, number, string, "teamA" | "teamB"]> = [
+        [1, 16, "md-qf-1", "teamA"],
+        [8, 9, "md-qf-1", "teamB"],
+        [4, 13, "md-qf-2", "teamA"],
+        [5, 12, "md-qf-2", "teamB"],
+        [2, 15, "md-qf-3", "teamA"],
+        [7, 10, "md-qf-3", "teamB"],
+        [3, 14, "md-qf-4", "teamA"],
+        [6, 11, "md-qf-4", "teamB"],
+      ];
+      r16Pairs.forEach(([sA, sB, targetQf, targetSlot], idx) => {
+        const entryA = pickSeed(sA);
+        const entryB = pickSeed(sB);
+        matches.push({
+          id: `md-r16-${idx + 1}`,
+          round: "Round of 16",
+          label: `Round of 16 - Match ${idx + 1}`,
+          court: idx < 4 ? `Court ${idx + 1}` : "Queue",
+          teamA: entryA?.team,
+          teamB: entryB?.team,
+          seedA: entryA?.seedLabel ?? `#${sA}`,
+          seedB: entryB?.seedLabel ?? `#${sB}`,
+          feedWinnerTo: { matchId: targetQf, slot: targetSlot },
+        });
+      });
+      matches.push(
+        {
+          id: "md-qf-1",
+          round: "Quarterfinal",
+          label: "Quarterfinal 1",
+          court: "Court 1",
+          seedA: "Winner of Round of 16 - Match 1",
+          seedB: "Winner of Round of 16 - Match 2",
+          feedWinnerTo: { matchId: "md-sf-1", slot: "teamA" },
+        },
+        {
+          id: "md-qf-2",
+          round: "Quarterfinal",
+          label: "Quarterfinal 2",
+          court: "Court 2",
+          seedA: "Winner of Round of 16 - Match 3",
+          seedB: "Winner of Round of 16 - Match 4",
+          feedWinnerTo: { matchId: "md-sf-1", slot: "teamB" },
+        },
+        {
+          id: "md-qf-3",
+          round: "Quarterfinal",
+          label: "Quarterfinal 3",
+          court: "Court 3",
+          seedA: "Winner of Round of 16 - Match 5",
+          seedB: "Winner of Round of 16 - Match 6",
+          feedWinnerTo: { matchId: "md-sf-2", slot: "teamA" },
+        },
+        {
+          id: "md-qf-4",
+          round: "Quarterfinal",
+          label: "Quarterfinal 4",
+          court: "Court 4",
+          seedA: "Winner of Round of 16 - Match 7",
+          seedB: "Winner of Round of 16 - Match 8",
+          feedWinnerTo: { matchId: "md-sf-2", slot: "teamB" },
+        },
+        {
+          id: "md-sf-1",
+          round: "Semifinal",
+          label: "Semifinal 1",
+          court: "Court 1",
+          seedA: "Winner of Quarterfinal 1",
+          seedB: "Winner of Quarterfinal 2",
+          feedWinnerTo: { matchId: "md-final", slot: "teamA" },
+          feedLoserTo: { matchId: "md-bronze", slot: "teamA" },
+        },
+        {
+          id: "md-sf-2",
+          round: "Semifinal",
+          label: "Semifinal 2",
+          court: "Court 2",
+          seedA: "Winner of Quarterfinal 3",
+          seedB: "Winner of Quarterfinal 4",
+          feedWinnerTo: { matchId: "md-final", slot: "teamB" },
+          feedLoserTo: { matchId: "md-bronze", slot: "teamB" },
+        },
+        {
+          id: "md-final",
+          round: "Final",
+          label: "Championship Final",
+          court: "Court 1",
+          seedA: "Winner of Semifinal 1",
+          seedB: "Winner of Semifinal 2",
+        },
+        {
+          id: "md-bronze",
+          round: "Bronze",
+          label: "3rd Place Match",
+          court: "Court 3",
+          seedA: "Runner-up of Semifinal 1",
+          seedB: "Runner-up of Semifinal 2",
+        },
+      );
+    } else if (slotSize === 8) {
+      const qfPairs: Array<[number, number, string, "teamA" | "teamB"]> = [
+        [1, 8, "md-sf-1", "teamA"],
+        [4, 5, "md-sf-1", "teamB"],
+        [2, 7, "md-sf-2", "teamA"],
+        [3, 6, "md-sf-2", "teamB"],
+      ];
+      qfPairs.forEach(([sA, sB, targetSf, targetSlot], idx) => {
+        const entryA = pickSeed(sA);
+        const entryB = pickSeed(sB);
+        matches.push({
+          id: `md-qf-${idx + 1}`,
+          round: "Quarterfinal",
+          label: `Quarterfinal ${idx + 1}`,
+          court: `Court ${idx + 1}`,
+          teamA: entryA?.team,
+          teamB: entryB?.team,
+          seedA: entryA?.seedLabel ?? `#${sA}`,
+          seedB: entryB?.seedLabel ?? `#${sB}`,
+          feedWinnerTo: { matchId: targetSf, slot: targetSlot },
+        });
+      });
+      matches.push(
+        {
+          id: "md-sf-1",
+          round: "Semifinal",
+          label: "Semifinal 1",
+          court: "Court 1",
+          seedA: "Winner of Quarterfinal 1",
+          seedB: "Winner of Quarterfinal 2",
+          feedWinnerTo: { matchId: "md-final", slot: "teamA" },
+          feedLoserTo: { matchId: "md-bronze", slot: "teamA" },
+        },
+        {
+          id: "md-sf-2",
+          round: "Semifinal",
+          label: "Semifinal 2",
+          court: "Court 2",
+          seedA: "Winner of Quarterfinal 3",
+          seedB: "Winner of Quarterfinal 4",
+          feedWinnerTo: { matchId: "md-final", slot: "teamB" },
+          feedLoserTo: { matchId: "md-bronze", slot: "teamB" },
+        },
+        {
+          id: "md-final",
+          round: "Final",
+          label: "Championship Final",
+          court: "Court 1",
+          seedA: "Winner of Semifinal 1",
+          seedB: "Winner of Semifinal 2",
+        },
+        {
+          id: "md-bronze",
+          round: "Bronze",
+          label: "3rd Place Match",
+          court: "Court 3",
+          seedA: "Runner-up of Semifinal 1",
+          seedB: "Runner-up of Semifinal 2",
+        },
+      );
+    } else if (slotSize === 4) {
+      const s1 = pickSeed(1);
+      const s2 = pickSeed(2);
+      const s3 = pickSeed(3);
+      const s4 = pickSeed(4);
+      matches.push(
+        {
+          id: "md-sf-1",
+          round: "Semifinal",
+          label: "Semifinal 1",
+          court: "Court 1",
+          teamA: s1?.team,
+          teamB: s4?.team,
+          seedA: s1?.seedLabel ?? "#1",
+          seedB: s4?.seedLabel ?? "#4",
+          feedWinnerTo: { matchId: "md-final", slot: "teamA" },
+          feedLoserTo: { matchId: "md-bronze", slot: "teamA" },
+        },
+        {
+          id: "md-sf-2",
+          round: "Semifinal",
+          label: "Semifinal 2",
+          court: "Court 2",
+          teamA: s2?.team,
+          teamB: s3?.team,
+          seedA: s2?.seedLabel ?? "#2",
+          seedB: s3?.seedLabel ?? "#3",
+          feedWinnerTo: { matchId: "md-final", slot: "teamB" },
+          feedLoserTo: { matchId: "md-bronze", slot: "teamB" },
+        },
+        {
+          id: "md-bronze",
+          round: "Bronze",
+          label: "3rd Place Match",
+          court: "Court 3",
+          seedA: "Runner-up of Semifinal 1",
+          seedB: "Runner-up of Semifinal 2",
+        },
+        {
+          id: "md-final",
+          round: "Final",
+          label: "Championship Final",
+          court: "Court 1",
+          seedA: "Winner of Semifinal 1",
+          seedB: "Winner of Semifinal 2",
+        },
+      );
+    } else {
+      const s1 = pickSeed(1);
+      const s2 = pickSeed(2);
+      matches.push({
+        id: "md-final",
+        round: "Final",
+        label: "Championship Final",
+        court: "Court 1",
+        teamA: s1?.team,
+        teamB: s2?.team,
+        seedA: s1?.seedLabel ?? "#1",
+        seedB: s2?.seedLabel ?? "#2",
+      });
+    }
+
+    setMainDrawMatches(matches);
+    saveMainDrawMatches(tournamentSlug, categoryId, matches);
+    syncKnockoutToLiveMatches(tournamentSlug, categoryId, matches);
+    setMainDrawGenerated(true);
+    setStageView("main_draw");
+    setSyncNotice(`Initialized ${slotSize}-slot Knockout Bracket. Click EDIT or ASSIGN on any match slot to customize players.`);
+    setTimeout(() => setSyncNotice(null), 4000);
+  };
+
+  const handleOpenEditKoSlot = (match: KnockoutMatch, slot: "teamA" | "teamB") => {
+    const currentTeam = slot === "teamA" ? match.teamA : match.teamB;
+    const currentSeed = slot === "teamA" ? match.seedA : match.seedB;
+    const rawPlayers = (currentTeam?.players || [])
+      .flatMap((p) => String(p).split(/\s*[\/&]\s*/))
+      .map((p) => p.trim())
+      .filter(Boolean);
+
+    const matchedOption = currentTeam
+      ? availableKnockoutTeams.find((opt) => isSamePlayoffTeam(opt.team, currentTeam))
+      : undefined;
+
+    setEditingKoSlot({
+      matchId: match.id,
+      slot,
+      matchLabel: match.label,
+      round: match.round,
+      initialTeamId: currentTeam?.id || "",
+      selectedTeamId: matchedOption?.team.id ?? (currentTeam ? "__custom__" : ""),
+      swapWithMatchSlot: true,
+      player1: rawPlayers[0] ?? "",
+      player2: rawPlayers[1] ?? "",
+      teamName: currentTeam?.name ?? "",
+      club: currentTeam?.club ?? "",
+      seedLabel: currentSeed ?? "",
+      keepScore: Boolean(match.scoreA !== undefined || match.scoreB !== undefined),
+    });
+  };
+
+  const handleSelectQuickKoTeam = (selectedId: string) => {
+    if (!editingKoSlot) return;
+    if (!selectedId || selectedId === "__custom__") {
+      setEditingKoSlot({
+        ...editingKoSlot,
+        selectedTeamId: selectedId,
+      });
+      return;
+    }
+
+    const found = availableKnockoutTeams.find((opt) => opt.team.id === selectedId);
+    if (!found) return;
+
+    const splitPlayers = (found.team.players || [])
+      .flatMap((p) => String(p).split(/\s*[\/&]\s*/))
+      .map((p) => p.trim())
+      .filter(Boolean);
+
+    const isSameAsInitial = editingKoSlot.initialTeamId === found.team.id;
+
+    setEditingKoSlot({
+      ...editingKoSlot,
+      selectedTeamId: found.team.id,
+      player1: splitPlayers[0] ?? "",
+      player2: splitPlayers[1] ?? "",
+      teamName: found.team.name,
+      club: found.team.club || "",
+      seedLabel: found.defaultSeed || editingKoSlot.seedLabel,
+      keepScore: isSameAsInitial ? editingKoSlot.keepScore : false,
+    });
+  };
+
+  const handleSaveKoSlot = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingKoSlot) return;
+
+    const p1 = editingKoSlot.player1.replace(/\s+/g, " ").trim();
+    const p2 = editingKoSlot.player2.replace(/\s+/g, " ").trim();
+    const rawTeamName = editingKoSlot.teamName.replace(/\s+/g, " ").trim();
+    const cleanClub = editingKoSlot.club.replace(/\s+/g, " ").trim();
+    const cleanSeed = editingKoSlot.seedLabel.replace(/\s+/g, " ").trim();
+
+    if (!p1 && !p2 && !rawTeamName) {
+      handleClearKoSlot(editingKoSlot.matchId, editingKoSlot.slot);
+      return;
+    }
+
+    const nextPlayers = [p1, p2].filter(Boolean);
+    const effectiveTeamName = rawTeamName || (nextPlayers.length > 0 ? "n/a" : "Team");
+
+    // Resolve the cleanest Team ID: match known roster pair if players match, otherwise avoid colliding with an unrelated ID
+    const enteredNormPlayers = normalizePlayoffPlayers(nextPlayers);
+    const matchedByRoster = enteredNormPlayers
+      ? availableKnockoutTeams.find((opt) => normalizePlayoffPlayers(opt.team.players) === enteredNormPlayers)
+      : undefined;
+    const selectedOption =
+      editingKoSlot.selectedTeamId && editingKoSlot.selectedTeamId !== "__custom__"
+        ? availableKnockoutTeams.find((opt) => opt.team.id === editingKoSlot.selectedTeamId)
+        : undefined;
+
+    let resolvedTeamId = `ko-manual-${editingKoSlot.matchId}-${editingKoSlot.slot}-${Date.now()}`;
+    if (matchedByRoster?.team.id) {
+      resolvedTeamId = matchedByRoster.team.id;
+    } else if (selectedOption?.team.id) {
+      const optPlayers = (selectedOption.team.players || [])
+        .flatMap((p) => String(p).split(/\s*[\/&]\s*/))
+        .map((p) => p.replace(/\s+/g, " ").trim().toLowerCase())
+        .filter(Boolean);
+      const sharesAnyPlayer =
+        nextPlayers.length === 0 ||
+        optPlayers.length === 0 ||
+        nextPlayers.some((np) => optPlayers.includes(np.toLowerCase()));
+      if (sharesAnyPlayer) {
+        resolvedTeamId = selectedOption.team.id;
+      }
+    }
+
+    const nextTeam: Team = {
+      id: resolvedTeamId,
+      name: effectiveTeamName,
+      players: nextPlayers.length > 0 ? nextPlayers : [effectiveTeamName],
+      club: cleanClub,
+    };
+
+    setMainDrawMatches((prev) => {
+      const targetMatch = prev.find((m) => m.id === editingKoSlot.matchId);
+      if (!targetMatch) return prev;
+
+      const prevTeamInTarget =
+        editingKoSlot.slot === "teamA" ? targetMatch.teamA : targetMatch.teamB;
+      const prevSeedInTarget =
+        editingKoSlot.slot === "teamA" ? targetMatch.seedA : targetMatch.seedB;
+
+      // Locate if nextTeam already occupies another slot (preferring same round) for optional swap
+      let swapSource: { matchId: string; slot: "teamA" | "teamB" } | null = null;
+      if (editingKoSlot.swapWithMatchSlot) {
+        const sameRoundOther = prev.find(
+          (m) =>
+            m.round === editingKoSlot.round &&
+            ((!(m.id === editingKoSlot.matchId && editingKoSlot.slot === "teamA") &&
+              m.teamA &&
+              isSamePlayoffTeam(m.teamA, nextTeam)) ||
+              (!(m.id === editingKoSlot.matchId && editingKoSlot.slot === "teamB") &&
+                m.teamB &&
+                isSamePlayoffTeam(m.teamB, nextTeam))),
+        );
+        if (sameRoundOther) {
+          if (
+            !(sameRoundOther.id === editingKoSlot.matchId && editingKoSlot.slot === "teamA") &&
+            sameRoundOther.teamA &&
+            isSamePlayoffTeam(sameRoundOther.teamA, nextTeam)
+          ) {
+            swapSource = { matchId: sameRoundOther.id, slot: "teamA" };
+          } else if (
+            !(sameRoundOther.id === editingKoSlot.matchId && editingKoSlot.slot === "teamB") &&
+            sameRoundOther.teamB &&
+            isSamePlayoffTeam(sameRoundOther.teamB, nextTeam)
+          ) {
+            swapSource = { matchId: sameRoundOther.id, slot: "teamB" };
+          }
+        }
+      }
+
+      const updated = prev.map((m) => {
+        let nextM: KnockoutMatch = { ...m };
+        let touched = false;
+
+        if (m.id === editingKoSlot.matchId) {
+          touched = true;
+          if (editingKoSlot.slot === "teamA") {
+            nextM.teamA = nextTeam;
+            nextM.manualTeamA = true;
+            nextM.seedA = cleanSeed || undefined;
+          } else {
+            nextM.teamB = nextTeam;
+            nextM.manualTeamB = true;
+            nextM.seedB = cleanSeed || undefined;
+          }
+        }
+
+        if (swapSource && m.id === swapSource.matchId) {
+          touched = true;
+          if (swapSource.slot === "teamA") {
+            nextM.teamA = prevTeamInTarget;
+            nextM.manualTeamA = Boolean(prevTeamInTarget);
+            if (prevSeedInTarget) nextM.seedA = prevSeedInTarget;
+          } else {
+            nextM.teamB = prevTeamInTarget;
+            nextM.manualTeamB = Boolean(prevTeamInTarget);
+            if (prevSeedInTarget) nextM.seedB = prevSeedInTarget;
+          }
+        }
+
+        if (touched) {
+          const preserveScores =
+            m.id === editingKoSlot.matchId &&
+            editingKoSlot.keepScore &&
+            !(swapSource && swapSource.matchId === m.id);
+          if (!preserveScores) {
+            delete nextM.scoreA;
+            delete nextM.scoreB;
+            delete nextM.winner;
+          } else if (nextM.scoreA !== undefined && nextM.scoreB !== undefined) {
+            if (nextM.scoreA > nextM.scoreB && nextM.teamA) {
+              nextM.winner = nextM.teamA;
+            } else if (nextM.scoreB > nextM.scoreA && nextM.teamB) {
+              nextM.winner = nextM.teamB;
+            } else {
+              delete nextM.winner;
+            }
+          }
+        }
+
+        return nextM;
+      });
+
+      const { updated: advanced } = advancePlayoffBracket(updated);
+      saveMainDrawMatches(tournamentSlug, categoryId, advanced);
+      syncKnockoutToLiveMatches(tournamentSlug, categoryId, advanced);
+      return advanced;
+    });
+
+    setEditingKoSlot(null);
+    setSyncNotice("Knockout stage players updated and synced to Live Courts.");
+    setTimeout(() => setSyncNotice(null), 4000);
+  };
+
+  const handleClearKoSlot = (matchId: string, slot: "teamA" | "teamB") => {
+    setMainDrawMatches((prev) => {
+      const updated = prev.map((m) => {
+        if (m.id !== matchId) return m;
+        const nextM: KnockoutMatch = { ...m };
+        if (slot === "teamA") {
+          delete nextM.teamA;
+          nextM.manualTeamA = false;
+        } else {
+          delete nextM.teamB;
+          nextM.manualTeamB = false;
+        }
+        delete nextM.scoreA;
+        delete nextM.scoreB;
+        delete nextM.winner;
+        return nextM;
+      });
+
+      const { updated: advanced } = advancePlayoffBracket(updated);
+      saveMainDrawMatches(tournamentSlug, categoryId, advanced);
+      syncKnockoutToLiveMatches(tournamentSlug, categoryId, advanced);
+      return advanced;
+    });
+
+    setEditingKoSlot(null);
+    setSyncNotice("Knockout slot reset to TBD / Auto Feeder.");
+    setTimeout(() => setSyncNotice(null), 4000);
+  };
+
+  const handleSwapKoMatchSides = (matchId: string) => {
+    setMainDrawMatches((prev) => {
+      const updated = prev.map((m) => {
+        if (m.id !== matchId) return m;
+        const nextM: KnockoutMatch = {
+          ...m,
+          teamA: m.teamB,
+          teamB: m.teamA,
+          manualTeamA: m.teamB ? true : Boolean(m.manualTeamB),
+          manualTeamB: m.teamA ? true : Boolean(m.manualTeamA),
+          seedA: m.seedB,
+          seedB: m.seedA,
+          scoreA: m.scoreB,
+          scoreB: m.scoreA,
+        };
+        if (nextM.scoreA !== undefined && nextM.scoreB !== undefined) {
+          if (nextM.scoreA > nextM.scoreB && nextM.teamA) {
+            nextM.winner = nextM.teamA;
+          } else if (nextM.scoreB > nextM.scoreA && nextM.teamB) {
+            nextM.winner = nextM.teamB;
+          } else {
+            delete nextM.winner;
+          }
+        }
+        return nextM;
+      });
+
+      const { updated: advanced } = advancePlayoffBracket(updated);
+      saveMainDrawMatches(tournamentSlug, categoryId, advanced);
+      syncKnockoutToLiveMatches(tournamentSlug, categoryId, advanced);
+      return advanced;
+    });
+  };
+
   // Update Main Draw match score and advance winners
   const handleMainDrawScoreChange = (
     matchId: string,
@@ -1581,9 +2592,9 @@ export function DrawsManager({
         </div>
       )}
 
-      {/* ── Empty State if no brackets drawn yet ── */}
-      {brackets.length === 0 ? (
-        <div className="surface-card p-12 text-center space-y-4 border-2 border-pickle/40 my-8">
+      {/* ── Empty State if no brackets drawn yet and no direct knockout draw created ── */}
+      {brackets.length === 0 && !mainDrawGenerated ? (
+        <div className="surface-card p-8 sm:p-12 text-center space-y-5 border-2 border-pickle/40 my-8">
           <span className="block text-xs uppercase tracking-[0.28em] font-bold text-pickle">
             Brackets Pending
           </span>
@@ -1591,16 +2602,35 @@ export function DrawsManager({
             No Brackets Generated Yet
           </h3>
           <p className="text-sm text-muted-foreground max-w-md mx-auto">
-            The official brackets for <strong>{category.label}</strong> have not been drawn yet. Launch the <strong>Bracket Draw (MAIN)</strong> ceremony to perform the randomized team draw.
+            The official brackets for <strong>{category.label}</strong> have not been drawn yet. Launch the <strong>Bracket Draw (MAIN)</strong> ceremony for pool play, or create a direct Knockout Stage bracket to assign players manually.
           </p>
-          {onSwitchToBracketDraw && (
-            <button
-              onClick={onSwitchToBracketDraw}
-              className="px-6 py-3.5 bg-brick text-sand font-display text-xl tracking-widest hover:bg-brick-deep transition-all cursor-pointer shadow-lg inline-flex items-center gap-2"
-            >
-              <span>Launch Bracket Draw (MAIN) &rarr;</span>
-            </button>
-          )}
+          <div className="flex flex-wrap items-center justify-center gap-3 pt-1">
+            {onSwitchToBracketDraw && (
+              <button
+                onClick={onSwitchToBracketDraw}
+                className="px-6 py-3.5 bg-brick text-sand font-display text-xl tracking-widest hover:bg-brick-deep transition-all cursor-pointer shadow-lg inline-flex items-center gap-2"
+              >
+                <span>Launch Bracket Draw (MAIN) &rarr;</span>
+              </button>
+            )}
+          </div>
+          <div className="pt-3 border-t border-border/60 max-w-md mx-auto space-y-2">
+            <span className="block text-[0.65rem] font-mono font-bold uppercase tracking-widest text-muted-foreground">
+              Or Initialize Manual Knockout Stage Directly
+            </span>
+            <div className="flex flex-wrap items-center justify-center gap-2">
+              {([4, 8, 16] as const).map((sz) => (
+                <button
+                  key={sz}
+                  type="button"
+                  onClick={() => handleCreateCustomMainDraw(sz)}
+                  className="border border-border bg-charcoal px-3.5 py-2 text-xs font-bold uppercase tracking-widest text-sand hover:border-pickle hover:text-pickle transition-colors rounded cursor-pointer"
+                >
+                  {sz}-Pair Knockout
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
       ) : (
         <>
@@ -1749,11 +2779,11 @@ export function DrawsManager({
                   ) : (
                     <button
                       onClick={handleGenerateMainDraw}
-                      disabled={completedMatchesCount === 0}
+                      disabled={qualifiers.length < 2}
                       className={`px-5 py-2.5 text-xs font-bold uppercase tracking-widest transition-all rounded ${
                         isRoundRobinFinished
                           ? "bg-pickle text-white animate-pulse hover:opacity-90 cursor-pointer shadow-lg font-bold"
-                          : completedMatchesCount > 0
+                          : qualifiers.length >= 2
                             ? "bg-brick text-white hover:bg-brick-deep cursor-pointer font-bold"
                             : "border-2 border-border bg-card text-foreground/40 cursor-not-allowed font-bold"
                       }`}
@@ -1771,7 +2801,7 @@ export function DrawsManager({
                     Tournament Champion
                   </span>
                   <h4 className="font-display text-4xl text-foreground font-bold">
-                    {q0.team.name}
+                    {getMatchTeamDisplay(q0.team.name, q0.team.players, q0.team.name).primary}
                   </h4>
                   <p className="text-xs text-muted-foreground">
                     {q0.team.players.join(" & ")} &bull; Official Division Champion (Point Differential: {q0.pointDiff > 0 ? `+${q0.pointDiff}` : q0.pointDiff})
@@ -1779,17 +2809,17 @@ export function DrawsManager({
                   <div className="pt-3 grid grid-cols-1 sm:grid-cols-3 gap-2 border-t border-pickle/30 text-xs max-w-xl mx-auto">
                     <div className="bg-amber-400/20 border border-amber-400/50 p-2.5 rounded text-center">
                       <span className="font-mono text-[0.65rem] font-black uppercase text-amber-500 block">1st Place / Gold</span>
-                      <span className="font-bold text-foreground truncate block mt-0.5">{q0.team.name}</span>
+                      <span className="font-bold text-foreground truncate block mt-0.5">{getMatchTeamDisplay(q0.team.name, q0.team.players, q0.team.name).primary}</span>
                       <span className="font-mono text-[0.65rem] text-muted-foreground mt-0.5 block">{q0.won}W - {q0.lost}L ({q0.pointDiff > 0 ? "+" : ""}{q0.pointDiff} diff)</span>
                     </div>
                     <div className="bg-slate-300/20 border border-slate-300/50 p-2.5 rounded text-center">
                       <span className="font-mono text-[0.65rem] font-black uppercase text-slate-400 block">2nd Place / Silver</span>
-                      <span className="font-bold text-foreground truncate block mt-0.5">{q1.team.name}</span>
+                      <span className="font-bold text-foreground truncate block mt-0.5">{getMatchTeamDisplay(q1.team.name, q1.team.players, q1.team.name).primary}</span>
                       <span className="font-mono text-[0.65rem] text-muted-foreground mt-0.5 block">{q1.won}W - {q1.lost}L ({q1.pointDiff > 0 ? "+" : ""}{q1.pointDiff} diff)</span>
                     </div>
                     <div className="bg-amber-700/20 border border-amber-700/50 p-2.5 rounded text-center">
                       <span className="font-mono text-[0.65rem] font-black uppercase text-amber-600 block">3rd Place / Bronze</span>
-                      <span className="font-bold text-foreground truncate block mt-0.5">{q2.team.name}</span>
+                      <span className="font-bold text-foreground truncate block mt-0.5">{getMatchTeamDisplay(q2.team.name, q2.team.players, q2.team.name).primary}</span>
                       <span className="font-mono text-[0.65rem] text-muted-foreground mt-0.5 block">{q2.won}W - {q2.lost}L ({q2.pointDiff > 0 ? "+" : ""}{q2.pointDiff} diff)</span>
                     </div>
                   </div>
@@ -1857,20 +2887,29 @@ export function DrawsManager({
                                     {row.rank}
                                   </td>
                                   <td className="py-2 px-2">
-                                    <div className="font-semibold text-foreground truncate max-w-[140px] sm:max-w-[180px]">
-                                      {row.team.name}
-                                    </div>
-                                    <div className="flex items-center gap-1.5 text-[0.65rem] text-muted-foreground truncate mt-0.5">
-                                      <span className="truncate">{row.team.players.join(" & ")}</span>
-                                      {row.team.club && (
+                                    {(() => {
+                                      const disp = getMatchTeamDisplay(row.team.name, row.team.players, row.team.name);
+                                      return (
                                         <>
-                                          <span className="text-muted-foreground/40 shrink-0">•</span>
-                                          <span className="text-[0.6rem] px-1.5 py-0.2 rounded bg-charcoal/40 text-sand/80 border border-border/60 shrink-0 font-medium">
-                                            {row.team.club}
-                                          </span>
+                                          <div className="font-semibold text-foreground truncate max-w-[140px] sm:max-w-[180px]">
+                                            {disp.primary}
+                                          </div>
+                                          <div className="flex items-center gap-1.5 text-[0.65rem] text-muted-foreground truncate mt-0.5">
+                                            <span className="truncate">
+                                              {disp.secondary ?? `Team: ${row.team.name}`}
+                                            </span>
+                                            {row.team.club && (
+                                              <>
+                                                <span className="text-muted-foreground/40 shrink-0">•</span>
+                                                <span className="text-[0.6rem] px-1.5 py-0.2 rounded bg-charcoal/40 text-sand/80 border border-border/60 shrink-0 font-medium">
+                                                  {row.team.club}
+                                                </span>
+                                              </>
+                                            )}
+                                          </div>
                                         </>
-                                      )}
-                                    </div>
+                                      );
+                                    })()}
                                   </td>
                                   <td className="py-2 px-1 text-center">{row.played}</td>
                                   <td className="py-2 px-1 text-center text-pickle font-bold">
@@ -1922,20 +2961,29 @@ export function DrawsManager({
                                     {row.rank}
                                   </span>
                                   <div className="min-w-0">
-                                    <div className="font-semibold text-xs text-foreground truncate">
-                                      {row.team.name}
-                                    </div>
-                                    <div className="flex items-center gap-1 text-[0.62rem] text-muted-foreground truncate mt-0.5">
-                                      <span className="truncate">{row.team.players.join(" & ")}</span>
-                                      {row.team.club && (
+                                    {(() => {
+                                      const disp = getMatchTeamDisplay(row.team.name, row.team.players, row.team.name);
+                                      return (
                                         <>
-                                          <span className="text-muted-foreground/40 shrink-0">•</span>
-                                          <span className="text-[0.6rem] px-1 py-0.2 rounded bg-charcoal/40 text-sand/80 border border-border/60 shrink-0 font-medium">
-                                            {row.team.club}
-                                          </span>
+                                          <div className="font-semibold text-xs text-foreground truncate">
+                                            {disp.primary}
+                                          </div>
+                                          <div className="flex items-center gap-1 text-[0.62rem] text-muted-foreground truncate mt-0.5">
+                                            <span className="truncate">
+                                              {disp.secondary ?? `Team: ${row.team.name}`}
+                                            </span>
+                                            {row.team.club && (
+                                              <>
+                                                <span className="text-muted-foreground/40 shrink-0">•</span>
+                                                <span className="text-[0.6rem] px-1 py-0.2 rounded bg-charcoal/40 text-sand/80 border border-border/60 shrink-0 font-medium">
+                                                  {row.team.club}
+                                                </span>
+                                              </>
+                                            )}
+                                          </div>
                                         </>
-                                      )}
-                                    </div>
+                                      );
+                                    })()}
                                   </div>
                                 </div>
                                 {isSingle3PairPool && threePairFormat === "round_robin_direct" ? (
@@ -1998,6 +3046,8 @@ export function DrawsManager({
                             {group.matches.map((m) => {
                               const teamA = group.teams.find((t) => t.id === m.teamAId);
                               const teamB = group.teams.find((t) => t.id === m.teamBId);
+                              const dispA = getMatchTeamDisplay(teamA?.name, teamA?.players, "Team A");
+                              const dispB = getMatchTeamDisplay(teamB?.name, teamB?.players, "Team B");
                               const isFinished = m.status === "completed";
                               const winnerA = isFinished && (m.scoreA ?? 0) > (m.scoreB ?? 0);
                               const winnerB = isFinished && (m.scoreB ?? 0) > (m.scoreA ?? 0);
@@ -2052,11 +3102,13 @@ export function DrawsManager({
                                           winnerA ? "font-bold text-pickle" : "font-semibold text-foreground"
                                         }`}
                                       >
-                                        {teamA?.name ?? "Team A"}
+                                        {dispA.primary}
                                       </span>
-                                      <span className="block text-[0.65rem] text-muted-foreground truncate">
-                                        {teamA?.players.join(" / ")}
-                                      </span>
+                                      {dispA.secondary && (
+                                        <span className="block text-[0.65rem] text-muted-foreground truncate">
+                                          {dispA.secondary}
+                                        </span>
+                                      )}
                                     </div>
 
                                     {/* Score A Input */}
@@ -2068,6 +3120,14 @@ export function DrawsManager({
                                       onChange={(e) =>
                                         handleScoreChange(group.id, m.id, "scoreA", e.target.value)
                                       }
+                                      onBlur={() =>
+                                        persistPoolMatchScoreToStore(group.id, m.id, m.scoreA, m.scoreB)
+                                      }
+                                      onKeyDown={(e) => {
+                                        if (e.key === "Enter") {
+                                          persistPoolMatchScoreToStore(group.id, m.id, m.scoreA, m.scoreB);
+                                        }
+                                      }}
                                       className={`w-12 h-9 text-center font-display text-xl border-2 focus:border-pickle focus:outline-none transition-colors rounded ${
                                         winnerA
                                           ? "border-pickle bg-pickle/20 text-pickle font-bold"
@@ -2087,6 +3147,14 @@ export function DrawsManager({
                                       onChange={(e) =>
                                         handleScoreChange(group.id, m.id, "scoreB", e.target.value)
                                       }
+                                      onBlur={() =>
+                                        persistPoolMatchScoreToStore(group.id, m.id, m.scoreA, m.scoreB)
+                                      }
+                                      onKeyDown={(e) => {
+                                        if (e.key === "Enter") {
+                                          persistPoolMatchScoreToStore(group.id, m.id, m.scoreA, m.scoreB);
+                                        }
+                                      }}
                                       className={`w-12 h-9 text-center font-display text-xl border-2 focus:border-pickle focus:outline-none transition-colors rounded ${
                                         winnerB
                                           ? "border-pickle bg-pickle/20 text-pickle font-bold"
@@ -2101,11 +3169,13 @@ export function DrawsManager({
                                           winnerB ? "font-bold text-pickle" : "font-semibold text-foreground"
                                         }`}
                                       >
-                                        {teamB?.name ?? "Team B"}
+                                        {dispB.primary}
                                       </span>
-                                      <span className="block text-[0.65rem] text-muted-foreground truncate">
-                                        {teamB?.players.join(" / ")}
-                                      </span>
+                                      {dispB.secondary && (
+                                        <span className="block text-[0.65rem] text-muted-foreground truncate">
+                                          {dispB.secondary}
+                                        </span>
+                                      )}
                                     </div>
                                   </div>
 
@@ -2234,12 +3304,19 @@ export function DrawsManager({
                               </span>
                             </td>
                             <td className="py-2 px-2">
-                              <span className="font-semibold text-foreground block truncate">
-                                {q.team.name}
-                              </span>
-                              <span className="text-[0.65rem] text-muted-foreground truncate block">
-                                {q.team.players.join(" & ")}
-                              </span>
+                              {(() => {
+                                const disp = getMatchTeamDisplay(q.team.name, q.team.players, q.team.name);
+                                return (
+                                  <>
+                                    <span className="font-semibold text-foreground block truncate">
+                                      {disp.primary}
+                                    </span>
+                                    <span className="text-[0.65rem] text-muted-foreground truncate block">
+                                      {disp.secondary ?? `Team: ${q.team.name}`}
+                                    </span>
+                                  </>
+                                );
+                              })()}
                             </td>
                             <td className="py-2 px-2">
                               <span className="font-mono text-muted-foreground">
@@ -2266,7 +3343,7 @@ export function DrawsManager({
                             <td className="py-2 px-2 text-right">
                               {opp ? (
                                 <span className="text-muted-foreground font-mono">
-                                  vs #{opp.overallSeed} {opp.team.name} ({opp.pointDiff > 0 ? "+" : ""}{opp.pointDiff})
+                                  vs #{opp.overallSeed} {getMatchTeamDisplay(opp.team.name, opp.team.players, opp.team.name).primary} ({opp.pointDiff > 0 ? "+" : ""}{opp.pointDiff})
                                 </span>
                               ) : (
                                 <span className="text-muted-foreground">-</span>
@@ -2315,12 +3392,19 @@ export function DrawsManager({
                               #{q.overallSeed}
                             </span>
                             <div className="min-w-0">
-                              <span className="font-semibold text-foreground text-xs block truncate">
-                                {q.team.name}
-                              </span>
-                              <span className="text-[0.65rem] text-foreground/80 font-bold truncate block">
-                                {q.team.players.join(" & ")}
-                              </span>
+                              {(() => {
+                                const disp = getMatchTeamDisplay(q.team.name, q.team.players, q.team.name);
+                                return (
+                                  <>
+                                    <span className="font-semibold text-foreground text-xs block truncate">
+                                      {disp.primary}
+                                    </span>
+                                    <span className="text-[0.65rem] text-foreground/80 font-bold truncate block">
+                                      {disp.secondary ?? `Team: ${q.team.name}`}
+                                    </span>
+                                  </>
+                                );
+                              })()}
                             </div>
                           </div>
                           <span className="shrink-0 text-[0.65rem] font-mono px-2 py-0.5 rounded bg-card border-2 border-border text-foreground font-bold">
@@ -2355,7 +3439,7 @@ export function DrawsManager({
                           <span className="uppercase text-[0.55rem] tracking-wider text-muted-foreground/70">Projected:</span>
                           {opp ? (
                             <span className="text-sand/90 truncate ml-2">
-                              vs #{opp.overallSeed} {opp.team.name} ({opp.pointDiff > 0 ? "+" : ""}{opp.pointDiff})
+                              vs #{opp.overallSeed} {getMatchTeamDisplay(opp.team.name, opp.team.players, opp.team.name).primary} ({opp.pointDiff > 0 ? "+" : ""}{opp.pointDiff})
                             </span>
                           ) : (
                             <span>-</span>
@@ -2375,7 +3459,7 @@ export function DrawsManager({
                   </span>
                   <h4 className="font-display text-3xl sm:text-4xl text-foreground">
                     {isRoundRobinFinished && q0
-                      ? `Champion: ${q0.team.name}`
+                      ? `Champion: ${getMatchTeamDisplay(q0.team.name, q0.team.players, q0.team.name).primary}`
                       : "Standings Determine The Champion"}
                   </h4>
                   <p className="text-sm text-foreground/80 max-w-lg mx-auto">
@@ -2387,22 +3471,22 @@ export function DrawsManager({
                     <div className="pt-2 grid grid-cols-1 sm:grid-cols-3 gap-3 max-w-lg mx-auto text-left">
                       <div className="p-3 bg-amber-400/20 border border-amber-400/50 rounded text-center">
                         <span className="text-[0.65rem] font-black uppercase text-amber-500 block">Gold / Champion</span>
-                        <span className="font-bold text-foreground truncate block mt-0.5">{q0.team.name}</span>
+                        <span className="font-bold text-foreground truncate block mt-0.5">{getMatchTeamDisplay(q0.team.name, q0.team.players, q0.team.name).primary}</span>
                         <span className="text-xs font-mono text-muted-foreground">{q0.won}W - {q0.lost}L ({q0.pointDiff > 0 ? "+" : ""}{q0.pointDiff})</span>
                       </div>
                       <div className="p-3 bg-slate-300/20 border border-slate-300/50 rounded text-center">
                         <span className="text-[0.65rem] font-black uppercase text-slate-400 block">Silver / Runner-Up</span>
-                        <span className="font-bold text-foreground truncate block mt-0.5">{q1.team.name}</span>
+                        <span className="font-bold text-foreground truncate block mt-0.5">{getMatchTeamDisplay(q1.team.name, q1.team.players, q1.team.name).primary}</span>
                         <span className="text-xs font-mono text-muted-foreground">{q1.won}W - {q1.lost}L ({q1.pointDiff > 0 ? "+" : ""}{q1.pointDiff})</span>
                       </div>
                       <div className="p-3 bg-amber-700/20 border border-amber-700/50 rounded text-center">
                         <span className="text-[0.65rem] font-black uppercase text-amber-600 block">Bronze / 3rd Place</span>
-                        <span className="font-bold text-foreground truncate block mt-0.5">{q2.team.name}</span>
+                        <span className="font-bold text-foreground truncate block mt-0.5">{getMatchTeamDisplay(q2.team.name, q2.team.players, q2.team.name).primary}</span>
                         <span className="text-xs font-mono text-muted-foreground">{q2.won}W - {q2.lost}L ({q2.pointDiff > 0 ? "+" : ""}{q2.pointDiff})</span>
                       </div>
                     </div>
                   )}
-                  <div className="pt-4 flex items-center justify-center gap-3">
+                  <div className="pt-4 flex flex-wrap items-center justify-center gap-3">
                     <button
                       onClick={() => setStageView("round_robin")}
                       className="bg-pickle px-5 py-2 text-xs font-bold uppercase tracking-widest text-sand hover:opacity-90 transition-opacity cursor-pointer shadow-md rounded"
@@ -2418,41 +3502,78 @@ export function DrawsManager({
                   </div>
                 </div>
               ) : !mainDrawGenerated || mainDrawMatches.length === 0 ? (
-                <div className="surface-card p-12 text-center space-y-4 border border-border">
+                <div className="surface-card p-8 sm:p-12 text-center space-y-5 border border-border">
                   <span className="text-xs uppercase tracking-[0.28em] font-bold text-pickle block">
                     Playoff Bracket
                   </span>
                   <h4 className="font-display text-3xl text-foreground">Main Draw Ready to Seed</h4>
                   <p className="text-sm text-muted-foreground max-w-md mx-auto">
-                    Click the button below to seed all {qualifiers.length} qualified teams into the knockout bracket using Point Differential tie-breakers.
+                    Seed qualified pairs automatically by Point Differential, or initialize a custom Knockout Stage bracket and manually assign players to any slot.
                   </p>
-                  <button
-                    onClick={handleGenerateMainDraw}
-                    className="bg-brick px-6 py-3 font-display text-2xl tracking-widest text-sand hover:bg-brick-deep transition-colors cursor-pointer shadow-lg"
-                  >
-                    Seed Main Draw (Point Differential) &rarr;
-                  </button>
+                  <div className="flex flex-wrap items-center justify-center gap-3">
+                    {qualifiers.length >= 2 && (
+                      <button
+                        onClick={handleGenerateMainDraw}
+                        className="bg-brick px-6 py-3 font-display text-2xl tracking-widest text-sand hover:bg-brick-deep transition-colors cursor-pointer shadow-lg"
+                      >
+                        Seed Main Draw (Point Differential) &rarr;
+                      </button>
+                    )}
+                  </div>
+                  <div className="pt-3 border-t border-border/60 max-w-md mx-auto space-y-2">
+                    <span className="block text-[0.65rem] font-mono font-bold uppercase tracking-widest text-muted-foreground">
+                      Or Create Custom Knockout Bracket
+                    </span>
+                    <div className="flex flex-wrap items-center justify-center gap-2">
+                      {([2, 4, 8, 16] as const).map((sz) => (
+                        <button
+                          key={sz}
+                          type="button"
+                          onClick={() => handleCreateCustomMainDraw(sz)}
+                          className="border border-border bg-charcoal px-3.5 py-2 text-xs font-bold uppercase tracking-widest text-sand hover:border-pickle hover:text-pickle transition-colors rounded cursor-pointer"
+                        >
+                          {sz}-Pair Bracket
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                 </div>
               ) : (
                 <div className="space-y-6">
-                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                  <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
                     <div>
                       <span className="text-xs font-bold uppercase tracking-[0.28em] text-pickle">
                         Single Elimination Stage
                       </span>
                       <h3 className="font-display text-3xl text-foreground">Championship Playoff Tree</h3>
+                      <p className="text-xs text-muted-foreground mt-0.5">
+                        Click <strong>EDIT</strong> or <strong>ASSIGN</strong> on any slot to manually change players, or <strong>SWAP</strong> to flip sides.
+                      </p>
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2">
-                      <button
-                        onClick={handleGenerateMainDraw}
-                        className="border border-border bg-charcoal px-3 py-1.5 text-xs font-bold uppercase tracking-widest text-sand hover:border-pickle hover:text-pickle transition-colors cursor-pointer"
-                      >
-                        Re-Seed by Point Diff
-                      </button>
+                      {qualifiers.length >= 2 && (
+                        <button
+                          onClick={handleGenerateMainDraw}
+                          className="border border-border bg-charcoal px-3 py-1.5 text-xs font-bold uppercase tracking-widest text-sand hover:border-pickle hover:text-pickle transition-colors cursor-pointer rounded"
+                        >
+                          Re-Seed by Point Diff
+                        </button>
+                      )}
+                      {([4, 8, 16] as const).map((sz) => (
+                        <button
+                          key={sz}
+                          type="button"
+                          onClick={() => handleCreateCustomMainDraw(sz)}
+                          className="border border-border bg-card px-2.5 py-1.5 text-[0.68rem] font-mono font-bold uppercase tracking-wider text-foreground hover:border-pickle hover:text-pickle transition-colors cursor-pointer rounded"
+                          title={`Initialize ${sz}-Pair Bracket`}
+                        >
+                          {sz}-Slot
+                        </button>
+                      ))}
                       <button
                         onClick={handleSyncToLiveCourts}
-                        className="bg-pickle px-3 py-1.5 text-xs font-bold uppercase tracking-widest text-sand hover:opacity-90 transition-opacity cursor-pointer"
+                        className="bg-pickle px-3 py-1.5 text-xs font-bold uppercase tracking-widest text-sand hover:opacity-90 transition-opacity cursor-pointer rounded"
                       >
                         Sync to Live Courts
                       </button>
@@ -2482,6 +3603,8 @@ export function DrawsManager({
                               key={m.id}
                               match={m}
                               onScoreChange={handleMainDrawScoreChange}
+                              onEditSlot={handleOpenEditKoSlot}
+                              onSwapSides={handleSwapKoMatchSides}
                             />
                           ))}
                       </div>
@@ -2502,28 +3625,34 @@ export function DrawsManager({
                               key={m.id}
                               match={m}
                               onScoreChange={handleMainDrawScoreChange}
+                              onEditSlot={handleOpenEditKoSlot}
+                              onSwapSides={handleSwapKoMatchSides}
                             />
                           ))}
                       </div>
                     )}
 
                     {/* Semifinals */}
-                    <div className="space-y-4">
-                      <div className="flex items-center gap-2 border-b border-border pb-2">
-                        <span className="h-2 w-2 rounded-full bg-pickle" />
-                        <h4 className="font-display text-xl text-foreground">Semifinals</h4>
-                      </div>
+                    {mainDrawMatches.some((m) => m.round === "Semifinal") && (
+                      <div className="space-y-4">
+                        <div className="flex items-center gap-2 border-b border-border pb-2">
+                          <span className="h-2 w-2 rounded-full bg-pickle" />
+                          <h4 className="font-display text-xl text-foreground">Semifinals</h4>
+                        </div>
 
-                      {mainDrawMatches
-                        .filter((m) => m.round === "Semifinal")
-                        .map((m) => (
-                          <KnockoutMatchCard
-                            key={m.id}
-                            match={m}
-                            onScoreChange={handleMainDrawScoreChange}
-                          />
-                        ))}
-                    </div>
+                        {mainDrawMatches
+                          .filter((m) => m.round === "Semifinal")
+                          .map((m) => (
+                            <KnockoutMatchCard
+                              key={m.id}
+                              match={m}
+                              onScoreChange={handleMainDrawScoreChange}
+                              onEditSlot={handleOpenEditKoSlot}
+                              onSwapSides={handleSwapKoMatchSides}
+                            />
+                          ))}
+                      </div>
+                    )}
 
                     {/* Championship Final & 3rd Place Match */}
                     <div className="space-y-6">
@@ -2540,6 +3669,8 @@ export function DrawsManager({
                               key={m.id}
                               match={m}
                               onScoreChange={handleMainDrawScoreChange}
+                              onEditSlot={handleOpenEditKoSlot}
+                              onSwapSides={handleSwapKoMatchSides}
                               isFinal
                             />
                           ))}
@@ -2548,17 +3679,24 @@ export function DrawsManager({
                         {(() => {
                           const finalMatch = mainDrawMatches.find((m) => m.round === "Final");
                           if (finalMatch?.winner) {
+                            const champDisp = getMatchTeamDisplay(
+                              finalMatch.winner.name,
+                              finalMatch.winner.players,
+                              finalMatch.winner.name,
+                            );
                             return (
                               <div className="surface-card p-6 bg-pickle/20 border-2 border-pickle text-center space-y-2 animate-in fade-in zoom-in duration-300">
                                 <span className="block text-xs uppercase tracking-[0.28em] font-bold text-pickle">
                                   Tournament Champion
                                 </span>
                                 <h4 className="font-display text-3xl text-foreground">
-                                  {finalMatch.winner.name}
+                                  {champDisp.primary}
                                 </h4>
-                                <p className="text-xs text-muted-foreground">
-                                  {finalMatch.winner.players.join(" & ")}
-                                </p>
+                                {champDisp.secondary && (
+                                  <p className="text-xs text-muted-foreground">
+                                    {champDisp.secondary}
+                                  </p>
+                                )}
                               </div>
                             );
                           }
@@ -2567,22 +3705,26 @@ export function DrawsManager({
                       </div>
 
                       {/* 3rd Place Match */}
-                      <div className="space-y-4">
-                        <div className="flex items-center gap-2 border-b border-border pb-2">
-                          <span className="h-2 w-2 rounded-full bg-muted-foreground" />
-                          <h4 className="font-display text-xl text-muted-foreground">3rd Place Match</h4>
-                        </div>
+                      {mainDrawMatches.some((m) => m.round === "Bronze") && (
+                        <div className="space-y-4">
+                          <div className="flex items-center gap-2 border-b border-border pb-2">
+                            <span className="h-2 w-2 rounded-full bg-muted-foreground" />
+                            <h4 className="font-display text-xl text-muted-foreground">3rd Place Match</h4>
+                          </div>
 
-                        {mainDrawMatches
-                          .filter((m) => m.round === "Bronze")
-                          .map((m) => (
-                            <KnockoutMatchCard
-                              key={m.id}
-                              match={m}
-                              onScoreChange={handleMainDrawScoreChange}
-                            />
-                          ))}
-                      </div>
+                          {mainDrawMatches
+                            .filter((m) => m.round === "Bronze")
+                            .map((m) => (
+                              <KnockoutMatchCard
+                                key={m.id}
+                                match={m}
+                                onScoreChange={handleMainDrawScoreChange}
+                                onEditSlot={handleOpenEditKoSlot}
+                                onSwapSides={handleSwapKoMatchSides}
+                              />
+                            ))}
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -2591,6 +3733,229 @@ export function DrawsManager({
           )}
         </>
       )}
+
+      {/* ── Change Knockout Stage Players / Team Modal ───────────────────────── */}
+      {editingKoSlot && (() => {
+        const targetMatch = mainDrawMatches.find((m) => m.id === editingKoSlot.matchId);
+        const currentSlotTeam =
+          editingKoSlot.slot === "teamA" ? targetMatch?.teamA : targetMatch?.teamB;
+        const isCurrentlyManual =
+          editingKoSlot.slot === "teamA"
+            ? Boolean(targetMatch?.manualTeamA)
+            : Boolean(targetMatch?.manualTeamB);
+        const hasExistingScores = Boolean(
+          targetMatch && (targetMatch.scoreA !== undefined || targetMatch.scoreB !== undefined),
+        );
+
+        const candidateTeamPreview: Team | null =
+          editingKoSlot.player1.trim() || editingKoSlot.player2.trim() || editingKoSlot.teamName.trim()
+            ? {
+                id:
+                  editingKoSlot.selectedTeamId && editingKoSlot.selectedTeamId !== "__custom__"
+                    ? editingKoSlot.selectedTeamId
+                    : "",
+                name: editingKoSlot.teamName.trim() || "n/a",
+                players: [editingKoSlot.player1.trim(), editingKoSlot.player2.trim()].filter(Boolean),
+                club: editingKoSlot.club.trim(),
+              }
+            : null;
+
+        let sameRoundCollisionLabel: string | null = null;
+        if (candidateTeamPreview) {
+          const otherInRound = mainDrawMatches.find(
+            (m) =>
+              m.round === editingKoSlot.round &&
+              ((!(m.id === editingKoSlot.matchId && editingKoSlot.slot === "teamA") &&
+                m.teamA &&
+                isSamePlayoffTeam(m.teamA, candidateTeamPreview)) ||
+                (!(m.id === editingKoSlot.matchId && editingKoSlot.slot === "teamB") &&
+                  m.teamB &&
+                  isSamePlayoffTeam(m.teamB, candidateTeamPreview))),
+          );
+          if (otherInRound) {
+            const collidedSide =
+              !(otherInRound.id === editingKoSlot.matchId && editingKoSlot.slot === "teamA") &&
+              otherInRound.teamA &&
+              isSamePlayoffTeam(otherInRound.teamA, candidateTeamPreview)
+                ? "Slot 1 (Top)"
+                : "Slot 2 (Bottom)";
+            sameRoundCollisionLabel = `${otherInRound.label} • ${collidedSide}`;
+          }
+        }
+
+        return (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-3 sm:p-4 backdrop-blur-xs"
+            onClick={() => setEditingKoSlot(null)}
+          >
+            <div
+              className="w-full max-w-md max-h-[92vh] overflow-y-auto rounded-xl border-2 border-border bg-card shadow-2xl animate-in fade-in zoom-in-95 duration-150"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="bg-charcoal px-5 py-4 flex items-center justify-between border-b border-border sticky top-0 z-10">
+                <div className="min-w-0 pr-2">
+                  <span className="block text-[0.62rem] font-bold uppercase tracking-[0.25em] text-pickle truncate">
+                    {editingKoSlot.matchLabel} • {editingKoSlot.slot === "teamA" ? "Slot 1 (Top)" : "Slot 2 (Bottom)"}
+                  </span>
+                  <h3 className="font-display text-2xl text-sand leading-tight mt-0.5">
+                    Change Knockout Players
+                  </h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setEditingKoSlot(null)}
+                  className="rounded border border-sand/30 px-2.5 py-1 text-[0.65rem] font-bold uppercase tracking-wider text-sand/80 hover:border-sand hover:text-sand cursor-pointer shrink-0"
+                >
+                  Close
+                </button>
+              </div>
+
+              <form onSubmit={handleSaveKoSlot} className="p-4 sm:p-5 space-y-4">
+                {availableKnockoutTeams.length > 0 && (
+                  <div className="space-y-1.5">
+                    <label className="block text-[0.68rem] font-bold uppercase tracking-widest text-pickle">
+                      Quick Select Pair from Division
+                    </label>
+                    <select
+                      value={editingKoSlot.selectedTeamId}
+                      onChange={(e) => handleSelectQuickKoTeam(e.target.value)}
+                      className="w-full rounded border border-input bg-background px-3 py-2.5 text-xs sm:text-sm font-medium text-foreground focus:border-pickle focus:outline-none"
+                    >
+                      <option value="">-- Choose a pair or type manually below --</option>
+                      {availableKnockoutTeams.map((opt) => {
+                        const disp = getMatchTeamDisplay(opt.team.name, opt.team.players, opt.team.name);
+                        return (
+                          <option key={opt.team.id} value={opt.team.id}>
+                            {disp.combined} — {opt.sourceLabel}
+                          </option>
+                        );
+                      })}
+                      <option value="__custom__">Custom / Manual Entry</option>
+                    </select>
+                  </div>
+                )}
+
+                {sameRoundCollisionLabel && (
+                  <label className="flex items-start gap-2.5 rounded-lg border border-pickle/40 bg-pickle/10 p-3 text-xs text-foreground cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={editingKoSlot.swapWithMatchSlot}
+                      onChange={(e) =>
+                        setEditingKoSlot({ ...editingKoSlot, swapWithMatchSlot: e.target.checked })
+                      }
+                      className="mt-0.5 h-4 w-4 accent-pickle shrink-0"
+                    />
+                    <span className="leading-snug">
+                      This pair is already assigned in <strong>{sameRoundCollisionLabel}</strong>. Swap their positions automatically.
+                    </span>
+                  </label>
+                )}
+
+                <div className="space-y-1.5">
+                  <label className="block text-[0.68rem] font-bold uppercase tracking-widest text-muted-foreground">
+                    Player 1 Full Name
+                  </label>
+                  <input
+                    type="text"
+                    value={editingKoSlot.player1}
+                    onChange={(e) => setEditingKoSlot({ ...editingKoSlot, player1: e.target.value })}
+                    placeholder="Enter Player 1 name"
+                    autoFocus
+                    className="w-full rounded border border-input bg-background px-3 py-2.5 text-sm font-medium text-foreground focus:border-pickle focus:outline-none"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="block text-[0.68rem] font-bold uppercase tracking-widest text-muted-foreground">
+                    Player 2 Full Name
+                  </label>
+                  <input
+                    type="text"
+                    value={editingKoSlot.player2}
+                    onChange={(e) => setEditingKoSlot({ ...editingKoSlot, player2: e.target.value })}
+                    placeholder="Enter Player 2 name (leave blank for singles)"
+                    className="w-full rounded border border-input bg-background px-3 py-2.5 text-sm font-medium text-foreground focus:border-pickle focus:outline-none"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <label className="block text-[0.68rem] font-bold uppercase tracking-widest text-muted-foreground">
+                      Team Name
+                    </label>
+                    <input
+                      type="text"
+                      value={editingKoSlot.teamName}
+                      onChange={(e) => setEditingKoSlot({ ...editingKoSlot, teamName: e.target.value })}
+                      placeholder="Team name (or n/a)"
+                      className="w-full rounded border border-input bg-background px-3 py-2.5 text-sm font-medium text-foreground focus:border-pickle focus:outline-none"
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="block text-[0.68rem] font-bold uppercase tracking-widest text-muted-foreground">
+                      Seed / Label (Optional)
+                    </label>
+                    <input
+                      type="text"
+                      value={editingKoSlot.seedLabel}
+                      onChange={(e) => setEditingKoSlot({ ...editingKoSlot, seedLabel: e.target.value })}
+                      placeholder="e.g. #1 (A1) or Wildcard"
+                      className="w-full rounded border border-input bg-background px-3 py-2.5 text-sm font-medium text-foreground focus:border-pickle focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                {hasExistingScores && (
+                  <label className="flex items-center gap-2.5 rounded-lg border border-border bg-muted/30 p-2.5 text-xs text-foreground cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={editingKoSlot.keepScore}
+                      onChange={(e) =>
+                        setEditingKoSlot({ ...editingKoSlot, keepScore: e.target.checked })
+                      }
+                      className="h-4 w-4 accent-pickle shrink-0"
+                    />
+                    <span>
+                      Keep existing score ({targetMatch?.scoreA ?? 0} - {targetMatch?.scoreB ?? 0})
+                    </span>
+                  </label>
+                )}
+
+                <div className="pt-2 flex flex-col-reverse sm:flex-row sm:items-center sm:justify-between gap-2 border-t border-border/60">
+                  <div>
+                    {(currentSlotTeam || isCurrentlyManual) && (
+                      <button
+                        type="button"
+                        onClick={() => handleClearKoSlot(editingKoSlot.matchId, editingKoSlot.slot)}
+                        className="w-full sm:w-auto border border-brick/50 bg-brick/10 px-3 py-2.5 text-xs font-bold uppercase tracking-wider text-brick hover:bg-brick hover:text-sand transition-colors rounded cursor-pointer"
+                      >
+                        Reset to TBD
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="flex flex-col-reverse sm:flex-row items-stretch sm:items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setEditingKoSlot(null)}
+                      className="w-full sm:w-auto border border-border bg-charcoal px-4 py-2.5 text-xs font-bold uppercase tracking-widest text-sand hover:border-pickle hover:text-pickle transition-colors rounded cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      className="w-full sm:w-auto bg-pickle px-5 py-2.5 text-xs font-bold uppercase tracking-widest text-sand hover:opacity-90 transition-opacity rounded shadow cursor-pointer"
+                    >
+                      Save Players
+                    </button>
+                  </div>
+                </div>
+              </form>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -2599,14 +3964,44 @@ export function DrawsManager({
 function KnockoutMatchCard({
   match,
   onScoreChange,
+  onEditSlot,
+  onSwapSides,
   isFinal = false,
 }: {
   match: KnockoutMatch;
   onScoreChange: (matchId: string, field: "scoreA" | "scoreB", val: string) => void;
-  isFinal?: boolean;
+  onEditSlot: (match: KnockoutMatch, slot: "teamA" | "teamB") => void;
+  onSwapSides: (matchId: string) => void;
+  isFinal?: boolean | undefined;
 }) {
-  const winnerA = match.winner && match.teamA && match.winner.id === match.teamA.id;
-  const winnerB = match.winner && match.teamB && match.winner.id === match.teamB.id;
+  const hasFinalScore =
+    match.scoreA !== undefined &&
+    match.scoreB !== undefined &&
+    match.scoreA !== match.scoreB &&
+    Boolean(match.winner);
+
+  const winnerA = Boolean(
+    match.teamA &&
+      match.winner &&
+      (hasFinalScore
+        ? (match.scoreA ?? 0) > (match.scoreB ?? 0)
+        : isSamePlayoffTeam(match.winner, match.teamA)),
+  );
+  const winnerB = Boolean(
+    match.teamB &&
+      match.winner &&
+      !winnerA &&
+      (hasFinalScore
+        ? (match.scoreB ?? 0) > (match.scoreA ?? 0)
+        : isSamePlayoffTeam(match.winner, match.teamB)),
+  );
+
+  const dispA = match.teamA
+    ? getMatchTeamDisplay(match.teamA.name, match.teamA.players, match.teamA.name)
+    : null;
+  const dispB = match.teamB
+    ? getMatchTeamDisplay(match.teamB.name, match.teamB.players, match.teamB.name)
+    : null;
 
   return (
     <div
@@ -2614,104 +4009,152 @@ function KnockoutMatchCard({
         isFinal ? "border-brick/60 shadow-md" : "border-border"
       }`}
     >
-      <div className="bg-charcoal px-3 py-1.5 flex items-center justify-between text-[0.65rem] uppercase tracking-widest text-sand">
-        <span className="font-bold">{match.label}</span>
-        <span className="text-pickle font-mono">{match.court}</span>
+      <div className="bg-charcoal px-3 py-1.5 flex items-center justify-between gap-2 text-[0.65rem] uppercase tracking-widest text-sand">
+        <span className="font-bold truncate">{match.label}</span>
+        <div className="flex items-center gap-2 shrink-0">
+          {(match.teamA || match.teamB) && (
+            <button
+              type="button"
+              onClick={() => onSwapSides(match.id)}
+              title="Swap Top and Bottom Slots"
+              className="px-1.5 py-0.5 rounded border border-sand/30 text-[0.58rem] font-mono font-bold uppercase tracking-wider text-sand/85 hover:border-pickle hover:text-pickle transition-colors cursor-pointer"
+            >
+              Swap
+            </button>
+          )}
+          <span className="text-pickle font-mono">{match.court}</span>
+        </div>
       </div>
 
       <div className="p-3 space-y-2">
         {/* Team A Row */}
         <div
-          className={`flex items-center justify-between p-2 rounded border-2 transition-colors ${
+          className={`flex items-center justify-between gap-2 p-2 rounded border-2 transition-colors ${
             winnerA ? "border-pickle/60 bg-pickle/20" : "border-border bg-card"
           }`}
         >
-          <div className="truncate mr-2">
-            <div className="flex items-center gap-1.5">
-              {match.seedA && match.seedA.startsWith("#") && (
-                <span className="text-[0.6rem] font-bold font-mono px-1 py-0.2 bg-charcoal text-sand rounded">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              {match.seedA && (match.seedA.startsWith("#") || match.teamA) && (
+                <span className="text-[0.58rem] font-bold font-mono px-1.5 py-0.2 bg-charcoal text-sand rounded max-w-[130px] truncate">
                   {match.seedA}
                 </span>
               )}
-              <span
-                className={`text-sm truncate ${
-                  winnerA
-                    ? "font-bold text-pickle"
-                    : match.teamA
-                      ? "font-semibold text-foreground"
-                      : "text-muted-foreground italic text-xs"
-                }`}
-              >
-                {match.teamA?.name ?? (match.seedA?.startsWith("#") ? "TBD (Qualifier)" : (match.seedA || "TBD (Qualifier)"))}
-              </span>
+              {match.manualTeamA && (
+                <span className="text-[0.55rem] font-mono font-bold uppercase px-1 py-0.2 rounded bg-pickle/20 text-pickle border border-pickle/40">
+                  Manual
+                </span>
+              )}
             </div>
-            {match.teamA && (
+            <span
+              className={`block truncate mt-0.5 ${
+                winnerA
+                  ? "text-sm font-bold text-pickle"
+                  : dispA
+                    ? "text-sm font-semibold text-foreground"
+                    : "text-muted-foreground italic text-xs"
+              }`}
+            >
+              {dispA
+                ? dispA.primary
+                : match.seedA?.startsWith("#")
+                  ? "TBD (Qualifier)"
+                  : (match.seedA || "TBD (Qualifier)")}
+            </span>
+            {match.teamA && dispA && (
               <span className="block text-[0.65rem] text-muted-foreground truncate">
-                {match.teamA.players.join(" & ")}
+                {dispA.secondary ?? `Team: ${match.teamA.name}`}
               </span>
             )}
           </div>
 
-          <input
-            type="number"
-            min={0}
-            placeholder="0"
-            disabled={!match.teamA || !match.teamB}
-            value={match.scoreA ?? ""}
-            onChange={(e) => onScoreChange(match.id, "scoreA", e.target.value)}
-            className={`w-11 h-8 text-center font-display text-lg border focus:border-pickle focus:outline-none ${
-              winnerA
-                ? "border-pickle bg-pickle/30 text-pickle font-bold"
-                : "border-input bg-background"
-            }`}
-          />
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => onEditSlot(match, "teamA")}
+              className="px-2 py-1 text-[0.6rem] font-mono font-bold uppercase tracking-wider rounded border border-border bg-background text-foreground hover:border-pickle hover:text-pickle transition-colors cursor-pointer"
+            >
+              {match.teamA ? "Edit" : "Assign"}
+            </button>
+            <input
+              type="number"
+              min={0}
+              placeholder="0"
+              disabled={!match.teamA || !match.teamB}
+              value={match.scoreA ?? ""}
+              onChange={(e) => onScoreChange(match.id, "scoreA", e.target.value)}
+              className={`w-11 h-8 text-center font-display text-lg border focus:border-pickle focus:outline-none rounded ${
+                winnerA
+                  ? "border-pickle bg-pickle/30 text-pickle font-bold"
+                  : "border-input bg-background"
+              }`}
+            />
+          </div>
         </div>
 
         {/* Team B Row */}
         <div
-          className={`flex items-center justify-between p-2 rounded border-2 transition-colors ${
+          className={`flex items-center justify-between gap-2 p-2 rounded border-2 transition-colors ${
             winnerB ? "border-pickle/60 bg-pickle/20" : "border-border bg-card"
           }`}
         >
-          <div className="truncate mr-2">
-            <div className="flex items-center gap-1.5">
-              {match.seedB && match.seedB.startsWith("#") && (
-                <span className="text-[0.6rem] font-bold font-mono px-1 py-0.2 bg-charcoal text-sand rounded">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              {match.seedB && (match.seedB.startsWith("#") || match.teamB) && (
+                <span className="text-[0.58rem] font-bold font-mono px-1.5 py-0.2 bg-charcoal text-sand rounded max-w-[130px] truncate">
                   {match.seedB}
                 </span>
               )}
-              <span
-                className={`text-sm truncate ${
-                  winnerB
-                    ? "font-bold text-pickle"
-                    : match.teamB
-                      ? "font-semibold text-foreground"
-                      : "text-muted-foreground italic text-xs"
-                }`}
-              >
-                {match.teamB?.name ?? (match.seedB?.startsWith("#") ? "TBD (Qualifier)" : (match.seedB || "TBD (Qualifier)"))}
-              </span>
+              {match.manualTeamB && (
+                <span className="text-[0.55rem] font-mono font-bold uppercase px-1 py-0.2 rounded bg-pickle/20 text-pickle border border-pickle/40">
+                  Manual
+                </span>
+              )}
             </div>
-            {match.teamB && (
+            <span
+              className={`block truncate mt-0.5 ${
+                winnerB
+                  ? "text-sm font-bold text-pickle"
+                  : dispB
+                    ? "text-sm font-semibold text-foreground"
+                    : "text-muted-foreground italic text-xs"
+              }`}
+            >
+              {dispB
+                ? dispB.primary
+                : match.seedB?.startsWith("#")
+                  ? "TBD (Qualifier)"
+                  : (match.seedB || "TBD (Qualifier)")}
+            </span>
+            {match.teamB && dispB && (
               <span className="block text-[0.65rem] text-muted-foreground truncate">
-                {match.teamB.players.join(" & ")}
+                {dispB.secondary ?? `Team: ${match.teamB.name}`}
               </span>
             )}
           </div>
 
-          <input
-            type="number"
-            min={0}
-            placeholder="0"
-            disabled={!match.teamA || !match.teamB}
-            value={match.scoreB ?? ""}
-            onChange={(e) => onScoreChange(match.id, "scoreB", e.target.value)}
-            className={`w-11 h-8 text-center font-display text-lg border focus:border-pickle focus:outline-none ${
-              winnerB
-                ? "border-pickle bg-pickle/30 text-pickle font-bold"
-                : "border-input bg-background"
-            }`}
-          />
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => onEditSlot(match, "teamB")}
+              className="px-2 py-1 text-[0.6rem] font-mono font-bold uppercase tracking-wider rounded border border-border bg-background text-foreground hover:border-pickle hover:text-pickle transition-colors cursor-pointer"
+            >
+              {match.teamB ? "Edit" : "Assign"}
+            </button>
+            <input
+              type="number"
+              min={0}
+              placeholder="0"
+              disabled={!match.teamA || !match.teamB}
+              value={match.scoreB ?? ""}
+              onChange={(e) => onScoreChange(match.id, "scoreB", e.target.value)}
+              className={`w-11 h-8 text-center font-display text-lg border focus:border-pickle focus:outline-none rounded ${
+                winnerB
+                  ? "border-pickle bg-pickle/30 text-pickle font-bold"
+                  : "border-input bg-background"
+              }`}
+            />
+          </div>
         </div>
       </div>
     </div>
