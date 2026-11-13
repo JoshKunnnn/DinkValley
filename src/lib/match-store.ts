@@ -29,6 +29,11 @@ export type RallyEvent = {
   scoreSnapshot: [number, number, number]; // [serverScore, receiverScore, serverNumber]
   servingTeam: ServingTeam;
   timestamp: number;
+  beforeServingTeam?: ServingTeam | undefined;
+  beforeServerNumber?: 1 | 2 | undefined;
+  beforeActiveServerBase?: 1 | 2 | undefined;
+  beforeTeamAScore?: number | undefined;
+  beforeTeamBScore?: number | undefined;
 };
 
 export type LiveScore = {
@@ -68,7 +73,30 @@ export type LiveMatch = {
   teamASide?: "left" | "right" | undefined;
   courtPositionUpdatedAt?: number | undefined;
   resetAt?: number | undefined;
+  targetScore?: number | undefined;
 };
+
+/**
+ * Returns the configured target score for a match without auto-ending live play.
+ * Finals / Championship / Gold / Bronze / 3rd Place matches default to 15; standard rounds default to 11.
+ */
+export function getEffectiveTargetScore(match: LiveMatch): number {
+  if (match.targetScore && match.targetScore > 0) {
+    return match.targetScore;
+  }
+  const s = (match.stage || "").toLowerCase();
+  const isSemiOrQuarter = /\b(?:semifinal|quarterfinal|semi|quarter)\b/i.test(s);
+  if (
+    (!isSemiOrQuarter && /\bfinals?\b/i.test(s)) ||
+    s.includes("championship") ||
+    s.includes("gold") ||
+    s.includes("bronze") ||
+    s.includes("3rd place")
+  ) {
+    return 15;
+  }
+  return 11;
+}
 
 /* ─────────────────────────────────────────────
    LocalStorage helpers & 4-Court Constraint
@@ -168,7 +196,7 @@ export function isMatchMatchingStation(
       return false;
     }
   } else if (lowerStation.startsWith("live-ko-") && m.stage) {
-    const stationKoNum = lowerStation.match(/-(?:r16|qf|sf)-(\d+)$/i)?.[1] ?? null;
+    const stationKoNum = lowerStation.match(/-(?:r32|r16|qf|sf)-(\d+)$/i)?.[1] ?? null;
     const matchKoNum = getKnockoutMatchNumber(m.stage);
     if (stationKoNum && matchKoNum && stationKoNum !== matchKoNum) {
       return false;
@@ -804,8 +832,13 @@ function mergeMatchesSafely(cloudMatches: LiveMatch[], localMatches: LiveMatch[]
         chosenStatus = "live";
       }
     } else {
-      // Scores are equal. Compare rally counts or details
+      // Scores are equal. Compare rally counts or fresher local position/server timestamp
       if (localRallies > cloudRallies) {
+        chosenScore = lm.score;
+      } else if (
+        localRallies === cloudRallies &&
+        (lm.courtPositionUpdatedAt ?? 0) > (cm.courtPositionUpdatedAt ?? 0)
+      ) {
         chosenScore = lm.score;
       } else {
         chosenScore = cm.score;
@@ -1549,7 +1582,7 @@ export function getCanonicalCompletedMatchKey(
   const rawId = (m.id || "").toLowerCase();
   const isKO =
     isKnockoutStageString(rawStage) ||
-    /(?:quarterfinal|semifinal|playoff|-qf-|-sf-|_qf_|_sf_)/i.test(rawId);
+    /(?:quarterfinal|semifinal|playoff|-r32-|-r16-|-qf-|-sf-|_r32_|_r16_|_qf_|_sf_)/i.test(rawId);
 
   let stageKey: string;
   if (isKO) {
@@ -1807,6 +1840,13 @@ export function computeCourtPositions(
  */
 export function scorePoint(match: LiveMatch): LiveMatch {
   markLocalMatchMutation(match.id);
+  const beforeServingTeam = match.score.servingTeam;
+  const beforeServerNumber = match.score.serverNumber;
+  const beforeActiveServerBase =
+    match.score.activeServerBase ?? deriveActiveServerBase(match.score);
+  const beforeTeamAScore = match.score.teamAScore;
+  const beforeTeamBScore = match.score.teamBScore;
+
   const s = { ...match.score };
   const rallyId = `r-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
@@ -1817,7 +1857,7 @@ export function scorePoint(match: LiveMatch): LiveMatch {
   }
 
   // Active server continues serving (swaps courts with partner on point scored)
-  s.activeServerBase = s.activeServerBase ?? deriveActiveServerBase(match.score);
+  s.activeServerBase = beforeActiveServerBase;
 
   const event: RallyEvent = {
     id: rallyId,
@@ -1830,11 +1870,21 @@ export function scorePoint(match: LiveMatch): LiveMatch {
     ],
     servingTeam: s.servingTeam,
     timestamp: Date.now(),
+    beforeServingTeam,
+    beforeServerNumber,
+    beforeActiveServerBase,
+    beforeTeamAScore,
+    beforeTeamBScore,
   };
 
   s.rallies = [...s.rallies, event];
 
-  return { ...match, score: s, status: "live" };
+  return {
+    ...match,
+    score: s,
+    status: "live",
+    courtPositionUpdatedAt: Date.now(),
+  };
 }
 
 /**
@@ -1847,17 +1897,20 @@ export function scorePoint(match: LiveMatch): LiveMatch {
  */
 export function sideOut(match: LiveMatch): LiveMatch {
   markLocalMatchMutation(match.id);
+  const beforeServingTeam = match.score.servingTeam;
+  const beforeServerNumber = match.score.serverNumber;
+  const currentActiveBase: 1 | 2 =
+    match.score.activeServerBase ?? deriveActiveServerBase(match.score);
+  const beforeActiveServerBase = currentActiveBase;
+  const beforeTeamAScore = match.score.teamAScore;
+  const beforeTeamBScore = match.score.teamBScore;
+
   const s = { ...match.score };
   const rallyId = `r-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
-  const currentActiveBase: 1 | 2 = s.activeServerBase ?? deriveActiveServerBase(s);
-
-  const isGameStart =
-    s.teamAScore === 0 && s.teamBScore === 0 && s.serverNumber === 1;
-
   let description: string;
 
-  if (isGameStart || s.serverNumber === 2) {
+  if (s.serverNumber === 2) {
     // Side out -- serve goes to other team
     s.servingTeam = s.servingTeam === "A" ? "B" : "A";
     s.serverNumber = 1;
@@ -1884,11 +1937,21 @@ export function sideOut(match: LiveMatch): LiveMatch {
     ],
     servingTeam: s.servingTeam,
     timestamp: Date.now(),
+    beforeServingTeam,
+    beforeServerNumber,
+    beforeActiveServerBase,
+    beforeTeamAScore,
+    beforeTeamBScore,
   };
 
   s.rallies = [...s.rallies, event];
 
-  return { ...match, score: s, status: "live" };
+  return {
+    ...match,
+    score: s,
+    status: "live",
+    courtPositionUpdatedAt: Date.now(),
+  };
 }
 
 /**
@@ -1932,7 +1995,34 @@ export function undoLastRally(match: LiveMatch): LiveMatch {
   const s = { ...match.score };
   if (s.rallies.length === 0) return match;
 
+  const lastRally = s.rallies[s.rallies.length - 1]!;
   const prevRallies = s.rallies.slice(0, -1);
+
+  if (
+    lastRally.beforeServingTeam !== undefined &&
+    lastRally.beforeServerNumber !== undefined
+  ) {
+    return {
+      ...match,
+      score: {
+        ...s,
+        teamAScore: lastRally.beforeTeamAScore ?? s.teamAScore,
+        teamBScore: lastRally.beforeTeamBScore ?? s.teamBScore,
+        servingTeam: lastRally.beforeServingTeam,
+        serverNumber: lastRally.beforeServerNumber,
+        activeServerBase: lastRally.beforeActiveServerBase ?? 1,
+        rallies: prevRallies,
+      },
+      status:
+        prevRallies.length > 0 || (match.court && match.court !== "Queue")
+          ? "live"
+          : "scheduled",
+      winnerTeam: undefined,
+      endedAt: undefined,
+      courtPositionUpdatedAt: Date.now(),
+    };
+  }
+
   const firstRally = s.rallies[0]!;
   const initialServingTeam: ServingTeam =
     firstRally.type === "point"
@@ -2173,8 +2263,9 @@ function isKnockoutStageString(stage: string): boolean {
   return /quarter|semi|final|playoff|bronze|gold|championship|knockout|elimination|round of|play-in/i.test(stage);
 }
 
-function getKnockoutRoundType(stage: string): "r16" | "qf" | "sf" | "bronze" | "final" | "other" {
+function getKnockoutRoundType(stage: string): "r32" | "r16" | "qf" | "sf" | "bronze" | "final" | "other" {
   const s = stage.trim().toLowerCase();
+  if (s.includes("round of 32") || /\br32\b/.test(s)) return "r32";
   if (s.includes("round of") || s.includes("play-in") || /\br16\b|\br12\b/.test(s)) return "r16";
   if (s.includes("quarter") || /\bqf\b|\bqf\d/.test(s)) return "qf";
   if (s.includes("semi") || /\bsf\b|\bsf\d/.test(s)) return "sf";

@@ -14,7 +14,7 @@ import {
   resetMatch,
   deriveActiveServerBase,
   isMatchMatchingStation,
-  getLocalMatchMutationAt,
+  getEffectiveTargetScore,
   computeCourtPositions,
   resolveMatchTeamPlayers,
   getMatchTeamDisplay,
@@ -364,10 +364,6 @@ function Umpire() {
     refreshFromCloud();
 
     const safeRefreshFromCloud = () => {
-      const activeId = selectedMatchIdRef.current;
-      if (activeId && Date.now() - getLocalMatchMutationAt(activeId) < 5000) {
-        return;
-      }
       refreshFromCloud();
     };
 
@@ -405,15 +401,20 @@ function Umpire() {
           const injectedTeamA = (detail.match.teamAName || detail.teamAName || "").trim();
           const injectedTeamB = (detail.match.teamBName || detail.teamBName || "").trim();
           if (existingIdx !== -1) {
+            const prevId = localMatches[existingIdx]!.id;
+            const nextId = detail.match.id || detail.matchId;
             localMatches[existingIdx] = {
               ...localMatches[existingIdx],
               ...detail.match,
-              id: detail.match.id || detail.matchId,
+              id: nextId,
               teamAName: injectedTeamA || localMatches[existingIdx]!.teamAName,
               teamBName: injectedTeamB || localMatches[existingIdx]!.teamBName,
               court: detail.court,
               status: detail.match.status || "scheduled",
             };
+            if (selectedMatchIdRef.current === prevId && prevId !== nextId) {
+              setSelectedMatchId(nextId);
+            }
           } else {
             localMatches.push({
               ...detail.match,
@@ -533,7 +534,11 @@ function Umpire() {
     if (!court || !(FACILITY_COURTS as readonly string[]).includes(court)) return;
     const st = stations[court];
     if (st && (st.status === "live" || st.status === "warmup") && st.currentMatchId) {
-      if (st.currentMatchId !== selectedMatch.id && (selectedMatch.status === "final" || Boolean(selectedMatch.winnerTeam))) {
+      if (
+        st.currentMatchId !== selectedMatch.id &&
+        !isMatchMatchingStation(selectedMatch, st.currentMatchId, court) &&
+        (selectedMatch.status === "final" || Boolean(selectedMatch.winnerTeam))
+      ) {
         setSelectedMatchId(st.currentMatchId);
       }
     }
@@ -544,10 +549,7 @@ function Umpire() {
   ];
 
   return (
-    <div
-      className="min-h-[calc(100vh-4rem)] bg-background pb-20 sm:pb-0"
-      onClickCapture={() => triggerUmpireHaptic(35)}
-    >
+    <div className="min-h-[calc(100vh-4rem)] bg-background pb-20 sm:pb-0">
       {/* Top bar (Hidden on mobile when actively scoring a match to maximize court visibility) */}
       <div className={`${selectedMatch ? "hidden sm:block" : "block"} sm:sticky sm:top-16 z-30 border-b border-border bg-charcoal/95 backdrop-blur`}>
         <div className="mx-auto max-w-6xl px-4 py-3">
@@ -790,7 +792,8 @@ function TournamentDesk({
       return updated;
     });
     try {
-      const updatedMatch = { ...m, officiatedBy: undefined };
+      const latest = getMatches().find((x) => x.id === m.id) ?? m;
+      const updatedMatch = { ...latest, officiatedBy: undefined };
       await dbSaveMatch(updatedMatch);
     } catch {
       // network fallback
@@ -818,12 +821,13 @@ function TournamentDesk({
     }));
     claimCourtStation(court, currentUmpire);
     try {
+      const latest = getMatches().find((x) => x.id === m.id) ?? m;
       await dbUpdateCourtStation(court, {
-        currentMatchId: m.id,
+        currentMatchId: latest.id,
         assignedUmpire: currentUmpire,
       });
       await dbSaveMatch({
-        ...m,
+        ...latest,
         officiatedBy: currentUmpire,
       });
     } catch {
@@ -1436,7 +1440,6 @@ interface CourtDiagramViewProps {
   teamBPos: CourtTeamPosition;
   teamASide?: "left" | "right";
   onToggleSide?: () => void;
-  onChangeCourt?: () => void;
   onSwapBaseA?: () => void;
   onSwapBaseB?: () => void;
   disabled?: boolean;
@@ -1448,7 +1451,6 @@ function CourtDiagramView({
   teamBPos,
   teamASide = "left",
   onToggleSide,
-  onChangeCourt,
   onSwapBaseA,
   onSwapBaseB,
   disabled = false,
@@ -1673,7 +1675,7 @@ function CourtDiagramView({
             )}
           </div>
 
-          {/* Quick Court & Side Buttons */}
+          {/* Quick Side Switch Button */}
           <div className="flex items-center justify-end gap-1.5 flex-shrink-0 pt-0.5 sm:pt-0">
             {onToggleSide && !isFinal && (
               <button
@@ -1687,16 +1689,6 @@ function CourtDiagramView({
                   <path d="M6.99 11L3 15l3.99 4v-3H14v-2H6.99v-3zM21 9l-3.99-4v3H10v2h7.01v3L21 9z" />
                 </svg>
                 <span>Change Side</span>
-              </button>
-            )}
-            {onChangeCourt && (
-              <button
-                type="button"
-                onClick={onChangeCourt}
-                className="inline-flex items-center gap-1 px-2 py-1 text-[0.6rem] font-mono font-bold uppercase tracking-wider bg-charcoal text-sand border border-border hover:border-pickle hover:text-pickle rounded cursor-pointer transition-colors shadow-xs"
-                title="Relocate match to another facility court"
-              >
-                <span>Change Court</span>
               </button>
             )}
           </div>
@@ -1893,8 +1885,6 @@ function UmpireConsole({
     return "left";
   });
 
-  const [showChangeCourtModal, setShowChangeCourtModal] = useState(false);
-  const [showCourtSideModal, setShowCourtSideModal] = useState(false);
 
   // View mode for court selection: "grid-2x2" (default: all 4 courts on 1 mobile screen), "horizontal-rows", or "horizontal-cards"
   const [courtViewLayout, setCourtViewLayout] = useState<"grid-2x2" | "horizontal-rows" | "horizontal-cards">(() => {
@@ -3235,6 +3225,11 @@ function UmpireConsole({
   const isLiveOrScheduled = match.status !== "final";
   const needsToss = match.status !== "final" && !tossDone && !isMatchTossDone(match);
   const s = match.score;
+  const targetScore = getEffectiveTargetScore(match);
+  const isTargetReached =
+    isLiveOrScheduled &&
+    (s.teamAScore >= targetScore || s.teamBScore >= targetScore) &&
+    Math.abs(s.teamAScore - s.teamBScore) >= 2;
   const matchDisplayA = getMatchTeamDisplay(match.teamAName, match.teamAPlayers, "Team A");
   const matchDisplayB = getMatchTeamDisplay(match.teamBName, match.teamBPlayers, "Team B");
   const effectiveUmpire = match.officiatedBy ?? currentUmpire;
@@ -3258,31 +3253,6 @@ function UmpireConsole({
   const leftPlayers = leftDisplay.players;
   const rightPlayers = rightDisplay.players;
 
-  const handleChangeCourt = async (newCourt: FacilityCourt) => {
-    if (!match || match.court === newCourt) {
-      setShowChangeCourtModal(false);
-      setShowCourtSideModal(false);
-      return;
-    }
-    const oldCourt = match.court;
-    if (oldCourt && (FACILITY_COURTS as readonly string[]).includes(oldCourt as string)) {
-      await vacateCourt(oldCourt as FacilityCourt);
-    }
-    onUpdate(match.id, (m) => ({
-      ...m,
-      court: newCourt,
-      officiatedBy: m.officiatedBy ?? currentUmpire,
-    }));
-    if (newCourt) {
-      dbUpdateCourtStation(newCourt, {
-        status: isLiveOrScheduled ? "live" : "standby",
-        currentMatchId: match.id,
-        assignedUmpire: effectiveUmpire,
-      }).catch(() => { });
-    }
-    setShowChangeCourtModal(false);
-    setShowCourtSideModal(false);
-  };
 
   const handlePoint = () => {
     if (!isLiveOrScheduled || needsToss) return;
@@ -3332,6 +3302,7 @@ function UmpireConsole({
       const curActive = m.score.activeServerBase ?? deriveActiveServerBase(m.score);
       return {
         ...m,
+        courtPositionUpdatedAt: Date.now(),
         score: {
           ...m.score,
           serverNumber: m.score.serverNumber === 1 ? 2 : 1,
@@ -3348,6 +3319,7 @@ function UmpireConsole({
       const nextScore = nextServing === "A" ? m.score.teamAScore : m.score.teamBScore;
       return {
         ...m,
+        courtPositionUpdatedAt: Date.now(),
         score: {
           ...m.score,
           servingTeam: nextServing,
@@ -3488,10 +3460,7 @@ function UmpireConsole({
   };
 
   return (
-    <div
-      className="space-y-2.5 sm:space-y-5 max-w-2xl mx-auto"
-      onClickCapture={() => triggerUmpireHaptic(35)}
-    >
+    <div className="space-y-2.5 sm:space-y-5 max-w-2xl mx-auto">
       {/* Coin Toss Overlay */}
       {showToss && (
         <CoinTossOverlay
@@ -3563,16 +3532,10 @@ function UmpireConsole({
         </button>
 
         <div className="flex items-center gap-1.5 flex-wrap justify-end">
-          {/* Court Station Badge & Setup Button */}
-          <button
-            type="button"
-            onClick={() => setShowCourtSideModal(true)}
-            title="Click to change court or player sides"
-            className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-bold uppercase tracking-widest font-mono bg-charcoal border border-border hover:border-pickle text-sand cursor-pointer transition-colors"
-          >
-            <span className="text-pickle font-bold">{match.court}</span>
-            <span className="text-[0.6rem] text-sand/60">SETUP</span>
-          </button>
+          {/* Court Station Badge */}
+          <span className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-bold uppercase tracking-widest font-mono bg-charcoal border border-border text-pickle">
+            {match.court}
+          </span>
 
           {match.stage && (
             <span className="text-xs font-bold uppercase tracking-widest font-mono bg-pickle/20 text-pickle px-2 py-1 border border-pickle/40">
@@ -3656,16 +3619,21 @@ function UmpireConsole({
 
       {/* Compact Score Call Bar (Directly Above 2D Court Diagram) */}
       <div className="surface-card p-0 overflow-hidden border-2 border-pickle/40 bg-charcoal">
-        <div className="bg-pickle/15 px-3 py-1 flex items-center justify-between border-b border-pickle/20 text-xs">
-          <div className="flex items-center gap-1.5">
-            <span className="w-2 h-2 rounded-full bg-pickle animate-pulse" />
-            <span className="text-[0.62rem] font-mono uppercase tracking-widest text-pickle font-bold">
+        <div className="bg-pickle/15 px-3 py-1 flex flex-wrap items-center justify-between gap-1.5 border-b border-pickle/20 text-xs">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <span className="w-2 h-2 rounded-full bg-pickle animate-pulse shrink-0" />
+            <span className="text-[0.62rem] font-mono uppercase tracking-widest text-pickle font-bold truncate">
               {match.status === "final" ? "Final Score" : `Serving: ${servingTeamName}`}
             </span>
           </div>
-          <span className="text-[0.6rem] font-mono text-sand/80 uppercase tracking-wider">
-            {match.court} &middot; {match.stage || "Regulation"}
-          </span>
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-[0.58rem] font-mono font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border border-pickle/40 bg-charcoal/80 text-pickle">
+              Game to {targetScore} (Win by 2){isTargetReached ? " - Target Reached" : ""}
+            </span>
+            <span className="text-[0.6rem] font-mono text-sand/80 uppercase tracking-wider">
+              {match.court} &middot; {match.stage || "Regulation"}
+            </span>
+          </div>
         </div>
 
         {/* Score & 3-Number Call Line */}
@@ -3755,7 +3723,6 @@ function UmpireConsole({
           teamBPos={teamBPos}
           teamASide={teamASide}
           onToggleSide={handleToggleCourtSides}
-          onChangeCourt={() => setShowCourtSideModal(true)}
           onSwapBaseA={handleSwapTeamABase}
           onSwapBaseB={handleSwapTeamBBase}
           disabled={needsToss}
@@ -3790,7 +3757,7 @@ function UmpireConsole({
           </div>
 
           {/* Tactical and Management Controls */}
-          <div className="grid grid-cols-2 sm:grid-cols-6 gap-2 text-xs">
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 text-xs">
             <button
               onClick={handleUndo}
               disabled={s.rallies.length === 0}
@@ -3812,14 +3779,6 @@ function UmpireConsole({
             </button>
 
             <button
-              onClick={() => setShowCourtSideModal(true)}
-              title="Relocate this match to another facility court or flip player sides"
-              className="py-2.5 border border-border bg-charcoal text-sand font-semibold uppercase tracking-wider hover:border-pickle hover:text-pickle transition-colors cursor-pointer"
-            >
-              Change Court
-            </button>
-
-            <button
               onClick={handleSwapServerNumber}
               disabled={needsToss}
               title="Toggle between Server 1 and Server 2"
@@ -3838,7 +3797,11 @@ function UmpireConsole({
 
             <button
               onClick={() => setShowEndConfirm(true)}
-              className="py-2.5 border border-brick/50 bg-brick/10 text-brick font-semibold uppercase tracking-wider hover:bg-brick/20 transition-colors cursor-pointer col-span-2 sm:col-span-1"
+              className={`py-2.5 border font-semibold uppercase tracking-wider transition-colors cursor-pointer col-span-2 sm:col-span-1 ${
+                isTargetReached
+                  ? "border-pickle bg-pickle/20 text-pickle ring-2 ring-pickle/70 animate-pulse font-bold"
+                  : "border-brick/50 bg-brick/10 text-brick hover:bg-brick/20"
+              }`}
             >
               End Match
             </button>
@@ -3860,123 +3823,6 @@ function UmpireConsole({
             >
               Timeout {rightTeamName} (60s)
             </button>
-          </div>
-        </div>
-      )}
-
-      {/* Court & Player Sides Settings Modal (Triggered by Side Button or Change Controls) */}
-      {showCourtSideModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-charcoal/95 backdrop-blur-sm p-4 animate-in fade-in duration-150">
-          <div className="surface-card border-2 border-pickle max-w-md w-full p-5 sm:p-6 space-y-5 bg-card">
-            <div className="flex items-center justify-between border-b border-border pb-3">
-              <div>
-                <span className="text-[0.65rem] uppercase tracking-[0.28em] font-bold text-pickle block">
-                  Umpire Match Setup
-                </span>
-                <h3 className="font-display text-2xl text-foreground mt-0.5">
-                  Court &amp; Player Sides
-                </h3>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowCourtSideModal(false)}
-                className="text-foreground/70 hover:text-foreground text-sm font-mono font-bold px-2.5 py-1.5 border border-border hover:border-pickle rounded cursor-pointer transition-colors"
-                aria-label="Close"
-              >
-                Close
-              </button>
-            </div>
-
-            {/* Option 1: Change Player Sides (Switch Ends) */}
-            <div className="p-3.5 bg-charcoal rounded-lg border border-border/80 space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-mono font-bold uppercase tracking-wider text-sand">
-                  1. Player Court Sides
-                </span>
-                <span className="text-[0.62rem] font-mono px-2 py-0.5 rounded bg-pickle/20 text-pickle border border-pickle/40">
-                  {teamASide === "left" ? "Team A Left / Team B Right" : "Team B Left / Team A Right"}
-                </span>
-              </div>
-              <p className="text-xs text-sand/80">
-                Adjust the 2D court diagram and scoreboard to mirror your physical vantage point from the umpire chair.
-              </p>
-              <div className="flex items-center justify-between gap-2 p-2 bg-black/40 border border-sand/20 rounded text-xs font-mono">
-                <div className="flex-1 text-center min-w-0">
-                  <span className="text-[0.6rem] uppercase tracking-wider text-sand/60 block">Left Side</span>
-                  <span className="font-bold text-pickle truncate block">{leftDisplay.primary}</span>
-                  {leftDisplay.secondary && (
-                    <span className="text-[0.6rem] text-sand/70 font-mono truncate block">
-                      {leftDisplay.secondary}
-                    </span>
-                  )}
-                </div>
-                <span className="text-sand/40 font-bold">&harr;</span>
-                <div className="flex-1 text-center min-w-0">
-                  <span className="text-[0.6rem] uppercase tracking-wider text-sand/60 block">Right Side</span>
-                  <span className="font-bold text-brick truncate block">{rightDisplay.primary}</span>
-                  {rightDisplay.secondary && (
-                    <span className="text-[0.6rem] text-sand/70 font-mono truncate block">
-                      {rightDisplay.secondary}
-                    </span>
-                  )}
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  handleToggleCourtSides();
-                }}
-                disabled={needsToss}
-                className="w-full py-2.5 bg-charcoal border-2 border-pickle text-sand font-mono font-bold text-xs uppercase tracking-wider hover:bg-pickle hover:text-sand transition-all cursor-pointer shadow-sm flex items-center justify-center gap-2"
-              >
-                <svg className="w-3.5 h-3.5 fill-current" viewBox="0 0 24 24">
-                  <path d="M6.99 11L3 15l3.99 4v-3H14v-2H6.99v-3zM21 9l-3.99-4v3H10v2h7.01v3L21 9z" />
-                </svg>
-                Switch Ends ({teamASide === "left" ? "Flip to B | A" : "Flip to A | B"})
-              </button>
-            </div>
-
-            {/* Option 2: Change Court Facility */}
-            <div className="p-3.5 bg-charcoal rounded-lg border border-border/80 space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-mono font-bold uppercase tracking-wider text-sand">
-                  2. Court Facility
-                </span>
-                <span className="text-[0.62rem] font-mono px-2 py-0.5 rounded bg-sand/20 text-sand border border-sand/30 font-bold">
-                  Current: {match.court}
-                </span>
-              </div>
-              <p className="text-xs text-sand/80">
-                Relocate this live match to another facility court station:
-              </p>
-              <div className="grid grid-cols-2 gap-2">
-                {FACILITY_COURTS.map((c) => (
-                  <button
-                    key={c}
-                    type="button"
-                    onClick={() => {
-                      handleChangeCourt(c);
-                    }}
-                    className={`py-2 px-3 rounded font-mono font-bold text-xs uppercase tracking-wider border-2 transition-all cursor-pointer text-center ${match.court === c
-                        ? "border-pickle bg-pickle text-sand shadow-sm"
-                        : "border-border bg-card text-foreground hover:border-pickle hover:text-pickle"
-                      }`}
-                  >
-                    {c} {match.court === c ? "(Current)" : ""}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="pt-1 flex justify-end">
-              <button
-                type="button"
-                onClick={() => setShowCourtSideModal(false)}
-                className="w-full sm:w-auto px-5 py-2 text-xs font-bold uppercase tracking-widest bg-pickle text-sand hover:opacity-90 transition-opacity cursor-pointer text-center"
-              >
-                Done
-              </button>
-            </div>
           </div>
         </div>
       )}
