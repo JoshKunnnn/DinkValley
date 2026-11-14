@@ -4073,6 +4073,7 @@ function QuickMatchModal({
   const [teamBPlayer1, setTeamBPlayer1] = useState("");
   const [teamBPlayer2, setTeamBPlayer2] = useState("");
   const [matchStage, setMatchStage] = useState<string>("");
+  const [matchCategoryId, setMatchCategoryId] = useState<string>("");
   const [startImmediately, setStartImmediately] = useState(true);
   const [isManualCustom, setIsManualCustom] = useState(false);
 
@@ -4091,6 +4092,7 @@ function QuickMatchModal({
     setSelectedMatchId(matchId);
     if (!matchId) {
       setMatchStage("");
+      setMatchCategoryId("");
       return;
     }
     const target = availableMatches.find((m) => m.id === matchId);
@@ -4102,6 +4104,7 @@ function QuickMatchModal({
       setTeamBPlayer1(target.teamBPlayers[0] || "");
       setTeamBPlayer2(target.teamBPlayers[1] || "");
       setMatchStage(target.stage || "");
+      setMatchCategoryId(target.categoryId || "");
       if (target.tournamentSlug) {
         setSelectedTournament(target.tournamentSlug);
       }
@@ -4132,6 +4135,8 @@ function QuickMatchModal({
       {
         id: matchId,
         tournamentSlug: selectedTournament || undefined,
+        categoryId: matchCategoryId || undefined,
+        stage: matchStage || undefined,
         teamAName: teamAName.trim(),
         teamAPlayers: teamAPlayers.length > 0 ? teamAPlayers : [teamAName.trim()],
         teamBName: teamBName.trim(),
@@ -4182,6 +4187,7 @@ function QuickMatchModal({
                 if (!isManualCustom) {
                   setSelectedMatchId("");
                   setMatchStage("");
+                  setMatchCategoryId("");
                 }
               }}
               className="text-[0.65rem] font-bold uppercase tracking-wider text-pickle hover:underline cursor-pointer"
